@@ -433,7 +433,7 @@ p {
 .page-hero {
   background: var(--ink);
   color: var(--white);
-  padding: 64px 0 48px;
+  padding: 52px 0 40px;
 }
 
 .page-hero h1 {
@@ -530,6 +530,12 @@ textarea {
 }
 
 @media (max-width: 900px) {
+  .topbar .container {
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.78rem;
+  }
+
   .menu-toggle {
     display: block;
   }
