@@ -26,3 +26,7 @@ Then open `http://localhost:4173`.
 Upload the files in this repository (except `.git`) to the web root of `renocon.ca`, replacing the current WordPress install. After that, the domain should serve these pages with no login and no CMS.
 
 The contact form opens a message to `info@renocon.ca` in the visitor’s email app.
+
+## Ecommi admin
+
+Internal administration lives in `ecommi-admin/`. Deploy that folder to `ecommi.com`, not to the public Renocon site. See `ecommi-admin/README.md`.

@@ -1,0 +1,4 @@
+DirectoryIndex index.php login.php
+<FilesMatch "\.(sqlite|key)$">
+  Require all denied
+</FilesMatch>
