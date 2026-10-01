@@ -1,0 +1,5 @@
+.DS_Store
+Thumbs.db
+ecommi-admin/data/*.sqlite
+ecommi-admin/data/*.key
+ecommi-admin/data/*.csv
