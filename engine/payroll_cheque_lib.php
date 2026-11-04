@@ -20,6 +20,131 @@ function pcr_payment_method($raw): string
     return in_array($raw, pcr_payment_methods(), true) ? $raw : 'E-Transfer';
 }
 
+function pcr_ymd($raw): string
+{
+    $raw = substr(trim((string)$raw), 0, 10);
+    return preg_match('/^\d{4}-\d{2}-\d{2}$/', $raw) ? $raw : '';
+}
+
+/** How one stored payment should read on Payroll Center. */
+function pcr_payment_method_label(string $method, ?string $refNo = null, $chequeNumber = null): string
+{
+    $method = trim($method);
+    $key = strtolower($method);
+    if ($key === 'cheque') {
+        $num = (int)$chequeNumber;
+        $ref = trim((string)$refNo);
+        if ($num <= 0 && preg_match('/^(?:CHQ-)?(\d+)$/i', $ref, $m)) {
+            $num = (int)$m[1];
+        }
+        if ($num > 0) {
+            return 'Cheque #' . $num;
+        }
+        if ($ref !== '' && !preg_match('/^B\d+$/', $ref) && !preg_match('/^TXN-/i', $ref)) {
+            return 'Cheque #' . $ref;
+        }
+        return 'Cheque';
+    }
+    if ($key === 'e-transfer' || $key === 'etransfer' || $key === 'e transfer') {
+        return 'e-Transfer';
+    }
+    if ($key === 'eft' || $key === 'direct deposit' || $key === 'direct-deposit') {
+        return 'EFT';
+    }
+    if ($key === 'cash') {
+        return 'Cash';
+    }
+    return $method;
+}
+
+/**
+ * Payment type for a row. Recorded payments win. The employee EFT flag is
+ * used only when nothing has been recorded.
+ */
+function pcr_payment_type_label(array $payments, bool $eftNoCheque): string
+{
+    $labels = [];
+    foreach ($payments as $p) {
+        if (!is_array($p) || !empty($p['reversed_at'])) {
+            continue;
+        }
+        $label = pcr_payment_method_label(
+            (string)($p['method'] ?? ''),
+            isset($p['ref_no']) ? (string)$p['ref_no'] : null,
+            $p['cheque_number'] ?? null
+        );
+        if ($label === '') {
+            $label = 'Payment';
+        }
+        if (!in_array($label, $labels, true)) {
+            $labels[] = $label;
+        }
+    }
+    if ($labels) {
+        return implode(' · ', $labels);
+    }
+    return $eftNoCheque ? 'EFT · no cheque' : '';
+}
+
+/**
+ * Payments that belong to one finalized line. A line's own payroll_id matches
+ * directly. The same user, store, and work date also match the master that
+ * pcr_apply_payment uses when the line never stored that id.
+ */
+function pcr_line_payment_rows(array $line, array $payments): array
+{
+    $pid = (int)($line['payroll_id'] ?? 0);
+    $uid = (int)($line['user_id'] ?? 0);
+    $sid = (int)($line['site_id'] ?? 0);
+    $day = pcr_ymd($line['work_date'] ?? '');
+    $out = [];
+    $seen = [];
+    foreach ($payments as $p) {
+        if (!is_array($p)) {
+            continue;
+        }
+        $payMaster = (int)($p['payroll_id'] ?? 0);
+        $hit = ($pid > 0 && $payMaster === $pid);
+        if (!$hit && $uid > 0 && (int)($p['user_id'] ?? 0) === $uid && (int)($p['site_id'] ?? 0) === $sid && $day !== '') {
+            $start = pcr_ymd($p['pay_period_start'] ?? '');
+            $end = pcr_ymd($p['pay_period_end'] ?? '');
+            $hit = ($start !== '' && $end !== '' && $day >= $start && $day <= $end);
+        }
+        if (!$hit) {
+            continue;
+        }
+        $id = (int)($p['id'] ?? 0);
+        $key = $id > 0 ? ('id' . $id) : md5((string)json_encode($p));
+        if (isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $out[] = $p;
+    }
+    return $out;
+}
+
+function pcr_lines_payment_label(array $lines, array $payments, bool $eftNoCheque): string
+{
+    $rows = [];
+    $seen = [];
+    foreach ($lines as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        foreach (pcr_line_payment_rows($line, $payments) as $p) {
+            $id = (int)($p['id'] ?? 0);
+            $key = $id > 0 ? ('id' . $id) : md5((string)json_encode($p));
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $rows[] = $p;
+        }
+    }
+    return pcr_payment_type_label($rows, $eftNoCheque);
+}
+
 /** A real pay date, or today when the caller does not supply one. */
 function pcr_coerce_payment_date(?string $raw): string
 {
@@ -714,6 +839,36 @@ function pcr_active_by_line(PDO $pdo, int $orgId, array $lineIds): array
         }
     }
     return $out;
+}
+
+/**
+ * Non-reversed payments whose master overlaps this window, or whose
+ * payroll_id is already on one of the lines being shown.
+ */
+function pcr_fetch_period_payments(PDO $pdo, int $orgId, string $from, string $to, array $payrollIds = []): array
+{
+    pcr_ensure($pdo);
+    $ids = array_values(array_unique(array_filter(array_map('intval', $payrollIds))));
+    $params = [$orgId, $to, $from];
+    $extra = '';
+    if ($ids) {
+        $extra = ' OR p.payroll_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ')';
+        foreach ($ids as $id) {
+            $params[] = $id;
+        }
+    }
+    $st = $pdo->prepare(
+        "SELECT p.id, p.payroll_id, p.method, p.ref_no, c.cheque_number,
+                m.user_id, m.site_id, m.pay_period_start, m.pay_period_end
+         FROM payroll_payments p
+         INNER JOIN payroll_masters m ON m.id = p.payroll_id AND m.org_id = ?
+         LEFT JOIN payroll_cheques c ON c.id = p.cheque_id
+         WHERE p.reversed_at IS NULL
+           AND ((m.pay_period_start <= ? AND m.pay_period_end >= ?)$extra)
+         ORDER BY p.id ASC"
+    );
+    $st->execute($params);
+    return $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
 function pcr_block_send_back(float $paid, ?array $activeCheque): ?string

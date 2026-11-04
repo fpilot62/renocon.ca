@@ -89,6 +89,41 @@ function pstat_list_periods(string $mode, string $anchor, string $today): array
     return array_reverse($out);
 }
 
+function pstat_accept_period(string $start, string $end, string $mode, string $anchor): ?array
+{
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end)) {
+        return null;
+    }
+    [$checkStart, $checkEnd] = pstat_window($start, $mode, $anchor);
+    if ($checkStart !== $start || $checkEnd !== $end) {
+        return null;
+    }
+    return [$start, $end];
+}
+
+/**
+ * Period to open. A posted save wins, then ?period=YYYY-MM-DD|YYYY-MM-DD,
+ * then from_date/to_date, then the period that contains $today.
+ */
+function pstat_requested_period(array $query, array $body, string $mode, string $anchor, string $today): array
+{
+    $candidates = [
+        [(string)($body['period_start'] ?? ''), (string)($body['period_end'] ?? '')],
+    ];
+    $period = trim((string)($query['period'] ?? $body['period'] ?? ''));
+    if (preg_match('/^(\d{4}-\d{2}-\d{2})\|(\d{4}-\d{2}-\d{2})$/', $period, $m)) {
+        $candidates[] = [$m[1], $m[2]];
+    }
+    $candidates[] = [(string)($query['from_date'] ?? ''), (string)($query['to_date'] ?? '')];
+    foreach ($candidates as $pair) {
+        $ok = pstat_accept_period($pair[0], $pair[1], $mode, $anchor);
+        if ($ok) {
+            return $ok;
+        }
+    }
+    return pstat_window($today, $mode, $anchor);
+}
+
 /**
  * Amount this save should record.
  * paid = the remaining net. partial = the typed amount, rejected when it
@@ -277,13 +312,21 @@ function pstat_save_batch(PDO $pdo, int $orgId, string $start, string $end, int 
             $ref = substr($ref, 0, 40);
             $payId = 0;
             $got = 0.0;
+            $method = trim((string)($plan['method'] ?? ''));
+            if ($method !== '' && !in_array($method, pcr_payment_methods(), true)) {
+                $method = pcr_payment_method($method);
+            }
             if ((float)$plan['amount'] > 0.009 && (int)$plan['finalized_id'] > 0) {
+                if (!in_array($method, pcr_payment_methods(), true)) {
+                    $who = trim((string)($plan['employee_name'] ?? ''));
+                    throw new RuntimeException(($who !== '' ? $who . ': ' : '') . 'Choose Cash, Cheque, or e-Transfer.');
+                }
                 $newPayId = null;
                 $got = pcr_apply_payment(
                     $pdo,
                     (int)$plan['finalized_id'],
                     (float)$plan['amount'],
-                    (string)$plan['method'],
+                    $method,
                     $orgId,
                     $newPayId,
                     $ref,
@@ -304,7 +347,7 @@ function pstat_save_batch(PDO $pdo, int $orgId, string $start, string $end, int 
                 substr((string)($plan['employee_name'] ?? ''), 0, 160),
                 substr((string)($plan['site_name'] ?? ''), 0, 160),
                 $got,
-                pcr_payment_method($plan['method'] ?? ''),
+                $method,
                 $plan['paid_date'] ?? null,
                 substr(trim((string)($plan['reference'] ?? '')), 0, 64),
                 substr(trim((string)($plan['note'] ?? '')), 0, 255),
@@ -421,6 +464,13 @@ function pstat_batch_history(PDO $pdo, int $orgId, int $limit = 40): array
     return $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
+/** Add-name method. Blank stays blank — it is not treated as EFT or e-Transfer. */
+function pstat_added_method($raw): string
+{
+    $raw = trim((string)$raw);
+    return in_array($raw, pcr_payment_methods(), true) ? $raw : '';
+}
+
 function pstat_added_is_blank(array $row): bool
 {
     $name = trim((string)($row['name'] ?? ''));
@@ -498,9 +548,64 @@ function pstat_review_added(array $row, array $nameToId, array $userNames, array
     ];
 }
 
+/**
+ * Values for NOT NULL columns with no default that the caller did not set.
+ * Legacy tables such as users and payroll_time reject the insert otherwise.
+ * Character columns get ''.
+ */
+function pstat_blank_required_value(array $col)
+{
+    $type = strtolower((string)($col['Type'] ?? ''));
+    if (preg_match('/^(tinyint|smallint|mediumint|bigint|integer|int|decimal|numeric|float|double|real|bit|bool|boolean)\b/', $type)) {
+        return 0;
+    }
+    if (preg_match('/^(datetime|timestamp)\b/', $type)) {
+        return '1970-01-01 00:00:00';
+    }
+    if (preg_match('/^time\b/', $type)) {
+        return '00:00:00';
+    }
+    if (preg_match('/^year\b/', $type)) {
+        return '1970';
+    }
+    if (preg_match('/^date\b/', $type)) {
+        return '1970-01-01';
+    }
+    return '';
+}
+
+function pstat_missing_required_values(array $columns, array $data): array
+{
+    $extra = [];
+    foreach ($columns as $col) {
+        if (!is_array($col)) {
+            continue;
+        }
+        $field = (string)($col['Field'] ?? '');
+        if ($field === '' || array_key_exists($field, $data)) {
+            continue;
+        }
+        if (strtoupper((string)($col['Null'] ?? 'YES')) !== 'NO') {
+            continue;
+        }
+        if (array_key_exists('Default', $col) && $col['Default'] !== null) {
+            continue;
+        }
+        $columnExtra = strtolower((string)($col['Extra'] ?? ''));
+        if (strpos($columnExtra, 'auto_increment') !== false || strpos($columnExtra, 'generated') !== false) {
+            continue;
+        }
+        $extra[$field] = pstat_blank_required_value($col);
+    }
+    return $extra;
+}
+
 function pstat_insert_known(PDO $pdo, string $table, array $data): int
 {
     $cols = $pdo->query('SHOW COLUMNS FROM `' . str_replace('`', '', $table) . '`')->fetchAll(PDO::FETCH_ASSOC);
+    foreach (pstat_missing_required_values($cols, $data) as $field => $val) {
+        $data[$field] = $val;
+    }
     $have = [];
     foreach ($cols as $col) {
         $have[$col['Field']] = true;
@@ -545,6 +650,9 @@ function pstat_create_user(PDO $pdo, int $orgId, string $name): int
         'email' => '',
         'comments' => 'pstat-manual-name',
         'Notes' => 'Added from Payment Status',
+        'Remarks' => '',
+        'remarks' => '',
+        'eft_no_cheque' => 0,
     ]);
     if ($id <= 0) {
         throw new RuntimeException('Could not add ' . $name . '.');
@@ -624,6 +732,8 @@ function pstat_materialize_manual(PDO $pdo, int $orgId, array $manual, string $s
         'category' => 'Manual',
         'pay_type' => 'Manual',
         'comments' => 'pstat-manual',
+        'Remarks' => '',
+        'remarks' => '',
     ]);
     if ($fid <= 0) {
         throw new RuntimeException('Could not add a payment line for ' . $userName . '.');
