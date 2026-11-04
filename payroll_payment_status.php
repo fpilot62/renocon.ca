@@ -75,19 +75,7 @@ try {
 $periodMode = function_exists('sip_org_pay_period_mode') ? sip_org_pay_period_mode($pdo, $orgId) : 'semi_monthly';
 $anchor = function_exists('sip_org_pay_period_anchor') ? sip_org_pay_period_anchor($pdo, $orgId) : '2024-01-01';
 $periods = pstat_list_periods($periodMode, $anchor, date('Y-m-d'));
-$todayWindow = pstat_window(date('Y-m-d'), $periodMode, $anchor);
-
-$startIn = (string)($_POST['period_start'] ?? $_GET['from_date'] ?? '');
-$endIn = (string)($_POST['period_end'] ?? $_GET['to_date'] ?? '');
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $startIn) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $endIn)) {
-    $startIn = $todayWindow[0];
-    $endIn = $todayWindow[1];
-}
-[$checkStart, $checkEnd] = pstat_window($startIn, $periodMode, $anchor);
-if ($checkStart !== $startIn || $checkEnd !== $endIn) {
-    $startIn = $todayWindow[0];
-    $endIn = $todayWindow[1];
-}
+[$startIn, $endIn] = pstat_requested_period($_GET, $_POST, $periodMode, $anchor, date('Y-m-d'));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ps_require_csrf();
@@ -96,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 function pstat_flash(int $orgId, string $start, string $end, string $text): void
 {
     $_SESSION['pstat_flash'] = $text;
-    header('Location: payroll_payment_status.php?org_id=' . $orgId . '&from_date=' . urlencode($start) . '&to_date=' . urlencode($end));
+    header('Location: payroll_payment_status.php?org_id=' . $orgId . '&period=' . urlencode($start . '|' . $end) . '&from_date=' . urlencode($start) . '&to_date=' . urlencode($end));
     exit;
 }
 
@@ -275,12 +263,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_payment_status']
             $blocked = true;
             continue;
         }
-        $occupied[$review['slot']] = true;
         $payDate = $review['pay_amount'] > 0.009 ? pcr_valid_payment_date((string)($added['paid_date'] ?? '')) : $startIn;
+        $addedMethod = pstat_added_method($added['method'] ?? '');
+        if ($review['pay_amount'] > 0.009 && $addedMethod === '') {
+            $warnings[] = $review['employee_name'] . ': choose Cash, Cheque, or e-Transfer.';
+            $blocked = true;
+            continue;
+        }
+        $occupied[$review['slot']] = true;
         $plans[] = [
             'finalized_id' => 0,
             'amount' => $review['pay_amount'],
-            'method' => pcr_payment_method($added['method'] ?? ''),
+            'method' => $addedMethod,
             'paid_date' => $payDate ?: $startIn,
             'reference' => (string)($added['reference'] ?? ''),
             'note' => (string)($added['note'] ?? ''),
@@ -572,7 +566,8 @@ $today = date('Y-m-d');
                         <td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-amount" name="added[<?= $addedIndex ?>][amount]" value="<?= htmlspecialchars((string)($added['amount'] ?? '')) ?>" <?= $aStatus === 'partial' ? '' : 'readonly' ?>></td>
                         <td>
                             <select class="form-control form-control-sm mini" name="added[<?= $addedIndex ?>][method]">
-                                <?php $aMethod = pcr_payment_method($added['method'] ?? 'E-Transfer'); ?>
+                                <?php $aMethod = pstat_added_method($added['method'] ?? ''); ?>
+                                <option value="" <?= $aMethod === '' ? 'selected' : '' ?>>Choose</option>
                                 <?php foreach (pcr_payment_methods() as $methodOpt): ?>
                                     <option <?= $aMethod === $methodOpt ? 'selected' : '' ?>><?= htmlspecialchars($methodOpt) ?></option>
                                 <?php endforeach; ?>
@@ -752,7 +747,7 @@ $today = date('Y-m-d');
             '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-owed" name="added['+idx+'][owed]"></td>'+
             '<td><select class="form-control form-control-sm added-status" name="added['+idx+'][status]"><option value="unpaid">Unpaid</option><option value="paid">Paid in full</option><option value="partial">Partially paid</option></select></td>'+
             '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-amount" name="added['+idx+'][amount]" readonly></td>'+
-            '<td><select class="form-control form-control-sm mini" name="added['+idx+'][method]"><option>E-Transfer</option><option>Cheque</option><option>Cash</option></select></td>'+
+            '<td><select class="form-control form-control-sm mini" name="added['+idx+'][method]"><option value="">Choose</option><option>Cash</option><option>Cheque</option><option>E-Transfer</option></select></td>'+
             '<td><input type="date" class="form-control form-control-sm" name="added['+idx+'][paid_date]" value="<?= htmlspecialchars($today) ?>"></td>'+
             '<td><input type="text" class="form-control form-control-sm" name="added['+idx+'][reference]" maxlength="64"></td>'+
             '<td><input type="text" class="form-control form-control-sm" name="added['+idx+'][note]" maxlength="255"></td>'+
@@ -788,6 +783,11 @@ $today = date('Y-m-d');
             if (!(owed > 0)) { problems.push(name + ': enter the amount owed.'); return; }
             if (row.querySelector('select[name$="[site_id]"]').value === '0') { problems.push(name + ': choose a store.'); return; }
             if (status === 'paid') amt = owed;
+            var methodSel = row.querySelector('select[name$="[method]"]');
+            if (status !== 'unpaid' && amt > 0.009 && methodSel && !methodSel.value) {
+                problems.push(name + ': choose Cash, Cheque, or e-Transfer.');
+                return;
+            }
             if (status !== 'unpaid' && amt > owed + 0.009) {
                 problems.push(name + ': $' + amt.toFixed(2) + ' is more than the $' + owed.toFixed(2) + ' owed.');
                 return;

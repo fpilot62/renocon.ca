@@ -99,6 +99,95 @@ check('new name cannot be paid more than owed', !empty($tooMuch['warning']) && e
 check('historical pay date is accepted', pcr_valid_payment_date('2026-09-05') === '2026-09-05');
 check('ancient pay date is rejected', pcr_valid_payment_date('1990-01-01') === null);
 
+$cashPay = [[
+    'id' => 9,
+    'payroll_id' => 44,
+    'method' => 'Cash',
+    'ref_no' => 'B3',
+    'cheque_number' => null,
+    'user_id' => 7,
+    'site_id' => 2,
+    'pay_period_start' => '2026-09-01',
+    'pay_period_end' => '2026-09-15',
+]];
+$cashLine = ['line_id' => 1, 'payroll_id' => 0, 'user_id' => 7, 'site_id' => 2, 'work_date' => '2026-09-04'];
+check('cash payment shows Cash even when the EFT flag is on', pcr_lines_payment_label([$cashLine], $cashPay, true) === 'Cash');
+check('no recorded payment falls back to EFT', pcr_lines_payment_label([$cashLine], [], true) === 'EFT · no cheque');
+check('no recorded payment and no EFT flag is blank', pcr_lines_payment_label([$cashLine], [], false) === '');
+$otherPerson = ['line_id' => 2, 'payroll_id' => 0, 'user_id' => 8, 'site_id' => 2, 'work_date' => '2026-09-04'];
+check('another employee does not inherit the cash payment', pcr_lines_payment_label([$otherPerson], $cashPay, false) === '');
+$linked = ['line_id' => 3, 'payroll_id' => 44, 'user_id' => 7, 'site_id' => 2, 'work_date' => '2026-09-04'];
+check('payment on the line payroll id is Cash', pcr_lines_payment_label([$linked], $cashPay, true) === 'Cash');
+check('e-transfer label', pcr_payment_method_label('E-Transfer') === 'e-Transfer');
+check('stored EFT method is not the no-cheque flag', pcr_payment_type_label([['method' => 'EFT']], true) === 'EFT');
+check('cheque number from the register', pcr_payment_method_label('Cheque', 'CHQ-2611041', 2611041) === 'Cheque #2611041');
+check('cheque number typed as the reference', pcr_payment_method_label('Cheque', '1042', null) === 'Cheque #1042');
+check('batch reference is not shown as a cheque number', pcr_payment_method_label('Cheque', 'B12', null) === 'Cheque');
+$mixed = pcr_payment_type_label([
+    ['method' => 'Cash', 'ref_no' => 'B1'],
+    ['method' => 'E-Transfer', 'ref_no' => ''],
+    ['method' => 'Cash', 'ref_no' => 'B2'],
+], false);
+check('distinct methods stay in order', $mixed === 'Cash · e-Transfer');
+check('reversed payment is ignored', pcr_payment_type_label([['method' => 'Cash', 'reversed_at' => '2026-09-16 00:00:00']], true) === 'EFT · no cheque');
+
+$sep = pstat_requested_period(['period' => '2026-09-01|2026-09-15'], [], 'semi_monthly', '2024-01-01', '2026-11-04');
+check('period query opens that window', $sep === ['2026-09-01', '2026-09-15']);
+$stale = pstat_requested_period(
+    ['period' => '2026-09-01|2026-09-15', 'from_date' => '2026-11-01', 'to_date' => '2026-11-15'],
+    [],
+    'semi_monthly',
+    '2024-01-01',
+    '2026-11-04'
+);
+check('period query wins over a stale from/to', $stale === ['2026-09-01', '2026-09-15']);
+$fromTo = pstat_requested_period(['from_date' => '2026-09-16', 'to_date' => '2026-09-30'], [], 'semi_monthly', '2024-01-01', '2026-11-04');
+check('from/to still opens that period', $fromTo === ['2026-09-16', '2026-09-30']);
+$current = pstat_requested_period([], [], 'semi_monthly', '2024-01-01', '2026-11-04');
+check('missing period opens the current window', $current === ['2026-11-01', '2026-11-15']);
+$posted = pstat_requested_period(
+    ['period' => '2026-09-01|2026-09-15'],
+    ['period_start' => '2026-10-01', 'period_end' => '2026-10-15'],
+    'semi_monthly',
+    '2024-01-01',
+    '2026-11-04'
+);
+check('posted period wins over the query', $posted === ['2026-10-01', '2026-10-15']);
+$badPeriod = pstat_requested_period(['period' => '2026-09-02|2026-09-15'], [], 'semi_monthly', '2024-01-01', '2026-11-04');
+check('a period that is not a pay window falls back to current', $badPeriod === ['2026-11-01', '2026-11-15']);
+
+check('add-name method stays blank', pstat_added_method('') === '' && pstat_added_method('EFT') === '');
+check('add-name keeps an explicit method', pstat_added_method('Cash') === 'Cash' && pstat_added_method(' Cheque ') === 'Cheque');
+
+$timeCols = [
+    ['Field' => 'id', 'Null' => 'NO', 'Default' => null, 'Extra' => 'auto_increment', 'Type' => 'int(11)'],
+    ['Field' => 'user_id', 'Null' => 'NO', 'Default' => null, 'Extra' => '', 'Type' => 'int(11)'],
+    ['Field' => 'Remarks', 'Null' => 'NO', 'Default' => null, 'Extra' => '', 'Type' => 'varchar(255)'],
+    ['Field' => 'note', 'Null' => 'YES', 'Default' => null, 'Extra' => '', 'Type' => 'varchar(255)'],
+    ['Field' => 'active', 'Null' => 'NO', 'Default' => '1', 'Extra' => '', 'Type' => 'tinyint(1)'],
+];
+$timeFill = pstat_missing_required_values($timeCols, ['user_id' => 5]);
+check('payroll_time Remarks is supplied as blank', array_key_exists('Remarks', $timeFill) && $timeFill['Remarks'] === '');
+check('auto increment is not invented', !array_key_exists('id', $timeFill));
+check('nullable note is not invented', !array_key_exists('note', $timeFill));
+check('column with a default is not invented', !array_key_exists('active', $timeFill));
+check('provided user id is not replaced', !array_key_exists('user_id', $timeFill));
+$userCols = [
+    ['Field' => 'Remarks', 'Null' => 'NO', 'Default' => null, 'Extra' => '', 'Type' => 'text'],
+    ['Field' => 'hours', 'Null' => 'NO', 'Default' => null, 'Extra' => '', 'Type' => 'decimal(8,2)'],
+];
+$userFill = pstat_missing_required_values($userCols, []);
+check('users Remarks is blank and a missing number is zero', ($userFill['Remarks'] ?? null) === '' && ($userFill['hours'] ?? null) === 0);
+
+$statusLib = file_get_contents(__DIR__ . '/../engine/payroll_payment_status_lib.php');
+check('new names are not marked EFT', strpos($statusLib, "'eft_no_cheque' => 0") !== false);
+check('user insert sets Remarks to blank', strpos($statusLib, "'Remarks' => ''") !== false);
+check('payment status reads the period query', strpos($page, 'pstat_requested_period') !== false);
+$addSnippetAt = strpos($page, 'name="added[\'+idx+\'][method]"');
+$addSnippet = $addSnippetAt === false ? '' : substr($page, $addSnippetAt, 240);
+check('add-name row does not default the method to E-Transfer', strpos($addSnippet, '<option value="">Choose</option>') !== false && strpos($addSnippet, '<option>E-Transfer</option><option>Cheque') === false);
+check('ledger uses recorded payment methods', strpos($ledger, 'pcr_lines_payment_label') !== false && strpos($ledger, 'class="pay-type"') !== false);
+
 if ($fail > 0) {
     echo "$fail failed\n";
     exit(1);

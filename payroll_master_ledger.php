@@ -612,6 +612,15 @@ $cheques_by_user = [];
 foreach ($period_cheques as $c) {
     $cheques_by_user[(int)$c['user_id']][] = $c;
 }
+$payroll_ids_on_page = [];
+foreach ($sites_tree as $siteRow) {
+    foreach ($siteRow['emps'] as $empRow) {
+        foreach ($empRow['lines'] as $ln) {
+            $payroll_ids_on_page[] = (int)($ln['payroll_id'] ?? 0);
+        }
+    }
+}
+$period_payments = pcr_fetch_period_payments($pdo, $user_org_id, $from_date, $to_date, $payroll_ids_on_page);
 $ledger_flash = $_SESSION['ledger_flash'] ?? '';
 unset($_SESSION['ledger_flash']);
 ?>
@@ -658,6 +667,7 @@ unset($_SESSION['ledger_flash']);
         .eft-badge.is-on .eft-knob { background: #93c5fd; }
         .eft-badge .eft-knob i { position: absolute; top: 1px; left: 1px; width: 8px; height: 8px; border-radius: 50%; background: #fff; }
         .eft-badge.is-on .eft-knob i { left: 7px; }
+        .pay-type { display: inline-block; margin: 2px 0 2px 8px; background: #ecfdf5; color: #065f46; border: 1px solid #6ee7b7; border-radius: 999px; padding: 1px 8px; font-size: 9px; font-weight: 800; letter-spacing: .2px; vertical-align: middle; }
         .chq-pill { display: inline-block; margin: 2px 4px 0 0; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 800; }
         .chq-issued { background: #fef3c7; color: #92400e; }
         .chq-paid { background: #dcfce7; color: #166534; }
@@ -680,7 +690,7 @@ unset($_SESSION['ledger_flash']);
                 <h4 class="font-weight-bold text-dark mb-0">Payroll Center — Employee &amp; Employer Report</h4>
                 <p class="text-muted small mb-2">One stored-value report for hours, gross, employee deductions, employer contributions, documents, payments and tax actions.</p>
                 <?php if ($sess_user_level <= 20): ?>
-                <a href="payroll_payment_status.php?org_id=<?=$user_org_id?>&from_date=<?=urlencode($from_date)?>&to_date=<?=urlencode($to_date)?>" class="btn btn-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-list-check"></i> Payment Status</a>
+                <a href="payroll_payment_status.php?org_id=<?=$user_org_id?>&period=<?=urlencode($from_date.'|'.$to_date)?>&from_date=<?=urlencode($from_date)?>&to_date=<?=urlencode($to_date)?>" class="btn btn-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-list-check"></i> Payment Status</a>
                 <?php endif; ?>
                 <a href="manual_pay_entry.php" class="btn btn-outline-success font-weight-bold mr-2 mb-1" style="font-size:12px;" id="manualPayLink"><i class="fa fa-hand-holding-usd"></i> Manual Pay / Adjustments</a>
                 <a href="generate_stat_shifts.php" class="btn btn-outline-warning font-weight-bold mr-2 mb-1" style="font-size:11px;"><i class="fa fa-calendar-check"></i> Stat Pay Preview</a>
@@ -979,10 +989,17 @@ function ledgerOnOrgChange(sel){
                                     <span class="chev" id="chev-<?=$eid?>" onclick="toggleRow('<?=$eid?>')">&#9656;</span>
                                     <i class="fa fa-user" style="color:#94a3b8;"></i> <?=htmlspecialchars($emp['name'])?>
                                     <span class="sub"> · <?=count($emp['lines'])?> shift(s)<?php if ($emp['t_travel_h'] > 0): ?> · <i class="fa fa-car" style="color:#b45309;"></i> <?=number_format($emp['t_travel_h'],2)?>h travel<?php endif; ?></span>
-                                    <?php $eftOn = !empty($eft_flags[(int)$emp['user_id']]); ?>
+                                    <?php
+                                        $eftOn = !empty($eft_flags[(int)$emp['user_id']]);
+                                        $empPayLabel = pcr_lines_payment_label($emp['lines'], $period_payments, false);
+                                    ?>
+                                    <?php if ($empPayLabel !== ''): ?>
+                                        <span class="pay-type" title="Payment type"><?=htmlspecialchars($empPayLabel)?></span>
+                                    <?php else: ?>
                                     <button type="button" class="eft-badge<?= $eftOn ? ' is-on' : '' ?>" data-user="<?=(int)$emp['user_id']?>" aria-pressed="<?= $eftOn ? 'true' : 'false' ?>" title="Direct deposit. No paper cheque. This is not a row selector." onclick="toggleEft(this, event)">
                                         <span class="eft-knob"><i></i></span> EFT · no cheque
                                     </button>
+                                    <?php endif; ?>
                                     <?php foreach ($cheques_by_user[(int)$emp['user_id']] ?? [] as $uc): ?>
                                         <span class="chq-pill chq-<?= htmlspecialchars((string)$uc['status']) ?>">Chq <?= (int)$uc['cheque_number'] ?> <?= htmlspecialchars((string)$uc['status']) ?></span>
                                     <?php endforeach; ?>
@@ -1034,7 +1051,7 @@ function ledgerOnOrgChange(sel){
                                       $is_stat_row = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0; ?>
                                 <tr class="lvl-shift hidden" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
                                     <td class="text-left text-dark" style="padding-left:48px;">
-                                        <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" data-site-id="<?=(int)$r['site_id']?>" data-name="<?=htmlspecialchars($emp['name'], ENT_QUOTES)?>" data-rem="<?=number_format($rem, 2, '.', '')?>" data-vac="<?=number_format((float)$r['er_vac'], 2, '.', '')?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;" title="Include this shift in documents or Pay Selected">
+                                        <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" data-site-id="<?=(int)$r['site_id']?>" data-eft="<?= $eftOn ? '1' : '0' ?>" data-name="<?=htmlspecialchars($emp['name'], ENT_QUOTES)?>" data-rem="<?=number_format($rem, 2, '.', '')?>" data-vac="<?=number_format((float)$r['er_vac'], 2, '.', '')?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;" title="Include this shift in documents or Pay Selected">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
                                         <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
@@ -1063,7 +1080,8 @@ function ledgerOnOrgChange(sel){
                                             Vacation: $<?=number_format($r['er_vac'],2)?>
                                         </div>
                                     </td>
-                                    <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?></td>
+                                    <?php $shiftPayLabel = ((float)$r['_paid'] > 0.01) ? pcr_payment_type_label(pcr_line_payment_rows($r, $period_payments), false) : ''; ?>
+                                    <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?><?php if ($shiftPayLabel !== ''): ?><div class="pay-type"><?=htmlspecialchars($shiftPayLabel)?></div><?php endif; ?></td>
                                     <td style="font-size:12px; color:<?=$rem>0.01?'#dc2626':'#16a34a'?>;">$<?=number_format($rem,2)?></td>
                                     <td>
                                         <?php if ($rem > 0.01): ?>
@@ -1183,12 +1201,18 @@ function ledgerOnOrgChange(sel){
                     if (!j.ok) throw new Error(j.error || 'Could not save EFT');
                     btn.setAttribute('aria-pressed', next ? 'true' : 'false');
                     btn.classList.toggle('is-on', next);
+                    document.querySelectorAll('.shift-check[data-user="'+btn.getAttribute('data-user')+'"]').forEach(function(cb){
+                        cb.setAttribute('data-eft', next ? '1' : '0');
+                    });
                 })
                 .catch(function(e){ alert(e.message); });
         }
 
         function eftUsers(){
             var set = {};
+            document.querySelectorAll('.shift-check[data-eft="1"]').forEach(function(cb){
+                set[cb.getAttribute('data-user')] = true;
+            });
             document.querySelectorAll('.eft-badge[aria-pressed="true"]').forEach(function(btn){
                 set[btn.getAttribute('data-user')] = true;
             });
@@ -1257,9 +1281,9 @@ function ledgerOnOrgChange(sel){
                 var i = document.createElement('input');
                 i.type='hidden'; i.name='doc_line_ids[]'; i.value=cb.value; bucket.appendChild(i);
             });
-            document.querySelectorAll('.eft-badge[aria-pressed="true"]').forEach(function(btn){
+            Object.keys(eftUsers()).forEach(function(uid){
                 var i = document.createElement('input');
-                i.type='hidden'; i.name='eft_suppress[]'; i.value=btn.getAttribute('data-user'); bucket.appendChild(i);
+                i.type='hidden'; i.name='eft_suppress[]'; i.value=uid; bucket.appendChild(i);
             });
             var modeInput = document.createElement('input');
             modeInput.type='hidden'; modeInput.name='cheque_mode';
