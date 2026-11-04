@@ -43,3 +43,33 @@ CREATE TABLE IF NOT EXISTS payroll_cheque_lines (
 --   payroll_payments.reversed_at DATETIME NULL
 --   payroll_payments.reversed_by INT NULL
 --   payroll_payments.cheque_id INT NULL
+
+CREATE TABLE IF NOT EXISTS payroll_payment_batches (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    org_id INT NOT NULL,
+    period_start DATE NULL,
+    period_end DATE NULL,
+    created_by INT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    undone_by INT NULL,
+    undone_at DATETIME NULL,
+    KEY org_created (org_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS payroll_payment_batch_lines (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    batch_id INT NOT NULL,
+    user_id INT NOT NULL,
+    site_id INT NOT NULL DEFAULT 0,
+    finalized_id INT NOT NULL,
+    payment_id INT NOT NULL,
+    employee_name VARCHAR(160) NOT NULL DEFAULT '',
+    site_name VARCHAR(160) NOT NULL DEFAULT '',
+    amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+    method VARCHAR(32) NOT NULL DEFAULT '',
+    paid_date DATE NULL,
+    reference_no VARCHAR(64) NULL,
+    note VARCHAR(255) NULL,
+    KEY batch_id (batch_id),
+    KEY payment_id (payment_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

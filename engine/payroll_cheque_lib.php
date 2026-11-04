@@ -20,6 +20,29 @@ function pcr_payment_method($raw): string
     return in_array($raw, pcr_payment_methods(), true) ? $raw : 'E-Transfer';
 }
 
+/** A real pay date, or today when the caller does not supply one. */
+function pcr_coerce_payment_date(?string $raw): string
+{
+    $valid = pcr_valid_payment_date($raw);
+    return $valid ?? date('Y-m-d');
+}
+
+function pcr_valid_payment_date(?string $raw): ?string
+{
+    $raw = trim((string)$raw);
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $raw)) {
+        return null;
+    }
+    $dt = DateTime::createFromFormat('Y-m-d', $raw);
+    if (!$dt || $dt->format('Y-m-d') !== $raw) {
+        return null;
+    }
+    if ($raw < '2018-01-01' || $raw > date('Y-m-d', strtotime('+14 days'))) {
+        return null;
+    }
+    return $raw;
+}
+
 /** Stored net still owing on one finalized line. Same columns as the ledger. */
 function pcr_line_remaining(float $gross, float $eeCpp, float $eeEi, float $eeTax, float $paid): float
 {
@@ -136,6 +159,38 @@ function pcr_ensure(PDO $pdo): void
     pcr_add_column($pdo, 'payroll_payments', 'reversed_at', 'DATETIME NULL');
     pcr_add_column($pdo, 'payroll_payments', 'reversed_by', 'INT NULL');
     pcr_add_column($pdo, 'payroll_payments', 'cheque_id', 'INT NULL');
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS payroll_payment_batches (
+            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            org_id INT NOT NULL,
+            period_start DATE NULL,
+            period_end DATE NULL,
+            created_by INT NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            undone_by INT NULL,
+            undone_at DATETIME NULL,
+            KEY org_created (org_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
+    $pdo->exec(
+        "CREATE TABLE IF NOT EXISTS payroll_payment_batch_lines (
+            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            batch_id INT NOT NULL,
+            user_id INT NOT NULL,
+            site_id INT NOT NULL DEFAULT 0,
+            finalized_id INT NOT NULL,
+            payment_id INT NOT NULL,
+            employee_name VARCHAR(160) NOT NULL DEFAULT '',
+            site_name VARCHAR(160) NOT NULL DEFAULT '',
+            amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+            method VARCHAR(32) NOT NULL DEFAULT '',
+            paid_date DATE NULL,
+            reference_no VARCHAR(64) NULL,
+            note VARCHAR(255) NULL,
+            KEY batch_id (batch_id),
+            KEY payment_id (payment_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    );
     $ready = true;
 }
 
@@ -204,7 +259,8 @@ function pcr_apply_payment(
     int $orgId,
     ?int &$paymentId = null,
     ?string $refNo = null,
-    ?int $chequeId = null
+    ?int $chequeId = null,
+    ?string $paidDate = null
 ): float {
     pcr_ensure($pdo);
     $paymentId = null;
@@ -234,6 +290,7 @@ function pcr_apply_payment(
         return 0.0;
     }
 
+    $paidOn = pcr_coerce_payment_date($paidDate);
     $newPaid = $paidNow + $amount;
     $fully = (round($newPaid, 2) + 0.005 >= round($net, 2));
     $newStatus = $fully ? 'paid' : 'pending';
@@ -241,18 +298,18 @@ function pcr_apply_payment(
 
     $pdo->prepare(
         "UPDATE payroll_finalized
-            SET status = ?, payment_status = ?, paid_amount = ?, last_paid_date = CURRENT_DATE(), paid_at = NOW()
+            SET status = ?, payment_status = ?, paid_amount = ?, last_paid_date = ?, paid_at = NOW()
           WHERE id = ?"
-    )->execute([$newStatus, $newPayStatus, $newPaid, $lineId]);
+    )->execute([$newStatus, $newPayStatus, $newPaid, $paidOn, $lineId]);
 
     if (!empty($line['attendance_id'])) {
         $pdo->prepare(
             "UPDATE payroll_balance
                 SET paid_amount = COALESCE(paid_amount,0) + ?,
                     balance_remaining = GREATEST(0, COALESCE(balance_remaining, ?) - ?),
-                    status = ?, last_paid_date = CURRENT_DATE(), paid_at = NOW()
+                    status = ?, last_paid_date = ?, paid_at = NOW()
               WHERE attendance_id = ?"
-        )->execute([$amount, $net, $amount, $newStatus, $line['attendance_id']]);
+        )->execute([$amount, $net, $amount, $newStatus, $paidOn, $line['attendance_id']]);
     }
 
     $masterId = pcr_resolve_master_id($pdo, $line, $orgId);
@@ -260,8 +317,8 @@ function pcr_apply_payment(
     $pdo->prepare(
         "INSERT INTO payroll_payments
             (payroll_id, recipient, amount, date_paid, payment_type, method, ref_no, cheque_id)
-         VALUES (?, 'Employee', ?, CURRENT_DATE(), 'employee_net', ?, ?, ?)"
-    )->execute([$masterId, $amount, $method, $ref, $chequeId]);
+         VALUES (?, 'Employee', ?, ?, 'employee_net', ?, ?, ?)"
+    )->execute([$masterId, $amount, $paidOn, $method, $ref, $chequeId]);
     $paymentId = (int)$pdo->lastInsertId();
     pcr_refresh_master_status($pdo, $masterId);
     return $amount;
@@ -507,44 +564,62 @@ function pcr_reverse_linked_payments(PDO $pdo, int $chequeId, int $orgId, int $a
     $rows = $st->fetchAll(PDO::FETCH_ASSOC);
     $reversed = 0.0;
     foreach ($rows as $row) {
-        $amt = round((float)$row['amount'], 2);
-        if ($amt <= 0) {
-            continue;
-        }
-        $q = $pdo->prepare(
-            "SELECT f.id, f.attendance_id, f.paid_amount, f.total_gross, f.cpp, f.ei, f.income_tax
-             FROM payroll_finalized f
-             INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
-             WHERE f.id = ? LIMIT 1"
-        );
-        $q->execute([$orgId, (int)$row['finalized_id']]);
-        $line = $q->fetch(PDO::FETCH_ASSOC);
-        if (!$line) {
-            continue;
-        }
-        $newPaid = round(max(0, (float)$line['paid_amount'] - $amt), 2);
-        $net = max(0, (float)$line['total_gross'] - (float)$line['cpp'] - (float)$line['ei'] - (float)$line['income_tax']);
-        $fully = (round($newPaid, 2) + 0.005 >= round($net, 2)) && $newPaid > 0.009;
-        $status = $fully ? 'paid' : 'pending';
-        $payStatus = $newPaid <= 0.009 ? 'Unpaid' : ($fully ? 'Paid' : 'Partial');
-        $pdo->prepare(
-            'UPDATE payroll_finalized SET paid_amount = ?, status = ?, payment_status = ? WHERE id = ?'
-        )->execute([$newPaid, $status, $payStatus, $line['id']]);
-        if (!empty($line['attendance_id'])) {
-            $pdo->prepare(
-                'UPDATE payroll_balance
-                    SET paid_amount = GREATEST(0, COALESCE(paid_amount,0) - ?),
-                        balance_remaining = COALESCE(balance_remaining,0) + ?,
-                        status = ?
-                  WHERE attendance_id = ?'
-            )->execute([$amt, $amt, $status, $line['attendance_id']]);
-        }
-        $pdo->prepare('UPDATE payroll_payments SET reversed_at = NOW(), reversed_by = ? WHERE id = ? AND reversed_at IS NULL')
-            ->execute([$actorId, (int)$row['payment_id']]);
-        pcr_refresh_master_status($pdo, (int)$row['payroll_id']);
-        $reversed += $amt;
+        $reversed += pcr_reverse_finalized_payment($pdo, (int)$row['payment_id'], (int)$row['finalized_id'], $orgId, $actorId);
     }
     return round($reversed, 2);
+}
+
+/**
+ * Reverse one stored payment. Gross, CPP, EI, and tax are not changed.
+ * A payment already reversed returns 0.
+ */
+function pcr_reverse_finalized_payment(PDO $pdo, int $paymentId, int $finalizedId, int $orgId, int $actorId): float
+{
+    if ($paymentId <= 0 || $finalizedId <= 0) {
+        return 0.0;
+    }
+    $pay = $pdo->prepare('SELECT id, amount, payroll_id, reversed_at FROM payroll_payments WHERE id = ? LIMIT 1');
+    $pay->execute([$paymentId]);
+    $payment = $pay->fetch(PDO::FETCH_ASSOC);
+    if (!$payment || $payment['reversed_at'] !== null) {
+        return 0.0;
+    }
+    $amt = round((float)$payment['amount'], 2);
+    if ($amt <= 0) {
+        return 0.0;
+    }
+    $q = $pdo->prepare(
+        "SELECT f.id, f.attendance_id, f.paid_amount, f.total_gross, f.cpp, f.ei, f.income_tax
+         FROM payroll_finalized f
+         INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+         WHERE f.id = ? LIMIT 1"
+    );
+    $q->execute([$orgId, $finalizedId]);
+    $line = $q->fetch(PDO::FETCH_ASSOC);
+    if (!$line) {
+        return 0.0;
+    }
+    $newPaid = round(max(0, (float)$line['paid_amount'] - $amt), 2);
+    $net = max(0, (float)$line['total_gross'] - (float)$line['cpp'] - (float)$line['ei'] - (float)$line['income_tax']);
+    $fully = (round($newPaid, 2) + 0.005 >= round($net, 2)) && $newPaid > 0.009;
+    $status = $fully ? 'paid' : 'pending';
+    $payStatus = $newPaid <= 0.009 ? 'Unpaid' : ($fully ? 'Paid' : 'Partial');
+    $pdo->prepare(
+        'UPDATE payroll_finalized SET paid_amount = ?, status = ?, payment_status = ? WHERE id = ?'
+    )->execute([$newPaid, $status, $payStatus, $line['id']]);
+    if (!empty($line['attendance_id'])) {
+        $pdo->prepare(
+            'UPDATE payroll_balance
+                SET paid_amount = GREATEST(0, COALESCE(paid_amount,0) - ?),
+                    balance_remaining = COALESCE(balance_remaining,0) + ?,
+                    status = ?
+              WHERE attendance_id = ?'
+        )->execute([$amt, $amt, $status, $line['attendance_id']]);
+    }
+    $pdo->prepare('UPDATE payroll_payments SET reversed_at = NOW(), reversed_by = ? WHERE id = ? AND reversed_at IS NULL')
+        ->execute([$actorId, $paymentId]);
+    pcr_refresh_master_status($pdo, (int)$payment['payroll_id']);
+    return $amt;
 }
 
 function pcr_void_cheque(PDO $pdo, int $chequeId, int $orgId, int $actorId, string $reason, bool $reversePayment): array

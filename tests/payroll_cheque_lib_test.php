@@ -4,6 +4,7 @@
  * Run: php tests/payroll_cheque_lib_test.php
  */
 require_once __DIR__ . '/../engine/payroll_cheque_lib.php';
+require_once __DIR__ . '/../engine/payroll_payment_status_lib.php';
 
 $fail = 0;
 function check($label, $cond): void {
@@ -55,6 +56,34 @@ check('mark issued cheques paid is offered', strpos($ledger, 'mark_issued_cheque
 check('documents record cheques only on POST', strpos($docs, '$record_cheques') !== false && strpos($docs, 'pcr_issue_cheque') !== false);
 check('paystub YTD cutoff block is still present', strpos($docs, 'Year-to-date runs through the pay period') !== false);
 check('period CPP override is still present', strpos($docs, 'pe_read_period_stats') !== false);
+
+$full = pstat_payment_amount('paid', 114.60, 0);
+check('paid in full uses remaining', abs($full['amount'] - 114.60) < 0.001 && $full['warning'] === null);
+$again = pstat_payment_amount('paid', 0, 114.60);
+check('paid in full of a settled row records nothing', $again['amount'] === 0.0);
+$over = pstat_payment_amount('partial', 114.60, 200);
+check('partial overpay warns and records nothing', $over['amount'] === 0.0 && $over['warning'] !== null);
+$part = pstat_payment_amount('partial', 114.60, 40);
+check('partial under remaining is kept', abs($part['amount'] - 40) < 0.001);
+$leave = pstat_payment_amount('unpaid', 114.60, 40);
+check('unpaid does not record the typed amount', $leave['amount'] === 0.0);
+$alloc = pstat_allocate(100, [
+    ['id' => 2, 'remaining' => 80, 'work_date' => '2026-09-10'],
+    ['id' => 1, 'remaining' => 40, 'work_date' => '2026-09-02'],
+]);
+check('allocation is oldest first and stops at the request', $alloc[0]['id'] === 1 && abs($alloc[0]['amount'] - 40) < 0.001 && $alloc[1]['id'] === 2 && abs($alloc[1]['amount'] - 60) < 0.001);
+$periods = pstat_list_periods('semi_monthly', '2024-01-01', '2026-11-04');
+$haveSep = false;
+foreach ($periods as $per) {
+    if ($per['start'] === '2026-09-01' && $per['end'] === '2026-09-15') {
+        $haveSep = true;
+    }
+}
+check('historical Sep 1-15 2026 period is selectable', $haveSep);
+$page = file_get_contents(__DIR__ . '/../payroll_payment_status.php');
+check('payment status page is admin gated and saves a batch', strpos($page, '$sess_level > 20') !== false && strpos($page, 'save_payment_status') !== false && strpos($page, 'undo_last') !== false);
+check('historical pay date is accepted', pcr_valid_payment_date('2026-09-05') === '2026-09-05');
+check('ancient pay date is rejected', pcr_valid_payment_date('1990-01-01') === null);
 
 if ($fail > 0) {
     echo "$fail failed\n";
