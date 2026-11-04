@@ -81,7 +81,21 @@ foreach ($periods as $per) {
 }
 check('historical Sep 1-15 2026 period is selectable', $haveSep);
 $page = file_get_contents(__DIR__ . '/../payroll_payment_status.php');
-check('payment status page is admin gated and saves a batch', strpos($page, '$sess_level > 20') !== false && strpos($page, 'save_payment_status') !== false && strpos($page, 'undo_last') !== false);
+check('payment status page is admin gated and saves a batch', strpos($page, '$sess_level > 20') !== false && strpos($page, 'save_payment_status') !== false && strpos($page, 'undo_last') !== false && strpos($page, 'Add name') !== false);
+$blank = pstat_review_added(['name' => '', 'user_id' => 0, 'owed' => 0, 'status' => 'unpaid'], [], [], [3 => true], []);
+check('blank add-name row is ignored', !empty($blank['skip']));
+$names = ['former worker' => 9];
+$users = [9 => 'Former Worker'];
+$sites = [3 => true];
+$onSheet = ['3_9' => true];
+$already = pstat_review_added(['name' => 'Former Worker', 'user_id' => 0, 'site_id' => 3, 'owed' => 50, 'status' => 'paid', 'paid_date' => '2026-09-15'], $names, $users, $sites, $onSheet);
+check('existing person already on the period is refused', empty($already['skip']) && !empty($already['warning']));
+$fresh = pstat_review_added(['name' => 'Former Worker', 'user_id' => 0, 'site_id' => 3, 'owed' => 80, 'status' => 'partial', 'amount' => 30, 'paid_date' => '2026-09-15'], $names, $users, $sites, []);
+check('typed name matches an existing employee', ($fresh['user_id'] ?? 0) === 9 && abs($fresh['pay_amount'] - 30) < 0.001);
+$newbie = pstat_review_added(['name' => 'A New Person', 'user_id' => 0, 'site_id' => 3, 'owed' => 114.60, 'status' => 'paid', 'paid_date' => '2026-09-15'], $names, $users, $sites, []);
+check('unknown name is a new person paid in full', ($newbie['user_id'] ?? 1) === 0 && ($newbie['new_name'] ?? '') === 'A New Person' && abs($newbie['pay_amount'] - 114.60) < 0.001);
+$tooMuch = pstat_review_added(['name' => 'A New Person', 'user_id' => 0, 'site_id' => 3, 'owed' => 40, 'status' => 'partial', 'amount' => 90, 'paid_date' => '2026-09-15'], [], [], $sites, []);
+check('new name cannot be paid more than owed', !empty($tooMuch['warning']) && empty($tooMuch['pay_amount']));
 check('historical pay date is accepted', pcr_valid_payment_date('2026-09-05') === '2026-09-05');
 check('ancient pay date is rejected', pcr_valid_payment_date('1990-01-01') === null);
 

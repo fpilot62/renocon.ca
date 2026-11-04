@@ -110,7 +110,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['undo_batch'])) {
             }
         }
         $res = pstat_reverse_batch($pdo, $batchId, $orgId, $actorId);
-        pstat_flash($orgId, $startIn, $endIn, 'Undid save #' . $res['batch_id'] . '. Reversed $' . number_format($res['amount'], 2) . ' across ' . (int)$res['payments'] . ' payment(s). Gross, CPP, EI, and tax were not changed.');
+        $undoMsg = 'Undid save #' . $res['batch_id'] . '. Reversed $' . number_format($res['amount'], 2) . ' across ' . (int)$res['payments'] . ' payment(s).';
+        if (!empty($res['removed'])) {
+            $undoMsg .= ' Removed ' . (int)$res['removed'] . ' name(s) that save had added.';
+        }
+        $undoMsg .= ' Existing wages and deductions were not changed.';
+        pstat_flash($orgId, $startIn, $endIn, $undoMsg);
     } catch (Throwable $e) {
         pstat_flash($orgId, $startIn, $endIn, $e->getMessage());
     }
@@ -159,7 +164,43 @@ foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $row) {
     ];
 }
 
+$roster = [];
+$sites = [];
+try {
+    $rs = $pdo->prepare('SELECT id, Name FROM users WHERE org_id = ? ORDER BY Name ASC');
+    $rs->execute([$orgId]);
+    $roster = $rs->fetchAll(PDO::FETCH_ASSOC);
+    $ss = $pdo->prepare('SELECT SId, nick_name FROM sites WHERE org_id = ? ORDER BY nick_name ASC');
+    $ss->execute([$orgId]);
+    $sites = $ss->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $roster = [];
+    $sites = [];
+}
+$nameToId = [];
+$userNames = [];
+foreach ($roster as $person) {
+    $pid = (int)$person['id'];
+    $userNames[$pid] = (string)$person['Name'];
+    $lk = strtolower(trim((string)$person['Name']));
+    if ($lk === '') {
+        continue;
+    }
+    if (!array_key_exists($lk, $nameToId)) {
+        $nameToId[$lk] = $pid;
+    } elseif ($nameToId[$lk] !== $pid) {
+        $nameToId[$lk] = 0;
+    }
+}
+$siteIds = [];
+$siteNames = [];
+foreach ($sites as $siteRow) {
+    $siteIds[(int)$siteRow['SId']] = true;
+    $siteNames[(int)$siteRow['SId']] = (string)$siteRow['nick_name'];
+}
+
 $postedKeep = [];
+$postedAdded = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_payment_status'])) {
     $postedRows = is_array($_POST['rows'] ?? null) ? $_POST['rows'] : [];
     $plans = [];
@@ -216,9 +257,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_payment_status']
             ];
         }
     }
+    $occupied = [];
+    foreach ($groups as $key => $unused) {
+        $occupied[(string)$key] = true;
+    }
+    $addedRows = is_array($_POST['added'] ?? null) ? $_POST['added'] : [];
+    foreach ($addedRows as $added) {
+        if (!is_array($added)) {
+            continue;
+        }
+        $review = pstat_review_added($added, $nameToId, $userNames, $siteIds, $occupied);
+        if (!empty($review['skip'])) {
+            continue;
+        }
+        if (!empty($review['warning'])) {
+            $warnings[] = $review['warning'];
+            $blocked = true;
+            continue;
+        }
+        $occupied[$review['slot']] = true;
+        $payDate = $review['pay_amount'] > 0.009 ? pcr_valid_payment_date((string)($added['paid_date'] ?? '')) : $startIn;
+        $plans[] = [
+            'finalized_id' => 0,
+            'amount' => $review['pay_amount'],
+            'method' => pcr_payment_method($added['method'] ?? ''),
+            'paid_date' => $payDate ?: $startIn,
+            'reference' => (string)($added['reference'] ?? ''),
+            'note' => (string)($added['note'] ?? ''),
+            'user_id' => $review['user_id'],
+            'site_id' => $review['site_id'],
+            'employee_name' => $review['employee_name'],
+            'site_name' => $siteNames[$review['site_id']] ?? '',
+            'owed' => $review['owed'],
+            'manual' => [
+                'user_id' => $review['user_id'],
+                'new_name' => $review['new_name'],
+                'employee_name' => $review['employee_name'],
+                'site_id' => $review['site_id'],
+                'owed' => $review['owed'],
+            ],
+        ];
+    }
     if ($blocked) {
-        $warnings[] = 'No payments were recorded. Fix the rows above and save again.';
+        $warnings[] = 'Nothing was saved. Fix the rows above and save again.';
         $postedKeep = $postedRows;
+        $postedAdded = $addedRows;
     } elseif (!$plans) {
         $flash = 'No payment changes to save.';
     } else {
@@ -228,13 +311,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_payment_status']
                 $flash = 'Those rows were already paid. Nothing new was recorded.';
             } else {
                 $total = 0.0;
+                $addedCount = 0;
                 foreach ($plans as $p) {
-                    $total += $p['amount'];
+                    $total += (float)$p['amount'];
+                    if (!empty($p['manual'])) {
+                        $addedCount++;
+                    }
                 }
-                pstat_flash($orgId, $startIn, $endIn, 'Saved batch #' . $batchId . '. Recorded $' . number_format($total, 2) . '. Payroll Center Paid and Net Remaining use these same payments.');
+                $msg = 'Saved batch #' . $batchId . '. Recorded $' . number_format($total, 2) . '.';
+                if ($addedCount > 0) {
+                    $msg .= ' Added ' . $addedCount . ' name(s) for this period.';
+                }
+                $msg .= ' Payroll Center Paid and Net Remaining use these same payments.';
+                pstat_flash($orgId, $startIn, $endIn, $msg);
             }
         } catch (Throwable $e) {
             $warnings[] = 'Save failed and was rolled back. ' . $e->getMessage();
+            $postedKeep = $postedRows;
+            $postedAdded = $addedRows;
         }
     }
 }
@@ -273,6 +367,11 @@ $today = date('Y-m-d');
         .amt { width: 110px; text-align: right; }
         .mini { width: 130px; }
         .warn { background: #fff7ed; border: 1px solid #fdba74; }
+        .name-pick { position: relative; }
+        .suggest { position: absolute; z-index: 5; left: 0; right: 0; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; max-height: 180px; overflow: auto; display: none; }
+        .suggest button { display: block; width: 100%; text-align: left; background: #fff; border: 0; padding: 6px 8px; }
+        .suggest button:hover { background: #e0f2fe; }
+        tr.add-row td { background: #f8fafc; }
     </style>
 </head>
 <body>
@@ -281,7 +380,7 @@ $today = date('Y-m-d');
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
         <div>
             <h4 class="font-weight-bold mb-0">Payment Status</h4>
-            <p class="text-muted small mb-0">Enter who was paid for the period. This writes the same payment records Payroll Center uses. Finalized wages and deductions are not changed.</p>
+            <p class="text-muted small mb-0">Enter who was paid for the period, including a person who is not already listed. This writes the same payment records Payroll Center uses. Existing finalized wages and deductions are not changed.</p>
         </div>
         <a class="btn btn-outline-dark font-weight-bold" href="payroll_master_ledger.php?org_id=<?= (int)$orgId ?>&from_date=<?= urlencode($startIn) ?>&to_date=<?= urlencode($endIn) ?>">Back to Payroll Center</a>
     </div>
@@ -409,10 +508,92 @@ $today = date('Y-m-d');
             </tbody>
         </table>
         </div>
+        <?php endif; ?>
+
+        <div class="mt-3">
+            <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
+                <div>
+                    <strong>Add name</strong>
+                    <div class="text-muted small">Someone missing from this period. Search an existing employee, or type a new name and choose the store. Amount owed is their net for the period.</div>
+                </div>
+                <button type="button" class="btn btn-outline-primary btn-sm font-weight-bold" id="addNameBtn">Add name</button>
+            </div>
+            <div class="table-responsive">
+            <table class="table table-sm table-bordered pay mb-0">
+                <thead>
+                    <tr>
+                        <th>Name and store</th>
+                        <th>Amount owed</th>
+                        <th>Status</th>
+                        <th>Amount this save</th>
+                        <th>Method</th>
+                        <th>Date</th>
+                        <th>Cheque # / reference</th>
+                        <th>Note</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="addedBody">
+                <?php
+                $addedIndex = 0;
+                foreach ($postedAdded as $added) {
+                    if (!is_array($added) || pstat_added_is_blank($added)) {
+                        continue;
+                    }
+                    $aStatus = (string)($added['status'] ?? 'unpaid');
+                    if (!in_array($aStatus, ['unpaid', 'paid', 'partial'], true)) {
+                        $aStatus = 'unpaid';
+                    }
+                    $aSite = (int)($added['site_id'] ?? 0);
+                    $aUser = (int)($added['user_id'] ?? 0);
+                    ?>
+                    <tr class="add-row">
+                        <td>
+                            <div class="name-pick">
+                                <input type="text" class="form-control form-control-sm added-name" name="added[<?= $addedIndex ?>][name]" value="<?= htmlspecialchars((string)($added['name'] ?? '')) ?>" placeholder="Search or type a name" autocomplete="off">
+                                <input type="hidden" class="added-user" name="added[<?= $addedIndex ?>][user_id]" value="<?= $aUser ?>">
+                                <div class="suggest"></div>
+                            </div>
+                            <select class="form-control form-control-sm mt-1" name="added[<?= $addedIndex ?>][site_id]">
+                                <option value="0">Store</option>
+                                <?php foreach ($sites as $siteRow): ?>
+                                    <option value="<?= (int)$siteRow['SId'] ?>" <?= $aSite === (int)$siteRow['SId'] ? 'selected' : '' ?>><?= htmlspecialchars((string)$siteRow['nick_name']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-owed" name="added[<?= $addedIndex ?>][owed]" value="<?= htmlspecialchars((string)($added['owed'] ?? '')) ?>"></td>
+                        <td>
+                            <select class="form-control form-control-sm added-status" name="added[<?= $addedIndex ?>][status]">
+                                <option value="unpaid" <?= $aStatus === 'unpaid' ? 'selected' : '' ?>>Unpaid</option>
+                                <option value="paid" <?= $aStatus === 'paid' ? 'selected' : '' ?>>Paid in full</option>
+                                <option value="partial" <?= $aStatus === 'partial' ? 'selected' : '' ?>>Partially paid</option>
+                            </select>
+                        </td>
+                        <td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-amount" name="added[<?= $addedIndex ?>][amount]" value="<?= htmlspecialchars((string)($added['amount'] ?? '')) ?>" <?= $aStatus === 'partial' ? '' : 'readonly' ?>></td>
+                        <td>
+                            <select class="form-control form-control-sm mini" name="added[<?= $addedIndex ?>][method]">
+                                <?php $aMethod = pcr_payment_method($added['method'] ?? 'E-Transfer'); ?>
+                                <?php foreach (pcr_payment_methods() as $methodOpt): ?>
+                                    <option <?= $aMethod === $methodOpt ? 'selected' : '' ?>><?= htmlspecialchars($methodOpt) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td><input type="date" class="form-control form-control-sm" name="added[<?= $addedIndex ?>][paid_date]" value="<?= htmlspecialchars((string)($added['paid_date'] ?? $today)) ?>"></td>
+                        <td><input type="text" class="form-control form-control-sm" name="added[<?= $addedIndex ?>][reference]" maxlength="64" value="<?= htmlspecialchars((string)($added['reference'] ?? '')) ?>"></td>
+                        <td><input type="text" class="form-control form-control-sm" name="added[<?= $addedIndex ?>][note]" maxlength="255" value="<?= htmlspecialchars((string)($added['note'] ?? '')) ?>"></td>
+                        <td><button type="button" class="btn btn-sm btn-outline-secondary remove-add">Remove</button></td>
+                    </tr>
+                    <?php
+                    $addedIndex++;
+                }
+                ?>
+                </tbody>
+            </table>
+            </div>
+        </div>
         <div class="text-right mt-3">
             <button type="submit" name="save_payment_status" value="1" class="btn btn-primary font-weight-bold">Save payments</button>
         </div>
-        <?php endif; ?>
     </form>
 
     <div class="sheet">
@@ -497,8 +678,92 @@ $today = date('Y-m-d');
     });
     var form = document.getElementById('payStatusForm');
     if (!form) return;
+
+    var roster = <?= json_encode(array_map(static function ($p) {
+        return ['id' => (int)$p['id'], 'name' => (string)$p['Name']];
+    }, $roster), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+    var siteOptions = <?= json_encode(array_map(static function ($s) {
+        return ['id' => (int)$s['SId'], 'name' => (string)$s['nick_name']];
+    }, $sites), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+    var addIndex = document.querySelectorAll('#addedBody .add-row').length;
+
+    function siteSelectHtml(idx) {
+        var html = '<select class="form-control form-control-sm mt-1" name="added['+idx+'][site_id]"><option value="0">Store</option>';
+        siteOptions.forEach(function (s) {
+            html += '<option value="'+s.id+'">'+String(s.name).replace(/[&<>"]/g, function (c) {
+                return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+            })+'</option>';
+        });
+        return html + '</select>';
+    }
+
+    function bindAdded(row) {
+        var nameInput = row.querySelector('.added-name');
+        var userInput = row.querySelector('.added-user');
+        var suggest = row.querySelector('.suggest');
+        var status = row.querySelector('.added-status');
+        var owed = row.querySelector('.added-owed');
+        var amount = row.querySelector('.added-amount');
+        function syncAmount() {
+            var owedVal = parseFloat(owed.value || '0');
+            if (status.value === 'paid') {
+                amount.value = owedVal > 0 ? owedVal.toFixed(2) : '';
+                amount.readOnly = true;
+            } else if (status.value === 'unpaid') {
+                amount.value = '';
+                amount.readOnly = true;
+            } else {
+                amount.readOnly = false;
+            }
+        }
+        status.addEventListener('change', syncAmount);
+        owed.addEventListener('input', function () { if (status.value === 'paid') syncAmount(); });
+        nameInput.addEventListener('input', function () {
+            userInput.value = '0';
+            var q = nameInput.value.trim().toLowerCase();
+            suggest.innerHTML = '';
+            if (q.length < 1) { suggest.style.display = 'none'; return; }
+            var hits = roster.filter(function (p) { return p.name.toLowerCase().indexOf(q) !== -1; }).slice(0, 8);
+            if (!hits.length) { suggest.style.display = 'none'; return; }
+            hits.forEach(function (p) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = p.name;
+                b.addEventListener('click', function () {
+                    nameInput.value = p.name;
+                    userInput.value = String(p.id);
+                    suggest.style.display = 'none';
+                });
+                suggest.appendChild(b);
+            });
+            suggest.style.display = 'block';
+        });
+        row.querySelector('.remove-add').addEventListener('click', function () { row.remove(); });
+        syncAmount();
+    }
+
+    document.querySelectorAll('#addedBody .add-row').forEach(bindAdded);
+    document.getElementById('addNameBtn').addEventListener('click', function () {
+        var idx = addIndex++;
+        var tr = document.createElement('tr');
+        tr.className = 'add-row';
+        tr.innerHTML =
+            '<td><div class="name-pick"><input type="text" class="form-control form-control-sm added-name" name="added['+idx+'][name]" placeholder="Search or type a name" autocomplete="off"><input type="hidden" class="added-user" name="added['+idx+'][user_id]" value="0"><div class="suggest"></div></div>'+siteSelectHtml(idx)+'</td>'+
+            '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-owed" name="added['+idx+'][owed]"></td>'+
+            '<td><select class="form-control form-control-sm added-status" name="added['+idx+'][status]"><option value="unpaid">Unpaid</option><option value="paid">Paid in full</option><option value="partial">Partially paid</option></select></td>'+
+            '<td><input type="number" step="0.01" min="0" class="form-control form-control-sm amt added-amount" name="added['+idx+'][amount]" readonly></td>'+
+            '<td><select class="form-control form-control-sm mini" name="added['+idx+'][method]"><option>E-Transfer</option><option>Cheque</option><option>Cash</option></select></td>'+
+            '<td><input type="date" class="form-control form-control-sm" name="added['+idx+'][paid_date]" value="<?= htmlspecialchars($today) ?>"></td>'+
+            '<td><input type="text" class="form-control form-control-sm" name="added['+idx+'][reference]" maxlength="64"></td>'+
+            '<td><input type="text" class="form-control form-control-sm" name="added['+idx+'][note]" maxlength="255"></td>'+
+            '<td><button type="button" class="btn btn-sm btn-outline-secondary remove-add">Remove</button></td>';
+        document.getElementById('addedBody').appendChild(tr);
+        bindAdded(tr);
+        tr.querySelector('.added-name').focus();
+    });
+
     form.addEventListener('submit', function (ev) {
-        var n = 0, total = 0, problems = [];
+        var n = 0, total = 0, added = 0, problems = [];
         document.querySelectorAll('.emp-row').forEach(function (row) {
             if (row.querySelector('.changed-flag').value !== '1') return;
             var name = row.querySelector('td').innerText.split('\n')[0];
@@ -513,15 +778,33 @@ $today = date('Y-m-d');
             }
             if (amt > 0.009) { n++; total += amt; }
         });
+        document.querySelectorAll('#addedBody .add-row').forEach(function (row) {
+            var name = (row.querySelector('.added-name').value || '').trim();
+            var owed = parseFloat(row.querySelector('.added-owed').value || '0');
+            var status = row.querySelector('.added-status').value;
+            var amt = parseFloat(row.querySelector('.added-amount').value || '0');
+            if (!name && owed <= 0) return;
+            if (!name) { problems.push('Add name: type a name or pick an employee.'); return; }
+            if (!(owed > 0)) { problems.push(name + ': enter the amount owed.'); return; }
+            if (row.querySelector('select[name$="[site_id]"]').value === '0') { problems.push(name + ': choose a store.'); return; }
+            if (status === 'paid') amt = owed;
+            if (status !== 'unpaid' && amt > owed + 0.009) {
+                problems.push(name + ': $' + amt.toFixed(2) + ' is more than the $' + owed.toFixed(2) + ' owed.');
+                return;
+            }
+            added++;
+            if (status !== 'unpaid' && amt > 0.009) { n++; total += amt; }
+        });
         if (problems.length) {
             ev.preventDefault();
             alert('Nothing will be saved.\n\n' + problems.join('\n'));
             return;
         }
-        if (n === 0) return;
-        if (!confirm('Record ' + n + ' payment(s) totalling $' + total.toFixed(2) + '? Already-paid amounts are not recorded again.')) {
-            ev.preventDefault();
-        }
+        if (n === 0 && added === 0) return;
+        var msg = 'Record ' + n + ' payment(s) totalling $' + total.toFixed(2);
+        if (added) msg += ' and add ' + added + ' name(s)';
+        msg += '? Already-paid amounts are not recorded again.';
+        if (!confirm(msg)) ev.preventDefault();
     });
 })();
 </script>

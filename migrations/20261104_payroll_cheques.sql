@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS payroll_payment_batch_lines (
     paid_date DATE NULL,
     reference_no VARCHAR(64) NULL,
     note VARCHAR(255) NULL,
+    created_line TINYINT(1) NOT NULL DEFAULT 0,
+    created_user_id INT NULL,
+    owed_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
     KEY batch_id (batch_id),
     KEY payment_id (payment_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
