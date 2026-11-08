@@ -691,6 +691,7 @@ unset($_SESSION['ledger_flash']);
                 <p class="text-muted small mb-2">One stored-value report for hours, gross, employee deductions, employer contributions, documents, payments and tax actions.</p>
                 <?php if ($sess_user_level <= 20): ?>
                 <a href="payroll_payment_status.php?org_id=<?=$user_org_id?>&period=<?=urlencode($from_date.'|'.$to_date)?>&from_date=<?=urlencode($from_date)?>&to_date=<?=urlencode($to_date)?>" class="btn btn-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-list-check"></i> Payment Status</a>
+                <a href="payroll_sheet_review.php?org_id=<?=$user_org_id?>" class="btn btn-outline-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-table"></i> Sheet review</a>
                 <?php endif; ?>
                 <a href="manual_pay_entry.php" class="btn btn-outline-success font-weight-bold mr-2 mb-1" style="font-size:12px;" id="manualPayLink"><i class="fa fa-hand-holding-usd"></i> Manual Pay / Adjustments</a>
                 <a href="generate_stat_shifts.php" class="btn btn-outline-warning font-weight-bold mr-2 mb-1" style="font-size:11px;"><i class="fa fa-calendar-check"></i> Stat Pay Preview</a>
