@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Gallery | Renocon</title>
+  <meta name="description" content="Photographs of Renocon restaurant and residential construction, including Popeyes, Hitchki, Galito’s, and houses.">
+  <link rel="icon" href="assets/images/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/styles.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="container">
+      <a href="mailto:info@renocon.ca">info@renocon.ca</a>
+      <a href="tel:+16472195303">+1 647-219-5303</a>
+    </div>
+  </div>
+  <header class="site-header">
+    <div class="container">
+      <a class="logo" href="index.html"><img src="assets/images/logo.png" alt="Renocon, specializing in restaurants"></a>
+      <button class="menu-toggle" type="button" data-nav-toggle aria-expanded="false" aria-label="Open menu">☰</button>
+      <nav class="nav" data-nav>
+        <a href="index.html">Home</a>
+        <a href="about.html">About</a>
+        <a href="services.html">Services</a>
+        <a href="gallery.html" aria-current="page">Gallery</a>
+        <a href="contact.html">Contact</a>
+        <a class="btn" href="contact.html">Get a quote</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="page-hero">
+    <div class="container">
+      <p class="eyebrow">Gallery</p>
+      <h1>Completed restaurants and buildings.</h1>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <div class="filters">
+        <button class="filter-btn is-active" type="button" data-filter="all">All</button>
+        <button class="filter-btn" type="button" data-filter="houses">Houses</button>
+        <button class="filter-btn" type="button" data-filter="popeyes">Popeyes</button>
+        <button class="filter-btn" type="button" data-filter="hitchki">Hitchki</button>
+        <button class="filter-btn" type="button" data-filter="galitoes">Galito’s</button>
+      </div>
+      <div class="gallery-grid">
+        <figure class="gallery-item" data-category="houses" data-lightbox-src="assets/images/houses-01.jpg">
+          <img src="assets/images/houses-01.jpg" alt="Completed house exterior with stone facade and deck">
+          <span>Houses</span>
+        </figure>
+        <figure class="gallery-item" data-category="popeyes" data-lightbox-src="assets/images/popeyes-exterior.jpg">
+          <img src="assets/images/popeyes-exterior.jpg" alt="Popeyes restaurant exterior completed by Renocon">
+          <span>Popeyes</span>
+        </figure>
+        <figure class="gallery-item" data-category="popeyes" data-lightbox-src="assets/images/popeyes-dining.jpg">
+          <img src="assets/images/popeyes-dining.jpg" alt="Popeyes dining room interior">
+          <span>Popeyes</span>
+        </figure>
+        <figure class="gallery-item" data-category="popeyes" data-lightbox-src="assets/images/popeyes-counter.jpg">
+          <img src="assets/images/popeyes-counter.jpg" alt="Popeyes service counter and brand millwork">
+          <span>Popeyes</span>
+        </figure>
+        <figure class="gallery-item" data-category="popeyes" data-lightbox-src="assets/images/popeyes-window.jpg">
+          <img src="assets/images/popeyes-window.jpg" alt="Restaurant window seating and millwork">
+          <span>Popeyes</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-exterior.jpg">
+          <img src="assets/images/hitchki-exterior.jpg" alt="Hitchki The Grand Indian Buffet storefront">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-kitchen.jpg">
+          <img src="assets/images/hitchki-kitchen.jpg" alt="Hitchki buffet line and kitchen fit-out">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-dining.jpg">
+          <img src="assets/images/hitchki-dining.jpg" alt="Hitchki dining room with custom lighting">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-lounge.jpg">
+          <img src="assets/images/hitchki-lounge.jpg" alt="Hitchki lounge seating and glass partitions">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-mural.jpg">
+          <img src="assets/images/hitchki-mural.jpg" alt="Hitchki dining alcove with mural and millwork">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-windows.jpg">
+          <img src="assets/images/hitchki-windows.jpg" alt="Hitchki dining room along the window wall">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="hitchki" data-lightbox-src="assets/images/hitchki-seating.jpg">
+          <img src="assets/images/hitchki-seating.jpg" alt="Hitchki dining room seating and hanging plants">
+          <span>Hitchki</span>
+        </figure>
+        <figure class="gallery-item" data-category="galitoes" data-lightbox-src="assets/images/restaurant-booths.jpg">
+          <img src="assets/images/restaurant-booths.jpg" alt="Restaurant booth seating and pendant lighting">
+          <span>Galito’s</span>
+        </figure>
+        <figure class="gallery-item" data-category="galitoes" data-lightbox-src="assets/images/hero-restaurant.jpg">
+          <img src="assets/images/hero-restaurant.jpg" alt="Completed restaurant interior with custom millwork">
+          <span>Galito’s</span>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <div class="lightbox" data-lightbox>
+    <button type="button" aria-label="Close image">×</button>
+    <img alt="">
+  </div>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <img src="assets/images/logo.png" alt="Renocon" style="height: 56px; margin-bottom: 12px;">
+          <p>General contractor specializing in restaurants, commercial interiors, and project management.</p>
+        </div>
+        <div>
+          <h3>Visit</h3>
+          <p>81 Zenway Blvd, Ste 13<br>Woodbridge, ON L4H 0S5</p>
+          <p>Ambleside Crescent<br>Calgary, AB</p>
+        </div>
+        <div>
+          <h3>Contact</h3>
+          <p><a href="tel:+16472195303">+1 647-219-5303</a><br><a href="mailto:info@renocon.ca">info@renocon.ca</a></p>
+          <p>Monday–Saturday<br>9:00 AM – 6:00 PM</p>
+        </div>
+      </div>
+      <div class="copyright">© 2026 Renocon. All rights reserved. · <a href="privacy.html">Privacy policy</a></div>
+    </div>
+  </footer>
+  <script src="assets/js/main.js"></script>
+</body>
+</html>
