@@ -1516,6 +1516,149 @@ function psr_grid_filter(array $rows, array $filter): array
     return $out;
 }
 
+function psr_sort_columns(): array
+{
+    return ['person', 'period', 'status', 'reconciled', 'gross', 'net', 'paid', 'balance_before', 'proposed', 'balance_after', 'route', 'gst', 'provenance'];
+}
+
+function psr_sort_column($column): string
+{
+    $column = (string)$column;
+    return in_array($column, psr_sort_columns(), true) ? $column : '';
+}
+
+function psr_sort_dir($dir): string
+{
+    return $dir === 'desc' ? 'desc' : 'asc';
+}
+
+function psr_amount_sort_key(bool $known, $value): array
+{
+    if (!$known || $value === null) {
+        return [1, 0.0];
+    }
+    return [0, (float)$value];
+}
+
+function psr_text_sort_key(string $value): array
+{
+    $value = trim($value);
+    if ($value === '') {
+        return [1, ''];
+    }
+    return [0, psr_norm_name($value)];
+}
+
+function psr_row_sort_key(array $row, string $column): array
+{
+    switch ($column) {
+        case 'person':
+            return psr_text_sort_key(trim((string)($row['employee_name'] ?? '') . ' ' . (string)($row['store_name'] ?? '')));
+        case 'period':
+            $start = trim((string)($row['period_start'] ?? ''));
+            return $start === '' ? [1, ''] : [0, $start . '|' . (string)($row['period_end'] ?? '')];
+        case 'status':
+            return psr_text_sort_key((string)($row['source_status'] ?? ''));
+        case 'reconciled':
+            return psr_text_sort_key((string)($row['reconciled']['derived'] ?? ''));
+        case 'gross':
+            return psr_amount_sort_key(array_key_exists('gross', $row) && $row['gross'] !== null, $row['gross'] ?? null);
+        case 'net':
+            return psr_amount_sort_key(!empty($row['net_known']) && ($row['net'] ?? null) !== null, $row['net'] ?? null);
+        case 'paid':
+            return psr_amount_sort_key(($row['paid_state'] ?? '') === 'amount' && ($row['paid'] ?? null) !== null, $row['paid'] ?? null);
+        case 'balance_before':
+            $known = ($row['balance_before']['state'] ?? '') === 'amount' && ($row['balance_before']['amount'] ?? null) !== null;
+            return psr_amount_sort_key($known, $row['balance_before']['amount'] ?? null);
+        case 'proposed':
+            return psr_amount_sort_key(array_key_exists('today_pay', $row) && $row['today_pay'] !== null, $row['today_pay'] ?? null);
+        case 'balance_after':
+            $known = ($row['balance_after']['state'] ?? '') === 'amount' && ($row['balance_after']['amount'] ?? null) !== null;
+            return psr_amount_sort_key($known, $row['balance_after']['amount'] ?? null);
+        case 'route':
+            return psr_text_sort_key(trim((string)($row['route'] ?? '') . ' ' . (string)($row['basis'] ?? '')));
+        case 'gst':
+            $gst = is_array($row['gst'] ?? null) ? $row['gst'] : [];
+            $known = in_array(($gst['state'] ?? ''), ['amount', 'unverified_estimate'], true) && ($gst['amount'] ?? null) !== null;
+            return psr_amount_sort_key($known, $gst['amount'] ?? null);
+        case 'provenance':
+            return psr_text_sort_key((string)($row['provenance'] ?? ''));
+        default:
+            return [0, (string)($row['key'] ?? '')];
+    }
+}
+
+function psr_sort_compare(array $aKey, array $bKey, string $dir, string $aTie, string $bTie): int
+{
+    if ($aKey[0] !== $bKey[0]) {
+        return $aKey[0] <=> $bKey[0];
+    }
+    if (is_int($aKey[1]) || is_float($aKey[1]) || is_int($bKey[1]) || is_float($bKey[1])) {
+        $cmp = ((float)$aKey[1] <=> (float)$bKey[1]);
+    } else {
+        $cmp = strcmp((string)$aKey[1], (string)$bKey[1]);
+    }
+    if ($dir === 'desc') {
+        $cmp = -$cmp;
+    }
+    return $cmp !== 0 ? $cmp : strcmp($aTie, $bTie);
+}
+
+function psr_sort_rows(array $rows, string $column, string $dir): array
+{
+    $column = psr_sort_column($column);
+    if ($column === '') {
+        return $rows;
+    }
+    $dir = psr_sort_dir($dir);
+    usort($rows, static function ($a, $b) use ($column, $dir) {
+        return psr_sort_compare(psr_row_sort_key($a, $column), psr_row_sort_key($b, $column), $dir, (string)($a['key'] ?? ''), (string)($b['key'] ?? ''));
+    });
+    return $rows;
+}
+
+function psr_group_sort_key(array $group, string $column): array
+{
+    if (in_array($column, ['gross', 'net', 'paid', 'balance_before', 'proposed', 'balance_after'], true)) {
+        $part = $group['totals'][$column] ?? ['amount' => null];
+        return psr_amount_sort_key($part['amount'] !== null, $part['amount']);
+    }
+    if ($column === 'person') {
+        return psr_text_sort_key(trim((string)($group['employee_name'] ?? '') . ' ' . (string)($group['store_name'] ?? '')));
+    }
+    if ($column === 'gst') {
+        $sum = 0.0;
+        $known = 0;
+        foreach ($group['rows'] as $row) {
+            $key = psr_row_sort_key($row, 'gst');
+            if ($key[0] === 0) {
+                $sum = round($sum + (float)$key[1], 2);
+                $known++;
+            }
+        }
+        return psr_amount_sort_key($known > 0, $known > 0 ? $sum : null);
+    }
+    $rows = psr_sort_rows($group['rows'], 'period', 'asc');
+    return psr_row_sort_key($rows[0] ?? [], $column === 'period' ? 'period' : $column);
+}
+
+function psr_sort_groups(array $groups, string $column, string $dir): array
+{
+    $column = psr_sort_column($column);
+    if ($column === '') {
+        return $groups;
+    }
+    $dir = psr_sort_dir($dir);
+    $periodDir = $column === 'period' ? $dir : 'asc';
+    foreach ($groups as $i => $group) {
+        $groups[$i]['rows'] = psr_sort_rows($group['rows'], 'period', $periodDir);
+    }
+    usort($groups, static function ($a, $b) use ($column, $dir) {
+        return psr_sort_compare(psr_group_sort_key($a, $column), psr_group_sort_key($b, $column), $dir, (string)($a['key'] ?? ''), (string)($b['key'] ?? ''));
+    });
+    return $groups;
+}
+
 function psr_grid_page(array $rows, int $page, int $perPage): array
 {
     $perPage = max(10, min(50, $perPage));

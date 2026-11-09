@@ -40,6 +40,14 @@ function psr_money($value, bool $known): string
     }
     return number_format((float)$value, 2);
 }
+function psr_sort_heading(array $query, string $column, string $label, string $current, string $dir): string
+{
+    $query['sort'] = $column;
+    $query['dir'] = ($current === $column && $dir === 'asc') ? 'desc' : 'asc';
+    $query['page'] = 1;
+    $arrow = $current === $column ? ($dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return '<a class="text-white" href="?' . psr_h(http_build_query($query)) . '">' . psr_h($label . $arrow) . '</a>';
+}
 function psr_group_figure(array $part): string
 {
     if ($part['amount'] === null) {
@@ -416,10 +424,18 @@ $gridFilter = [
 ];
 $gridAll = psr_build_review_grid($systemLines, $sheetRows, $flatPlans, $directory, $orgId);
 $gridFiltered = psr_grid_filter($gridAll, $gridFilter);
+$sortColumn = psr_sort_column($_GET['sort'] ?? '');
+$sortDir = psr_sort_dir($_GET['dir'] ?? 'asc');
+if ($sortColumn !== '') {
+    $gridFiltered = psr_sort_rows($gridFiltered, $sortColumn, $sortDir);
+}
 $gridPage = psr_grid_page($gridFiltered, (int)($_GET['page'] ?? 1), (int)($_GET['per_page'] ?? 25));
 $gridTotals = psr_grid_totals($gridFiltered);
 $groupOn = !isset($_GET['group']) || (string)$_GET['group'] !== '0';
 $employeeGroups = psr_group_employees($gridFiltered);
+if ($sortColumn !== '') {
+    $employeeGroups = psr_sort_groups($employeeGroups, $sortColumn, $sortDir);
+}
 $groupGrand = psr_employee_group_totals($gridFiltered);
 $groupPage = psr_grid_page($employeeGroups, (int)($_GET['page'] ?? 1), (int)($_GET['per_page'] ?? 25));
 $visibleRows = [];
@@ -649,6 +665,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .grid-wrap { max-height: 72vh; overflow: auto; border: 1px solid #cbd5e1; }
         table.paygrid { border-collapse: separate; border-spacing: 0; min-width: 1680px; }
         table.paygrid th { position: sticky; top: 0; z-index: 3; background: #0f172a; color: #fff; font-size: 11px; }
+        table.paygrid th a { color: #fff; white-space: nowrap; }
         table.paygrid td.ident, table.paygrid th.ident { position: sticky; left: 0; z-index: 2; background: #fff; }
         table.paygrid th.ident { z-index: 4; background: #0f172a; }
         td.today input { background: #fef3c7; border: 2px solid #d97706; font-weight: 800; }
@@ -707,6 +724,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-2 mb-2"><label>Staff</label><select class="form-control form-control-sm" name="active"><?php foreach (['all','active'] as $opt): ?><option <?= $gridFilter['active']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Unresolved</label><select class="form-control form-control-sm" name="unresolved"><option value="">All</option><option value="1" <?= !empty($gridFilter['unresolved'])?'selected':'' ?>>Needs review</option></select></div>
             <div class="col-md-2 mb-2"><label>Group by employee</label><input type="hidden" name="group" value="0"><label class="d-block mt-1"><input type="checkbox" name="group" value="1" <?= $groupOn ? 'checked' : '' ?> onchange="this.form.submit()"> On</label></div>
+            <?php if ($sortColumn !== ''): ?><input type="hidden" name="sort" value="<?= psr_h($sortColumn) ?>"><input type="hidden" name="dir" value="<?= psr_h($sortDir) ?>"><?php endif; ?>
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>
         <p class="mb-0 text-muted">Filters change this spreadsheet only. They do not certify a live unpaid balance. The company all-period total stays available under the details below.</p>
@@ -835,21 +853,28 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         </div>
         <div class="grid-wrap">
         <table class="table table-sm table-bordered paygrid mb-0">
+            <?php
+            $sortQuery = $_GET;
+            $sortQuery['org_id'] = $orgId;
+            if (!isset($sortQuery['group'])) {
+                $sortQuery['group'] = $groupOn ? '1' : '0';
+            }
+            ?>
             <thead><tr>
                 <th class="ident"><label class="mb-0 text-white"><input type="checkbox" id="selectPage"> Select all on this page</label></th>
-                <th class="ident">Person / store</th>
-                <th>Period</th>
-                <th>Source status</th>
-                <th>Reconciled view</th>
-                <th>Gross</th>
-                <th>Net</th>
-                <th>Confirmed paid</th>
-                <th>Balance before</th>
-                <th><?= psr_h($payHeading) ?></th>
-                <th>Balance after</th>
-                <th>Route / basis</th>
-                <th>GST</th>
-                <th>Provenance</th>
+                <th class="ident"><?= psr_sort_heading($sortQuery, 'person', 'Person / store', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'period', 'Period', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'status', 'Source status', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'reconciled', 'Reconciled view', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'gross', 'Gross', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'net', 'Net', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'paid', 'Confirmed paid', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'balance_before', 'Balance before', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'proposed', $payHeading, $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'balance_after', 'Balance after', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'route', 'Route / basis', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'gst', 'GST', $sortColumn, $sortDir) ?></th>
+                <th><?= psr_sort_heading($sortQuery, 'provenance', 'Provenance', $sortColumn, $sortDir) ?></th>
             </tr></thead>
             <tbody>
             <?php
