@@ -40,6 +40,17 @@ function psr_money($value, bool $known): string
     }
     return number_format((float)$value, 2);
 }
+function psr_group_figure(array $part): string
+{
+    if ($part['amount'] === null) {
+        return 'Pending' . ((int)$part['unknown'] > 0 ? ' (' . (int)$part['unknown'] . ' unknown)' : '');
+    }
+    $text = number_format((float)$part['amount'], 2);
+    if ((int)$part['unknown'] > 0) {
+        $text .= ' (' . (int)$part['unknown'] . ' unknown)';
+    }
+    return $text;
+}
 function psr_total_money(array $total, string $field): string
 {
     if ($field === 'remaining_known') {
@@ -198,16 +209,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['link_identity'])) {
     }
 }
 $previewPlans = [];
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_approval'])) {
-    $ids = array_map('intval', (array)($_POST['row_ids'] ?? []));
-    try {
-        $previewPlans = psr_build_plans($pdo, $orgId, $ids);
-        $key = bin2hex(random_bytes(16));
-        $_SESSION['psr_preview'] = ['org_id' => $orgId, 'key' => $key, 'hash' => psr_plan_hash($previewPlans), 'row_ids' => $ids];
-    } catch (Throwable $e) {
-        $warnings[] = $e->getMessage();
-    }
-}
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_approval'])) {
     $saved = $_SESSION['psr_preview'] ?? null;
     try {
@@ -218,11 +219,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_approval'])) 
         if (psr_plan_hash($fresh) !== $saved['hash']) {
             throw new RuntimeException('The draft changed after the preview. Preview it again. Nothing was posted.');
         }
+        if (!empty($_POST['amounts_owed_only'])) {
+            foreach ($fresh as $plan) {
+                if (($plan['payment']['action'] ?? '') === 'post') {
+                    throw new RuntimeException('Approve amounts owed does not record a payment. A selected row has confirmed actual payment evidence. Nothing was posted and nobody was marked paid.');
+                }
+            }
+        }
         $done = psr_apply_approval($pdo, $orgId, $actorId, $saved['row_ids'], $saved['key']);
         unset($_SESSION['psr_preview']);
-        $_SESSION['psr_flash'] = !empty($done['repeated'])
-            ? 'That approval was already confirmed. It was not posted again.'
-            : 'Approval ' . (int)$done['approval_id'] . ' posted ' . (int)$done['result']['created'] . ' new line(s), linked ' . (int)$done['result']['linked'] . ', and recorded $' . number_format((float)$done['result']['amount'], 2) . ' of confirmed actual payments.';
+        if (!empty($_POST['amounts_owed_only'])) {
+            $_SESSION['psr_flash'] = !empty($done['repeated'])
+                ? 'That amounts-owed approval was already confirmed. It was not posted again. Nobody was marked paid.'
+                : 'Amounts owed approved for ' . (int)$done['result']['created'] . ' new line(s) and ' . (int)$done['result']['linked'] . ' linked line(s). Nobody was marked paid.';
+        } else {
+            $_SESSION['psr_flash'] = !empty($done['repeated'])
+                ? 'That approval was already confirmed. It was not posted again.'
+                : 'Approval ' . (int)$done['approval_id'] . ' posted ' . (int)$done['result']['created'] . ' new line(s), linked ' . (int)$done['result']['linked'] . ', and recorded $' . number_format((float)$done['result']['amount'], 2) . ' of confirmed actual payments.';
+        }
         header('Location: payroll_sheet_review.php?org_id=' . $orgId);
         exit;
     } catch (Throwable $e) {
@@ -390,14 +404,63 @@ $gridAll = psr_build_review_grid($systemLines, $sheetRows, $flatPlans, $director
 $gridFiltered = psr_grid_filter($gridAll, $gridFilter);
 $gridPage = psr_grid_page($gridFiltered, (int)($_GET['page'] ?? 1), (int)($_GET['per_page'] ?? 25));
 $gridTotals = psr_grid_totals($gridFiltered);
+$groupOn = !isset($_GET['group']) || (string)$_GET['group'] !== '0';
+$employeeGroups = psr_group_employees($gridFiltered);
+$groupGrand = psr_employee_group_totals($gridFiltered);
+$groupPage = psr_grid_page($employeeGroups, (int)($_GET['page'] ?? 1), (int)($_GET['per_page'] ?? 25));
+$visibleRows = [];
+if ($groupOn) {
+    foreach ($groupPage['rows'] as $employeeGroup) {
+        foreach ($employeeGroup['rows'] as $grow) {
+            $visibleRows[] = $grow;
+        }
+    }
+} else {
+    $visibleRows = $gridPage['rows'];
+}
+$pageSheetIds = [];
+foreach ($visibleRows as $grow) {
+    if ((int)$grow['sheet_row_id'] > 0) {
+        $pageSheetIds[] = (int)$grow['sheet_row_id'];
+    }
+}
+$filteredSheetIds = [];
+$filteredById = [];
+foreach ($gridFiltered as $grow) {
+    if ((int)$grow['sheet_row_id'] > 0) {
+        $filteredSheetIds[] = (int)$grow['sheet_row_id'];
+        $filteredById[(int)$grow['sheet_row_id']] = $grow;
+    }
+}
+$selectedIds = $_SERVER['REQUEST_METHOD'] === 'POST' ? psr_resolve_selection($_POST, $pageSheetIds, $filteredSheetIds) : [];
+$openApprovals = false;
 $gridDiff = null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_grid_save'])) {
+    $openApprovals = true;
     $byKey = [];
-    foreach ($gridPage['rows'] as $grow) {
+    foreach ($visibleRows as $grow) {
         $byKey[$grow['key']] = $grow;
     }
     $gridDiff = psr_grid_save_changes($_POST['g'] ?? [], $byKey);
     $_SESSION['psr_grid'] = ['org_id' => $orgId, 'diff' => $gridDiff];
+}
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && (isset($_POST['preview_approval']) || isset($_POST['preview_plan_rows']) || isset($_POST['suggest_payments']))
+    && !$selectedIds
+) {
+    $warnings[] = 'Select at least one row. Use Select all on this page or Select all filtered rows.';
+    $openApprovals = true;
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_approval']) && $selectedIds) {
+    $openApprovals = true;
+    try {
+        $previewPlans = psr_build_plans($pdo, $orgId, $selectedIds);
+        $key = bin2hex(random_bytes(16));
+        $_SESSION['psr_preview'] = ['org_id' => $orgId, 'key' => $key, 'hash' => psr_plan_hash($previewPlans), 'row_ids' => $selectedIds];
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_grid_save'])) {
     $saved = $_SESSION['psr_grid'] ?? null;
@@ -414,18 +477,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_grid_save']))
         $warnings[] = $e->getMessage();
     }
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_plan_rows'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_plan_rows']) && $selectedIds) {
+    $openApprovals = true;
     $planPreview = [];
-    foreach ((array)($_POST['plan_ids'] ?? []) as $sheetId) {
-        $sheetId = (int)$sheetId;
-        $match = null;
-        foreach ($gridPage['rows'] as $grow) {
-            if ((int)$grow['sheet_row_id'] === $sheetId) {
-                $match = $grow;
-            }
-        }
+    foreach ($selectedIds as $sheetId) {
+        $match = $filteredById[$sheetId] ?? null;
         if (!$match) {
-            $planPreview[] = ['sheet_row_id' => $sheetId, 'ok' => false, 'note' => 'That row is not on this page.'];
+            $planPreview[] = ['sheet_row_id' => $sheetId, 'ok' => false, 'note' => 'That row is not in this filtered list.'];
             continue;
         }
         $planPreview[] = ['sheet_row_id' => $sheetId, 'name' => $match['employee_name'], 'plan' => psr_plan_approval_plan($match)];
@@ -463,8 +521,10 @@ foreach ($gridFiltered as $grow) {
     $grow['scope_org_id'] = $orgId;
     $suggestRows[] = $grow;
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['suggest_payments'])) {
-    $suggested = psr_suggest_payments($suggestRows, $_POST['available_funds'] ?? '', (string)($_POST['suggest_policy'] ?? ''), $_POST['plan_date'] ?? '');
+$scopedSuggest = $selectedIds ? psr_rows_for_selection($suggestRows, $selectedIds) : [];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['suggest_payments']) && $selectedIds) {
+    $openApprovals = true;
+    $suggested = psr_suggest_payments($scopedSuggest, $_POST['available_funds'] ?? '', (string)($_POST['suggest_policy'] ?? ''), $_POST['plan_date'] ?? '');
     if (empty($suggested['ok'])) {
         $warnings[] = $suggested['error'] !== '' ? $suggested['error'] : 'The suggestion was not created.';
         unset($_SESSION['psr_suggestion']);
@@ -490,11 +550,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_suggestion'])
         if (!is_array($stored)) {
             throw new RuntimeException('Preview the suggestion again. Nothing was saved.');
         }
-        $check = psr_revalidate_suggestion($stored, $suggestRows, $orgId);
+        $check = psr_revalidate_suggestion($stored, $scopedSuggest, $orgId);
         if (empty($check['ok'])) {
             throw new RuntimeException($check['error']);
         }
-        $savedRound = psr_save_suggestion_round($pdo, $orgId, $actorId, $check['suggestion'], $suggestRows);
+        $savedRound = psr_save_suggestion_round($pdo, $orgId, $actorId, $check['suggestion'], $scopedSuggest);
         unset($_SESSION['psr_suggestion']);
         $_SESSION['psr_flash'] = !empty($savedRound['already'])
             ? 'That dated suggestion was already saved. It was not applied again. Nobody was marked paid.'
@@ -521,6 +581,11 @@ $payHeading = 'Pay proposal';
 if ($suggestionPreview && !empty($suggestionPreview['plan_date'])) {
     $payHeading = 'Pay proposal for ' . $suggestionPreview['plan_date'];
 }
+if ($gridDiff || $planPreview || $previewPlans || $suggestionPreview) {
+    $openApprovals = true;
+}
+$approvalPanel = psr_approvals_panel(count($selectedIds), count($pageSheetIds), count($filteredSheetIds));
+$payRunSummary = psr_pay_run_summary($suggestionPreview['suggestion'] ?? null, count($selectedIds));
 $csrf = ps_csrf_token();
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
@@ -550,6 +615,18 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .src-paid { background: #dcfce7; }
         .src-stale { background: #ffedd5; }
         .src-conflict { background: #fee2e2; }
+        .remove-draft { color: #b91c1c; font-weight: 800; display: block; margin-top: 4px; }
+        .approvals-modal { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, .5); z-index: 80; }
+        .approvals-modal.open { display: block; }
+        .approvals-panel { background: #fff; max-width: 880px; margin: 48px auto; border-radius: 12px; padding: 18px 18px 8px; max-height: 88vh; overflow: auto; }
+        .approval-section { border: 2px solid #cbd5e1; border-radius: 10px; padding: 12px; margin-bottom: 12px; background: #fff; }
+        .approval-section h6 { font-weight: 800; margin-bottom: 4px; }
+        .approval-section.save { border-color: #0369a1; }
+        .approval-section.owed { border-color: #15803d; }
+        .approval-section.run { border-color: #b45309; }
+        tr.group-summary td, tr.group-summary td.ident { background: #e0f2fe; font-weight: 700; }
+        tr.group-detail[hidden] { display: none; }
+        tr.grand-total td { background: #0f172a; color: #fff; font-weight: 800; }
     </style>
 </head>
 <body>
@@ -589,6 +666,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-2 mb-2"><label>Route</label><select class="form-control form-control-sm" name="route"><?php foreach (['all','unset','cash','adp'] as $opt): ?><option <?= $gridFilter['route']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Staff</label><select class="form-control form-control-sm" name="active"><?php foreach (['all','active'] as $opt): ?><option <?= $gridFilter['active']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Unresolved</label><select class="form-control form-control-sm" name="unresolved"><option value="">All</option><option value="1" <?= !empty($gridFilter['unresolved'])?'selected':'' ?>>Needs review</option></select></div>
+            <div class="col-md-2 mb-2"><label>Group by employee</label><input type="hidden" name="group" value="0"><label class="d-block mt-1"><input type="checkbox" name="group" value="1" <?= $groupOn ? 'checked' : '' ?> onchange="this.form.submit()"> On</label></div>
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>
         <p class="mb-0 text-muted">Filters change this spreadsheet only. They do not certify a live unpaid balance. The company all-period total stays available under the details below.</p>
@@ -600,101 +678,112 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
             <div>
                 <h5 class="mb-1">Pay spreadsheet</h5>
-                <p class="mb-0">System lines and older sheet rows for this company. The pay proposal is a draft until you preview and confirm it. Confirming a proposal does not mark anyone paid. Source Paid and Unpaid stay as evidence. A blank imported date stays blank.</p>
+                <p class="mb-0"><?= $groupOn ? 'Grouped by employee. The total at the bottom covers every filtered row.' : 'One row per period.' ?> Select rows, then open Approvals. Nothing here marks anyone paid.</p>
             </div>
-            <div>
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="selectVisible">Select visible</button>
-                <button class="btn btn-sm btn-primary" name="preview_grid_save" value="1">Preview draft save</button>
-                <button class="btn btn-sm btn-outline-dark" name="preview_approval" value="1">Preview obligation approval</button>
-                <button class="btn btn-sm btn-outline-warning" name="preview_plan_rows" value="1">Preview proposal approval</button>
+            <div class="text-right">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="selectFiltered">Select all filtered rows</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="clearSelection">Clear selection</button>
+                <button type="button" class="btn btn-primary font-weight-bold" id="openApprovals">Approvals (<span id="selectedCount">0</span> selected)</button>
             </div>
         </div>
-        <?php if ($gridDiff): ?>
-            <div class="alert <?= !empty($gridDiff['ok']) ? 'alert-info' : 'alert-warning' ?>">
-                <?php if (!empty($gridDiff['ok'])): ?>
-                    <form method="POST" class="mb-0">
-                        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                        <?= count($gridDiff['changes']) ?> draft change(s). Payroll will not be written.
-                        <button class="btn btn-sm btn-warning" name="confirm_grid_save" value="1">Confirm draft save</button>
-                    </form>
-                <?php else: foreach ($gridDiff['blocked'] as $block): ?>
-                    <div><?= psr_h($block['key']) ?>: <?= psr_h($block['reason']) ?></div>
-                <?php endforeach; endif; ?>
-            </div>
-        <?php endif; ?>
-        <?php if ($planPreview): ?>
-            <div class="alert alert-warning">
-                <?php foreach ($planPreview as $item): ?>
-                    <div><?= psr_h($item['name'] ?? ('Row ' . ($item['sheet_row_id'] ?? ''))) ?>: <?= psr_h($item['plan']['note'] ?? ($item['note'] ?? '')) ?> Payment posted: no. Wage created: no.</div>
-                <?php endforeach; ?>
-                <form method="POST" class="mt-2 mb-0">
-                    <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                    <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                    <button class="btn btn-sm btn-warning" name="confirm_plan_rows" value="1">Confirm proposal approval</button>
-                </form>
-            </div>
-        <?php endif; ?>
-        <p>
-            Filtered rows <?= (int)$gridTotals['rows'] ?>.
-            Known gross <?= $gridTotals['gross_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['gross_known_sum'], 2) ?>
-            (<?= (int)$gridTotals['gross_missing'] ?> missing).
-            Known net <?= $gridTotals['net_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['net_known_sum'], 2) ?>
-            (<?= (int)$gridTotals['net_unknown'] ?> unknown).
-            Confirmed paid <?= $gridTotals['paid_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['paid_known_sum'], 2) ?>.
-            Known balance before the pay proposal <?= $gridTotals['balance_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['balance_known_sum'], 2) ?>
-            (<?= (int)$gridTotals['balance_incomplete'] ?> incomplete).
-            Source conflicts <?= (int)$gridTotals['source_conflicts'] ?>.
-            Unresolved <?= (int)$gridTotals['unresolved'] ?>.
-            This is the filtered view, not a certified company liability.
-        </p>
-        <div class="border rounded p-2 mb-2 bg-light">
-            <div class="form-row align-items-end">
-                <div class="col-md-2 mb-2">
-                    <label>Pay date</label>
-                    <input type="date" class="form-control form-control-sm" name="plan_date" value="<?= psr_h((string)($suggestionPreview['plan_date'] ?? '')) ?>">
+        <input type="hidden" name="select_all_filtered" id="selectAllFiltered" value="0">
+        <input type="hidden" name="amounts_owed_only" value="1">
+        <div class="approvals-modal <?= $openApprovals ? 'open' : '' ?>" id="approvalsModal">
+            <div class="approvals-panel">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h5 class="mb-0">Approvals (<span class="js-selected-count">0</span> selected)</h5>
+                    <button type="button" class="btn btn-sm btn-outline-dark" id="closeApprovals">Close</button>
                 </div>
-                <div class="col-md-2 mb-2">
-                    <label>Available funds (CAD)</label>
-                    <input class="form-control form-control-sm" name="available_funds" value="<?= $suggestionPreview ? psr_h((string)$suggestionPreview['available_funds']) : '' ?>" placeholder="0.00" inputmode="decimal">
+                <div class="approval-section save">
+                    <h6>1. Save my edits</h6>
+                    <p class="mb-1">Saves the amounts typed on this page as drafts. This is not an approval.</p>
+                    <p class="mb-2">This page: <?= (int)$approvalPanel['page_rows'] ?> draft row(s). Payroll is not written.</p>
+                    <button class="btn btn-outline-primary" name="preview_grid_save" value="1">Review save</button>
+                    <?php if ($gridDiff && !empty($gridDiff['ok'])): ?>
+                        <div class="alert alert-info mt-2"><?= count($gridDiff['changes']) ?> typed change(s) ready to save. Nobody is marked paid.</div>
+                        <button class="btn btn-primary" name="confirm_grid_save" value="1">Confirm save</button>
+                    <?php elseif ($gridDiff): ?>
+                        <div class="alert alert-warning mt-2"><?php foreach ($gridDiff['blocked'] as $block): ?><div><?= psr_h($block['key']) ?>: <?= psr_h($block['reason']) ?></div><?php endforeach; ?></div>
+                    <?php endif; ?>
                 </div>
-                <div class="col-md-4 mb-2">
-                    <label>Suggestion policy</label>
-                    <select class="form-control form-control-sm" name="suggest_policy">
-                        <option value="oldest_first" <?= (($suggestionPreview['policy'] ?? 'oldest_first') === 'oldest_first') ? 'selected' : '' ?>>Oldest verified amount owing first</option>
-                        <option value="equal_same_date" <?= (($suggestionPreview['policy'] ?? '') === 'equal_same_date') ? 'selected' : '' ?>>Equal split on the same period start</option>
-                    </select>
+                <div class="approval-section owed">
+                    <h6>2. Approve amounts owed</h6>
+                    <p class="mb-1">Approves gross and net for the <span class="js-selected-count">0</span> selected row(s). It does not mark anyone paid.</p>
+                    <p class="mb-2">Selected rows: <span class="js-selected-count">0</span>. Filtered draft rows available: <?= count($filteredSheetIds) ?>.</p>
+                    <button class="btn btn-outline-success" name="preview_approval" value="1">Review amounts owed</button>
+                    <?php if ($previewPlans): ?>
+                        <div class="alert alert-info mt-2">
+                            <?php foreach (array_slice($previewPlans, 0, 12) as $plan): ?>
+                                <div><strong><?= psr_h($plan['employee_name'] ?? ('Row ' . ($plan['row_id'] ?? ''))) ?></strong>
+                                    <?= empty($plan['ok']) ? 'Blocked' : 'Ready' ?>.
+                                    Wage: <?= psr_h($plan['wage']['action'] ?? '') ?>.
+                                    Payment: <?= psr_h($plan['payment']['action'] ?? '') ?>.
+                                    <?php if (($plan['payment']['action'] ?? '') === 'post'): ?>This button will refuse it because it would record a payment.<?php endif; ?>
+                                </div>
+                            <?php endforeach; ?>
+                            <?php if (count($previewPlans) > 12): ?><div><?= count($previewPlans) - 12 ?> more row(s) in this preview.</div><?php endif; ?>
+                        </div>
+                        <?php $savedPreview = $_SESSION['psr_preview'] ?? null; if ($savedPreview && (int)$savedPreview['org_id'] === $orgId): ?>
+                            <input type="hidden" name="idempotency_key" value="<?= psr_h($savedPreview['key']) ?>">
+                            <button class="btn btn-success" name="confirm_approval" value="1">Confirm amounts owed</button>
+                        <?php endif; ?>
+                    <?php endif; ?>
                 </div>
-                <div class="col-md-4 mb-2">
-                    <button class="btn btn-sm btn-outline-primary" name="suggest_payments" value="1">Suggest payments</button>
-                    <?php if ($suggestionPreview): ?>
-                        <button class="btn btn-sm btn-outline-secondary" name="cancel_suggestion" value="1">Cancel suggestion</button>
+                <div class="approval-section run">
+                    <h6>3. Approve this pay run</h6>
+                    <p class="mb-1">Approves the payment plan for the <span class="js-selected-count">0</span> selected row(s). It does not mark anyone paid and does not send money.</p>
+                    <div class="form-row">
+                        <div class="col-md-4 mb-2"><label>Pay date</label><input type="date" class="form-control form-control-sm" name="plan_date" value="<?= psr_h((string)($suggestionPreview['plan_date'] ?? '')) ?>"></div>
+                        <div class="col-md-4 mb-2"><label>Available funds (CAD)</label><input class="form-control form-control-sm" name="available_funds" value="<?= $suggestionPreview ? psr_h((string)$suggestionPreview['available_funds']) : '' ?>" placeholder="0.00" inputmode="decimal"></div>
+                        <div class="col-md-4 mb-2"><label>Suggestion policy</label>
+                            <select class="form-control form-control-sm" name="suggest_policy">
+                                <option value="oldest_first" <?= (($suggestionPreview['policy'] ?? 'oldest_first') === 'oldest_first') ? 'selected' : '' ?>>Oldest verified amount owing first</option>
+                                <option value="equal_same_date" <?= (($suggestionPreview['policy'] ?? '') === 'equal_same_date') ? 'selected' : '' ?>>Equal split on the same period start</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p class="mb-2">Selected rows: <?= (int)$payRunSummary['rows'] ?>.
+                        Proposed payment <?= $payRunSummary['proposed'] === null ? 'not suggested yet' : number_format((float)$payRunSummary['proposed'], 2) ?>.
+                        Available funds <?= $payRunSummary['available'] === null ? 'not entered' : number_format((float)$payRunSummary['available'], 2) ?>.
+                        Remaining <?= $payRunSummary['remaining'] === null ? 'incomplete' : number_format((float)$payRunSummary['remaining'], 2) ?>.
+                        <?php if ($payRunSummary['shortfall'] !== null): ?>Shortfall <?= number_format((float)$payRunSummary['shortfall'], 2) ?>.<?php endif; ?>
+                    </p>
+                    <?php if ($suggestionPreview): $sug = $suggestionPreview['suggestion']; ?>
+                        <div class="alert alert-warning">
+                            <?= psr_h($sug['policy_label']) ?>
+                            Reserve <?= $sug['total_reserve'] === null ? 'incomplete' : number_format((float)$sug['total_reserve'], 2) ?>.
+                            Funding required <?= $sug['total_funding'] === null ? 'incomplete' : number_format((float)$sug['total_funding'], 2) ?>.
+                            The reserve does not reduce wages. Save the suggestion before confirming the pay run if you want these amounts kept.
+                            <div class="mt-2">
+                                <button class="btn btn-sm btn-outline-secondary" name="cancel_suggestion" value="1">Cancel suggestion</button>
+                                <button class="btn btn-sm btn-outline-primary" name="confirm_suggestion" value="1">Save suggestion as draft</button>
+                            </div>
+                        </div>
+                    <?php endif; ?>
+                    <button class="btn btn-outline-primary" name="suggest_payments" value="1">Suggest payments</button>
+                    <button class="btn btn-outline-warning" name="preview_plan_rows" value="1">Review this pay run</button>
+                    <?php if ($planPreview): ?>
+                        <div class="alert alert-info mt-2">
+                            <?php $planSum = 0.0; $planKnown = 0; foreach ($planPreview as $item):
+                                $planNote = $item['note'] ?? '';
+                                if (isset($item['plan']) && is_array($item['plan'])) {
+                                    $planNote = (string)($item['plan']['note'] ?? $planNote);
+                                }
+                            ?>
+                                <div><?= psr_h($item['name'] ?? ('Row ' . ($item['sheet_row_id'] ?? ''))) ?>: <?= psr_h($planNote) ?> Payment posted: no.</div>
+                                <?php if (isset($item['plan']['amount']) && $item['plan']['amount'] !== null) { $planSum += (float)$item['plan']['amount']; $planKnown++; } ?>
+                            <?php endforeach; ?>
+                            <div><?= count($planPreview) ?> selected row(s). Proposed total <?= $planKnown ? number_format($planSum, 2) : 'Pending' ?>.</div>
+                        </div>
+                        <button class="btn btn-warning" name="confirm_plan_rows" value="1">Confirm this pay run</button>
                     <?php endif; ?>
                 </div>
             </div>
-            <p class="mb-0 text-muted">Suggestions use the filtered rows, including other pages of this filter, and they use saved drafts. Typed amounts stay as they are until you preview a draft save or apply a suggestion. A suggestion is editable, cancelable, and not approved. It is not imported, not sent to ADP or a bank, and not marked paid. Cost reserves are funding set aside. They do not reduce the wage payable. A planned recovery is not cash you can assign, and a planned deposit of these same funds is not extra money.</p>
-            <?php if ($suggestionPreview): $sug = $suggestionPreview['suggestion']; ?>
-                <div class="alert alert-warning mt-2 mb-0">
-                    <strong><?= psr_h($payHeading) ?></strong>
-                    — <?= psr_h($sug['policy_label']) ?>
-                    Available <?= number_format((float)$sug['available_funds'], 2) ?>.
-                    Proposed base payout <?= number_format((float)$sug['total_wage'], 2) ?>.
-                    Tax and employer cost reserve <?= $sug['total_reserve'] === null ? 'Incomplete' : number_format((float)$sug['total_reserve'], 2) ?>.
-                    Total funding required <?= $sug['total_funding'] === null ? 'Incomplete' : number_format((float)$sug['total_funding'], 2) ?>.
-                    <?php if ($sug['incomplete']): ?>Funding plan incomplete. Unknown employer or GST cost was not estimated, so this does not claim the available funds cover every cost.<?php else: ?>
-                        Funds remaining <?= number_format((float)$sug['remaining_funds'], 2) ?>.
-                        Shortfall <?= number_format((float)$sug['shortfall'], 2) ?>.
-                        <?= !empty($sug['claims_complete_fit']) ? 'Known wage payouts and verified reserves fit in the available funds.' : 'The available funds do not cover every verified amount and reserve.' ?>
-                    <?php endif; ?>
-                    <div>Reserves do not reduce anyone's wage payable. Applying this writes a new dated draft only.</div>
-                    <button class="btn btn-sm btn-warning mt-2" name="confirm_suggestion" value="1">Apply suggestion to draft</button>
-                </div>
-            <?php endif; ?>
         </div>
         <div class="grid-wrap">
         <table class="table table-sm table-bordered paygrid mb-0">
             <thead><tr>
-                <th class="ident">Select</th>
+                <th class="ident"><label class="mb-0 text-white"><input type="checkbox" id="selectPage"> Select all on this page</label></th>
                 <th class="ident">Person / store</th>
                 <th>Period</th>
                 <th>Source status</th>
@@ -710,20 +799,49 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <th>Provenance</th>
             </tr></thead>
             <tbody>
-            <?php $lastStore = null; foreach ($gridPage['rows'] as $grow):
-                if ($grow['store_name'] !== $lastStore) {
+            <?php
+            $renderGroups = $groupOn ? $groupPage['rows'] : [['key' => '', 'not_linked' => false, 'rows' => $gridPage['rows'], 'totals' => null, 'sheet_ids' => []]];
+            $lastStore = null;
+            foreach ($renderGroups as $employeeGroup):
+                if ($groupOn):
+                    $gt = $employeeGroup['totals'];
+            ?>
+                <tr class="group-summary">
+                    <td class="ident">
+                        <?php if ($employeeGroup['sheet_ids']): ?>
+                            <label class="small mb-0"><input type="checkbox" class="group-check" data-group="<?= psr_h($employeeGroup['key']) ?>"> Select</label>
+                        <?php endif; ?>
+                        <button type="button" class="btn btn-sm btn-link p-0 group-toggle" data-group="<?= psr_h($employeeGroup['key']) ?>" aria-expanded="false">Show periods</button>
+                    </td>
+                    <td class="ident"><?= psr_h($employeeGroup['employee_name']) ?><div class="text-muted"><?= psr_h($employeeGroup['store_name'] !== '' ? $employeeGroup['store_name'] : 'Store not set') ?></div><?php if (!empty($employeeGroup['not_linked'])): ?><div class="pending">not linked</div><?php endif; ?></td>
+                    <td><?= (int)$gt['rows'] ?> period<?= (int)$gt['rows'] === 1 ? '' : 's' ?></td>
+                    <td colspan="2"><?= !empty($employeeGroup['not_linked']) ? 'Same name only. Not linked to a person.' : 'Linked person and store.' ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['gross'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['net'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['paid'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['balance_before'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['proposed'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($gt['balance_after'])) ?></td>
+                    <td colspan="3"></td>
+                </tr>
+            <?php
+                endif;
+                foreach ($employeeGroup['rows'] as $grow):
+                if (!$groupOn && $grow['store_name'] !== $lastStore) {
                     $lastStore = $grow['store_name'];
                     echo '<tr><td colspan="14"><strong>' . psr_h($lastStore !== '' ? $lastStore : 'Store not set') . '</strong></td></tr>';
                 }
                 $rowClass = !empty($grow['source_conflict']) ? 'src-conflict' : (!empty($grow['freshness']['aug_oct']) ? 'src-stale' : (!empty($grow['source_status']) && $grow['source_status'] === 'paid' ? 'src-paid' : ''));
+                if ($groupOn) {
+                    $rowClass .= ' group-detail';
+                }
             ?>
-                <tr class="<?= psr_h($rowClass) ?>">
+                <tr class="<?= psr_h($rowClass) ?>" <?php if ($groupOn): ?>data-group="<?= psr_h($employeeGroup['key']) ?>" hidden<?php endif; ?>>
                     <td class="ident">
                         <?php if ($grow['sheet_row_id']): ?>
-                            <input type="checkbox" class="row-check" name="row_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>" title="Obligation">
-                            <input type="checkbox" name="plan_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>" title="Proposal">
-                            <label class="small"><input type="checkbox" name="g[<?= psr_h($grow['key']) ?>][delete]" value="1"> Remove draft</label>
-                        <?php else: ?><span class="text-muted">System</span><?php endif; ?>
+                            <label class="small mb-0"><input type="checkbox" class="row-check" name="row_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>"> Select</label>
+                            <label class="small remove-draft"><input type="checkbox" class="remove-draft-box" name="g[<?= psr_h($grow['key']) ?>][delete]" value="1"> Remove draft</label>
+                        <?php else: ?><span class="text-muted">No draft to select</span><?php endif; ?>
                         <input type="hidden" name="g[<?= psr_h($grow['key']) ?>][row_version]" value="<?= (int)$grow['row_version'] ?>">
                     </td>
                     <td class="ident">
@@ -771,22 +889,40 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <td><?= $grow['gst']['state'] === 'amount' || $grow['gst']['state'] === 'unverified_estimate' ? number_format((float)$grow['gst']['amount'], 2) : psr_h($grow['gst']['state']) ?><div class="text-muted"><?= psr_h($grow['gst']['reason']) ?></div></td>
                     <td><?= psr_h($grow['provenance']) ?></td>
                 </tr>
-            <?php endforeach; ?>
+            <?php endforeach; endforeach; ?>
+            <?php if ($groupOn): ?>
+                <tr class="grand-total">
+                    <td class="ident" colspan="2">Filtered total</td>
+                    <td><?= (int)$groupGrand['rows'] ?> period<?= (int)$groupGrand['rows'] === 1 ? '' : 's' ?></td>
+                    <td colspan="2">Every filtered row, including other pages.</td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['gross'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['net'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['paid'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['balance_before'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['proposed'])) ?></td>
+                    <td><?= psr_h(psr_group_figure($groupGrand['balance_after'])) ?></td>
+                    <td colspan="3"></td>
+                </tr>
+            <?php endif; ?>
             </tbody>
         </table>
         </div>
         <div class="d-flex justify-content-between align-items-center mt-2">
-            <div>Page <?= (int)$gridPage['page'] ?> of <?= (int)$gridPage['pages'] ?> (<?= (int)$gridPage['total'] ?> filtered). Selection applies to this page only.</div>
+            <div>Page <?= (int)($groupOn ? $groupPage['page'] : $gridPage['page']) ?> of <?= (int)($groupOn ? $groupPage['pages'] : $gridPage['pages']) ?> (<?= (int)($groupOn ? $groupPage['total'] : $gridPage['total']) ?> <?= $groupOn ? 'employees' : 'rows' ?>). Select all filtered rows includes the other pages.</div>
             <div>
                 <?php
                 $qs = $_GET;
                 $qs['org_id'] = $orgId;
-                $prev = $qs; $prev['page'] = max(1, $gridPage['page'] - 1);
-                $next = $qs; $next['page'] = min($gridPage['pages'], $gridPage['page'] + 1);
+                if (!isset($qs['group'])) {
+                    $qs['group'] = $groupOn ? '1' : '0';
+                }
+                $pageNow = $groupOn ? $groupPage : $gridPage;
+                $prev = $qs; $prev['page'] = max(1, $pageNow['page'] - 1);
+                $next = $qs; $next['page'] = min($pageNow['pages'], $pageNow['page'] + 1);
                 ?>
                 <a class="btn btn-sm btn-outline-secondary" href="?<?= psr_h(http_build_query($prev)) ?>">Previous</a>
                 <a class="btn btn-sm btn-outline-secondary" href="?<?= psr_h(http_build_query($next)) ?>">Next</a>
-                <button class="btn btn-sm btn-primary" name="preview_grid_save" value="1">Preview draft save</button>
+                <button type="button" class="btn btn-primary" id="openApprovalsBottom">Approvals</button>
             </div>
         </div>
     </form>
@@ -957,34 +1093,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <?php endforeach; ?>
             </tbody>
         </table></div>
-        <button class="btn btn-outline-primary" name="preview_approval" value="1">Preview approval</button>
+        <p class="mb-0 text-muted">Use Approvals at the top of the spreadsheet to save edits, approve amounts owed, or approve a pay run.</p>
     </form>
-
-    <?php if ($previewPlans): $savedPreview = $_SESSION['psr_preview'] ?? null; ?>
-    <div class="sheet">
-        <h5>Approval preview</h5>
-        <p>Confirming posts only these effects. Unchecked rows stay drafts. If any checked row is blocked, nothing is posted.</p>
-        <?php foreach ($previewPlans as $plan): ?>
-            <div class="mb-2">
-                <strong><?= psr_h($plan['employee_name'] ?? ('Row ' . $plan['row_id'])) ?></strong>
-                <?php if (empty($plan['ok'])): ?><span class="pending">Blocked</span><?php else: ?><span class="text-success">Ready</span><?php endif; ?>
-                <ul>
-                    <?php foreach ($plan['blocks'] as $block): ?><li><?= psr_h($block) ?></li><?php endforeach; ?>
-                    <?php foreach ($plan['notes'] as $note): ?><li><?= psr_h($note) ?></li><?php endforeach; ?>
-                    <li>Wage: <?= psr_h($plan['wage']['action'] ?? '') ?>. Payment: <?= psr_h($plan['payment']['action'] ?? '') ?> <?= isset($plan['payment']['amount']) && $plan['payment']['amount'] !== null ? number_format((float)$plan['payment']['amount'], 2) : '' ?></li>
-                </ul>
-            </div>
-        <?php endforeach; ?>
-        <?php if ($savedPreview): ?>
-        <form method="POST">
-            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-            <input type="hidden" name="idempotency_key" value="<?= psr_h($savedPreview['key']) ?>">
-            <button class="btn btn-danger font-weight-bold" name="confirm_approval" value="1">Confirm approval and post these rows</button>
-        </form>
-        <?php endif; ?>
-    </div>
-    <?php endif; ?>
 
     <?php if ($edit): ?>
     <form method="POST" class="sheet">
@@ -1102,9 +1212,81 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     </div>
 </div>
 <script>
-document.getElementById('selectVisible').addEventListener('click', function () {
-    document.querySelectorAll('#gridForm .row-check').forEach(function (box) { box.checked = true; });
-});
+(function () {
+    var form = document.getElementById('gridForm');
+    var modal = document.getElementById('approvalsModal');
+    var filteredMode = document.getElementById('selectAllFiltered');
+    var pageBox = document.getElementById('selectPage');
+    var filteredIds = <?= json_encode(array_values($filteredSheetIds)) ?>;
+    function boxes() { return form.querySelectorAll('.row-check'); }
+    function count() {
+        var checked = {};
+        boxes().forEach(function (box) { if (box.checked) checked[box.value] = true; });
+        if (filteredMode.value === '1') {
+            var pageIds = {};
+            boxes().forEach(function (box) { pageIds[box.value] = true; });
+            var n = 0;
+            filteredIds.forEach(function (id) {
+                var key = String(id);
+                if (pageIds[key] && !checked[key]) return;
+                n++;
+            });
+            return n;
+        }
+        return Object.keys(checked).length;
+    }
+    function paint() {
+        var n = count();
+        var label = document.getElementById('selectedCount');
+        if (label) label.textContent = String(n);
+        document.querySelectorAll('.js-selected-count').forEach(function (el) { el.textContent = String(n); });
+    }
+    function openModal() { modal.classList.add('open'); paint(); }
+    if (pageBox) pageBox.addEventListener('change', function () {
+        filteredMode.value = '0';
+        boxes().forEach(function (box) { box.checked = pageBox.checked; });
+        paint();
+    });
+    document.getElementById('selectFiltered').addEventListener('click', function () {
+        filteredMode.value = '1';
+        boxes().forEach(function (box) { box.checked = true; });
+        if (pageBox) pageBox.checked = true;
+        paint();
+    });
+    document.getElementById('clearSelection').addEventListener('click', function () {
+        filteredMode.value = '0';
+        boxes().forEach(function (box) { box.checked = false; });
+        if (pageBox) pageBox.checked = false;
+        paint();
+    });
+    form.addEventListener('change', function (event) {
+        if (event.target.classList.contains('row-check')) paint();
+        if (event.target.classList.contains('group-check')) {
+            var groupId = event.target.getAttribute('data-group');
+            form.querySelectorAll('.group-detail').forEach(function (row) {
+                if (row.getAttribute('data-group') !== groupId) return;
+                row.querySelectorAll('.row-check').forEach(function (box) { box.checked = event.target.checked; });
+            });
+            paint();
+        }
+    });
+    form.addEventListener('click', function (event) {
+        var toggle = event.target.closest('.group-toggle');
+        if (!toggle) return;
+        var groupId = toggle.getAttribute('data-group');
+        var open = toggle.getAttribute('aria-expanded') === 'true';
+        form.querySelectorAll('.group-detail').forEach(function (row) {
+            if (row.getAttribute('data-group') === groupId) row.hidden = open;
+        });
+        toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+        toggle.textContent = open ? 'Show periods' : 'Hide periods';
+    });
+    document.getElementById('openApprovals').addEventListener('click', openModal);
+    var bottom = document.getElementById('openApprovalsBottom');
+    if (bottom) bottom.addEventListener('click', openModal);
+    document.getElementById('closeApprovals').addEventListener('click', function () { modal.classList.remove('open'); });
+    paint();
+})();
 </script>
 </body>
 </html>

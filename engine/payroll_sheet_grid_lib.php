@@ -414,6 +414,120 @@ function psr_suggestion_fingerprint(array $suggestion, array $versions): string
     return hash('sha256', json_encode($slim));
 }
 
+function psr_resolve_selection(array $post, array $pageIds, array $filteredIds): array
+{
+    $posted = [];
+    foreach ((array)($post['row_ids'] ?? []) as $id) {
+        $id = (int)$id;
+        if ($id > 0) {
+            $posted[$id] = true;
+        }
+    }
+    $page = [];
+    foreach ($pageIds as $id) {
+        $page[(int)$id] = true;
+    }
+    $allowed = [];
+    foreach ($filteredIds as $id) {
+        $allowed[(int)$id] = true;
+    }
+    $filteredMode = isset($post['select_all_filtered']) && (string)$post['select_all_filtered'] !== '' && (string)$post['select_all_filtered'] !== '0';
+    $out = [];
+    if ($filteredMode) {
+        foreach ($filteredIds as $id) {
+            $id = (int)$id;
+            if ($id <= 0 || empty($allowed[$id])) {
+                continue;
+            }
+            if (isset($page[$id]) && empty($posted[$id])) {
+                continue;
+            }
+            $out[$id] = true;
+        }
+    } else {
+        foreach ($posted as $id => $_) {
+            if (!empty($allowed[$id])) {
+                $out[$id] = true;
+            }
+        }
+    }
+    $ids = array_map('intval', array_keys($out));
+    sort($ids);
+    return $ids;
+}
+
+function psr_rows_for_selection(array $rows, array $selectedIds): array
+{
+    $want = [];
+    foreach ($selectedIds as $id) {
+        $want[(int)$id] = true;
+    }
+    $out = [];
+    foreach ($rows as $row) {
+        $id = (int)($row['sheet_row_id'] ?? 0);
+        if ($id > 0 && !empty($want[$id])) {
+            $out[] = $row;
+        }
+    }
+    return $out;
+}
+
+function psr_approvals_panel(int $selectedCount, int $pageCount, int $filteredCount): array
+{
+    return [
+        'button' => 'Approvals (' . $selectedCount . ' selected)',
+        'selected' => $selectedCount,
+        'page_rows' => $pageCount,
+        'filtered_rows' => $filteredCount,
+        'sections' => [
+            [
+                'key' => 'save_edits',
+                'title' => '1. Save my edits',
+                'explains' => 'Saves the amounts typed on this page as drafts.',
+                'marks_paid' => false,
+                'sends_money' => false,
+                'needs_selection' => false,
+                'rows' => $pageCount,
+            ],
+            [
+                'key' => 'amounts_owed',
+                'title' => '2. Approve amounts owed',
+                'explains' => 'Approves gross and net for the selected rows. It does not mark anyone paid.',
+                'marks_paid' => false,
+                'sends_money' => false,
+                'needs_selection' => true,
+                'rows' => $selectedCount,
+            ],
+            [
+                'key' => 'pay_run',
+                'title' => '3. Approve this pay run',
+                'explains' => 'Approves the payment plan for the selected rows. It does not mark anyone paid and does not send money.',
+                'marks_paid' => false,
+                'sends_money' => false,
+                'needs_selection' => true,
+                'rows' => $selectedCount,
+            ],
+        ],
+    ];
+}
+
+function psr_pay_run_summary(?array $suggestion, int $selectedCount): array
+{
+    return [
+        'rows' => $selectedCount,
+        'proposed' => $suggestion['total_wage'] ?? null,
+        'reserve' => $suggestion['total_reserve'] ?? null,
+        'funding' => $suggestion['total_funding'] ?? null,
+        'available' => $suggestion['available_funds'] ?? null,
+        'remaining' => $suggestion['remaining_funds'] ?? null,
+        'shortfall' => $suggestion['shortfall'] ?? null,
+        'plan_date' => $suggestion['plan_date'] ?? '',
+        'marks_paid' => false,
+        'sends_money' => false,
+        'posts_payment' => false,
+    ];
+}
+
 function psr_suggestion_is_stale(array $previewVersions, array $currentVersions): bool
 {
     foreach ($previewVersions as $key => $version) {
@@ -1133,6 +1247,111 @@ function psr_grid_totals(array $rows): array
         'unresolved' => $unresolved,
         'complete' => $netUnknown === 0 && $paidUnknown === 0,
     ];
+}
+
+function psr_money_total(array $values): array
+{
+    $sum = 0.0;
+    $known = 0;
+    foreach ($values as $value) {
+        if ($value === null) {
+            continue;
+        }
+        $sum = round($sum + (float)$value, 2);
+        $known++;
+    }
+    return [
+        'amount' => $known > 0 ? $sum : null,
+        'known' => $known,
+        'unknown' => count($values) - $known,
+    ];
+}
+
+function psr_employee_group_key(array $row): string
+{
+    $userId = (int)($row['user_id'] ?? 0);
+    $siteId = (int)($row['site_id'] ?? 0);
+    $store = psr_norm_name($row['store_name'] ?? '');
+    if ($userId > 0) {
+        $storeKey = $siteId > 0 ? 'site:' . $siteId : 'store:' . $store;
+        return 'user:' . $userId . '|' . $storeKey;
+    }
+    return 'name:' . psr_norm_name($row['employee_name'] ?? '') . '|store:' . $store;
+}
+
+function psr_row_money_values(array $row): array
+{
+    $gross = array_key_exists('gross', $row) && $row['gross'] !== null ? (float)$row['gross'] : null;
+    $net = (!empty($row['net_known']) && $row['net'] !== null) ? (float)$row['net'] : null;
+    $paid = (($row['paid_state'] ?? '') === 'amount' && $row['paid'] !== null) ? (float)$row['paid'] : null;
+    $before = (($row['balance_before']['state'] ?? '') === 'amount' && ($row['balance_before']['amount'] ?? null) !== null)
+        ? (float)$row['balance_before']['amount'] : null;
+    $proposed = array_key_exists('today_pay', $row) && $row['today_pay'] !== null ? (float)$row['today_pay'] : null;
+    $after = (($row['balance_after']['state'] ?? '') === 'amount' && ($row['balance_after']['amount'] ?? null) !== null)
+        ? (float)$row['balance_after']['amount'] : null;
+    return [$gross, $net, $paid, $before, $proposed, $after];
+}
+
+function psr_employee_group_totals(array $rows): array
+{
+    $cols = [[], [], [], [], [], []];
+    foreach ($rows as $row) {
+        $values = psr_row_money_values($row);
+        foreach ($values as $i => $value) {
+            $cols[$i][] = $value;
+        }
+    }
+    $named = [];
+    foreach (['gross', 'net', 'paid', 'balance_before', 'proposed', 'balance_after'] as $i => $name) {
+        $named[$name] = psr_money_total($cols[$i]);
+    }
+    $named['rows'] = count($rows);
+    return $named;
+}
+
+function psr_group_employees(array $rows): array
+{
+    $buckets = [];
+    foreach ($rows as $row) {
+        $key = psr_employee_group_key($row);
+        $userId = (int)($row['user_id'] ?? 0);
+        if (!isset($buckets[$key])) {
+            $buckets[$key] = [
+                'key' => $key,
+                'linked' => $userId > 0,
+                'not_linked' => $userId <= 0,
+                'user_id' => $userId,
+                'site_id' => (int)($row['site_id'] ?? 0),
+                'employee_name' => (string)($row['employee_name'] ?? ''),
+                'store_name' => (string)($row['store_name'] ?? ''),
+                'rows' => [],
+                'sheet_ids' => [],
+            ];
+        }
+        $buckets[$key]['rows'][] = $row;
+        $sheetId = (int)($row['sheet_row_id'] ?? 0);
+        if ($sheetId > 0) {
+            $buckets[$key]['sheet_ids'][] = $sheetId;
+        }
+    }
+    $groups = [];
+    foreach ($buckets as $bucket) {
+        usort($bucket['rows'], static function ($a, $b) {
+            return strcmp((string)($a['period_start'] ?? ''), (string)($b['period_start'] ?? ''));
+        });
+        $bucket['sheet_ids'] = array_values(array_unique($bucket['sheet_ids']));
+        sort($bucket['sheet_ids']);
+        $bucket['totals'] = psr_employee_group_totals($bucket['rows']);
+        $groups[] = $bucket;
+    }
+    usort($groups, static function ($a, $b) {
+        $store = strcmp(psr_norm_name($a['store_name']), psr_norm_name($b['store_name']));
+        if ($store !== 0) {
+            return $store;
+        }
+        return strcmp(psr_norm_name($a['employee_name']), psr_norm_name($b['employee_name']));
+    });
+    return $groups;
 }
 
 function psr_plan_approval_plan(array $line): array
