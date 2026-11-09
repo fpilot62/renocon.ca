@@ -17,6 +17,515 @@ function psr_ensure_grid_columns(PDO $pdo): void
     pcr_add_column($pdo, 'payroll_sheet_plan_lines', 'approved_at', 'DATETIME NULL');
     pcr_add_column($pdo, 'payroll_sheet_plan_lines', 'approved_by', 'INT NULL');
     pcr_add_column($pdo, 'payroll_sheet_plan_lines', 'row_version', 'INT NOT NULL DEFAULT 1');
+    pcr_add_column($pdo, 'payroll_sheet_plan_lines', 'pay_on', 'DATE NULL');
+    pcr_add_column($pdo, 'payroll_sheet_plans', 'proposal_key', 'VARCHAR(64) NULL');
+    pcr_add_column($pdo, 'payroll_sheet_plans', 'suggest_policy', 'VARCHAR(40) NULL');
+}
+
+function psr_parse_funds($raw): array
+{
+    if (is_float($raw) && is_nan($raw)) {
+        return ['ok' => false, 'value' => null, 'error' => 'Available funds are not a number.'];
+    }
+    if (is_string($raw) && trim($raw) === '') {
+        return ['ok' => false, 'value' => null, 'error' => 'Enter available funds in CAD.'];
+    }
+    $parsed = psr_parse_amount($raw);
+    if (!$parsed['ok'] || $parsed['value'] === null) {
+        return ['ok' => false, 'value' => null, 'error' => 'Available funds are not a number.'];
+    }
+    if (!is_finite((float)$parsed['value'])) {
+        return ['ok' => false, 'value' => null, 'error' => 'Available funds are not a number.'];
+    }
+    if ($parsed['value'] < 0) {
+        return ['ok' => false, 'value' => null, 'error' => 'Available funds cannot be negative.'];
+    }
+    return ['ok' => true, 'value' => round((float)$parsed['value'], 2), 'error' => ''];
+}
+
+function psr_suggest_policy_label(string $policy): string
+{
+    if ($policy === 'equal_same_date') {
+        return 'Equal split when the period starts on the same date, oldest date first. Extra cents go to the lowest person id.';
+    }
+    return 'Oldest verified amount owing first. A partial payment is used when the funds run out.';
+}
+
+function psr_cents($amount): int
+{
+    return (int)round(((float)$amount) * 100);
+}
+
+function psr_from_cents(int $cents): float
+{
+    return round($cents / 100, 2);
+}
+
+/** Split $pot cents across caps. Extra cents go to the earliest indexes. Sum never exceeds the pot or any cap. */
+function psr_split_cents(int $pot, array $caps): array
+{
+    $count = count($caps);
+    $out = array_fill(0, $count, 0);
+    if ($count === 0 || $pot <= 0) {
+        return $out;
+    }
+    $room = 0;
+    foreach ($caps as $cap) {
+        $room += max(0, (int)$cap);
+    }
+    $pot = min($pot, $room);
+    $base = intdiv($pot, $count);
+    $extra = $pot % $count;
+    foreach ($caps as $i => $cap) {
+        $share = $base + ($i < $extra ? 1 : 0);
+        $out[$i] = min(max(0, (int)$cap), $share);
+    }
+    $left = $pot - array_sum($out);
+    while ($left > 0) {
+        $moved = false;
+        foreach ($out as $i => $value) {
+            if ($left <= 0) {
+                break;
+            }
+            if ($out[$i] < (int)$caps[$i]) {
+                $out[$i]++;
+                $left--;
+                $moved = true;
+            }
+        }
+        if (!$moved) {
+            break;
+        }
+    }
+    return $out;
+}
+
+function psr_verified_cost_reserve(array $row): array
+{
+    $parts = [
+        'er_cpp' => psr_tri($row['er_cpp_state'] ?? 'unknown', $row['er_cpp_amount'] ?? null),
+        'er_ei' => psr_tri($row['er_ei_state'] ?? 'unknown', $row['er_ei_amount'] ?? null),
+        'er_other' => psr_tri($row['er_other_state'] ?? 'unknown', $row['er_other_amount'] ?? null),
+    ];
+    $reasons = [];
+    $reserve = 0.0;
+    foreach ($parts as $name => $part) {
+        if ($part['state'] === 'unknown') {
+            $reasons[] = str_replace('_', ' ', $name) . ' is unknown. No percentage was estimated.';
+        } elseif ($part['state'] === 'amount') {
+            $reserve = round($reserve + (float)$part['amount'], 2);
+        }
+    }
+    $party = strtolower(trim((string)($row['party_class'] ?? 'unanswered')));
+    $invoice = null;
+    $verifiedGst = 0.0;
+    if ($party === 'contractor') {
+        if (empty($row['gst_verified'])) {
+            $reasons[] = 'Contractor GST is not a verified invoice. The unverified estimate was not used, and gst_verified was not turned on.';
+        } else {
+            $gst = psr_gst($row);
+            if (($gst['state'] ?? '') !== 'amount') {
+                $reasons[] = 'Verified contractor GST is pending because the invoice principal is missing. No estimate was used.';
+            } else {
+                $verifiedGst = (float)$gst['amount'];
+                $reserve = round($reserve + $verifiedGst, 2);
+                $invoice = psr_parse_amount($row['gst_invoice_principal'] ?? null)['value'];
+            }
+        }
+    }
+    return [
+        'complete' => !$reasons,
+        'amount' => $reasons ? null : $reserve,
+        'reasons' => $reasons,
+        'verified_gst' => $verifiedGst,
+        'invoice_principal' => $invoice,
+    ];
+}
+
+function psr_suggestion_eligibility(array $row): array
+{
+    if (($row['today_effect'] ?? '') === 'recovery' || ((float)($row['today_pay'] ?? 0) < -0.009 && $row['today_pay'] !== null)) {
+        return ['eligible' => false, 'reason' => 'A planned recovery is not cash available to assign, and it is not a payout.'];
+    }
+    if ((int)($row['user_id'] ?? 0) <= 0) {
+        return ['eligible' => false, 'reason' => 'Person is not linked in this company.'];
+    }
+    if ((int)($row['site_id'] ?? 0) <= 0) {
+        return ['eligible' => false, 'reason' => 'Store is not linked in this company.'];
+    }
+    if (psr_valid_date($row['period_start'] ?? '') === null || psr_valid_date($row['period_end'] ?? '') === null) {
+        return ['eligible' => false, 'reason' => 'Period is missing.'];
+    }
+    if (!empty($row['source_conflict'])) {
+        return ['eligible' => false, 'reason' => 'Source conflict is unresolved.'];
+    }
+    if (empty($row['net_known']) || $row['net'] === null) {
+        return ['eligible' => false, 'reason' => 'Net is unknown. It was not treated as zero.'];
+    }
+    $fresh = $row['freshness'] ?? psr_status_freshness($row);
+    $superseded = !empty($row['reconciled']['supersedes_stale_unpaid']);
+    if (!empty($fresh['aug_oct']) && ($row['source_status'] ?? '') === 'not_paid' && !$superseded) {
+        return ['eligible' => false, 'reason' => 'August–October source unpaid is not a current obligation.'];
+    }
+    if (($row['reconciled']['derived'] ?? '') === 'unresolved') {
+        return ['eligible' => false, 'reason' => 'The row is unresolved and is not certified payable.'];
+    }
+    if (($row['balance_before']['state'] ?? '') !== 'amount' || $row['balance_before']['amount'] === null) {
+        return ['eligible' => false, 'reason' => 'There is no known reconciled amount owing.'];
+    }
+    if ((float)$row['balance_before']['amount'] <= 0.009) {
+        return ['eligible' => false, 'reason' => 'Already fully paid.'];
+    }
+    $costs = psr_verified_cost_reserve($row);
+    if (!$costs['complete']) {
+        return ['eligible' => false, 'reason' => 'Funding plan incomplete. ' . implode(' ', $costs['reasons']), 'incomplete' => true];
+    }
+    return ['eligible' => true, 'reason' => '', 'reserve' => (float)$costs['amount'], 'invoice' => $costs['invoice_principal']];
+}
+
+function psr_suggest_payments(array $rows, $fundsRaw, string $policy, $dateRaw): array
+{
+    $funds = psr_parse_funds($fundsRaw);
+    $date = psr_valid_date($dateRaw);
+    $empty = [
+        'ok' => false,
+        'posts_payment' => false,
+        'approved' => false,
+        'marks_paid' => false,
+        'policy' => $policy,
+        'policy_label' => psr_suggest_policy_label($policy === 'equal_same_date' ? 'equal_same_date' : 'oldest_first'),
+        'plan_date' => $date,
+        'available_funds' => $funds['ok'] ? $funds['value'] : null,
+        'lines' => [],
+        'total_wage' => 0.0,
+        'total_reserve' => null,
+        'total_funding' => null,
+        'remaining_funds' => null,
+        'shortfall' => null,
+        'incomplete' => false,
+        'claims_complete_fit' => false,
+        'error' => '',
+    ];
+    if (!in_array($policy, ['oldest_first', 'equal_same_date'], true)) {
+        $empty['error'] = 'Choose a suggestion policy.';
+        return $empty;
+    }
+    if (!$funds['ok']) {
+        $empty['error'] = $funds['error'];
+        return $empty;
+    }
+    if ($date === null) {
+        $empty['error'] = 'Choose a pay date. A missing imported date was not filled in.';
+        return $empty;
+    }
+    $lines = [];
+    $eligible = [];
+    $incomplete = false;
+    foreach ($rows as $row) {
+        if ((int)($row['org_id'] ?? 0) > 0 && isset($row['scope_org_id']) && (int)$row['org_id'] !== (int)$row['scope_org_id']) {
+            $lines[] = ['key' => $row['key'], 'eligible' => false, 'reason' => 'That row is not in this company.', 'suggested' => null];
+            continue;
+        }
+        $decision = psr_suggestion_eligibility($row);
+        $item = [
+            'key' => $row['key'],
+            'user_id' => (int)($row['user_id'] ?? 0),
+            'site_id' => (int)($row['site_id'] ?? 0),
+            'period_start' => (string)($row['period_start'] ?? ''),
+            'period_end' => (string)($row['period_end'] ?? ''),
+            'eligible' => !empty($decision['eligible']),
+            'reason' => $decision['reason'],
+            'suggested' => null,
+            'wage_payable' => ($row['balance_before']['state'] ?? '') === 'amount' ? $row['balance_before']['amount'] : null,
+            'cost_reserve' => $decision['reserve'] ?? null,
+            'keeps_existing_draft' => array_key_exists('today_pay', $row) ? $row['today_pay'] : null,
+            'pay_on' => $date,
+            'employee_name' => (string)($row['employee_name'] ?? ''),
+            'sheet_row_id' => (int)($row['sheet_row_id'] ?? 0),
+            'row_version' => (int)($row['row_version'] ?? 1),
+            'basis' => (string)($row['basis'] ?? 'unset'),
+            'route' => (string)($row['route'] ?? 'unset'),
+            'party_class' => (string)($row['party_class'] ?? 'unanswered'),
+            'wage_unchanged_by_reserve' => true,
+        ];
+        if (!empty($decision['incomplete'])) {
+            $incomplete = true;
+        }
+        if (!empty($decision['eligible'])) {
+            $item['base_kind'] = $decision['invoice'] !== null ? 'verified_contractor_invoice' : 'wage';
+        }
+        $lines[] = $item;
+        if (!empty($decision['eligible'])) {
+            $item['index'] = count($lines) - 1;
+            $item['reserve_cents'] = psr_cents($decision['reserve'] ?? 0);
+            $base = $decision['invoice'] !== null ? (float)$decision['invoice'] : (float)$row['balance_before']['amount'];
+            $item['base_kind'] = $decision['invoice'] !== null ? 'verified_contractor_invoice' : 'wage';
+            $item['cap_cents'] = psr_cents($base);
+            $item['owed_key'] = $item['user_id'] . '|' . $item['site_id'] . '|' . $item['period_start'] . '|' . $item['period_end'];
+            $eligible[] = $item;
+        }
+    }
+    usort($eligible, static function ($a, $b) {
+        $period = strcmp($a['period_start'], $b['period_start']);
+        if ($period !== 0) {
+            return $period;
+        }
+        if ($a['user_id'] !== $b['user_id']) {
+            return $a['user_id'] <=> $b['user_id'];
+        }
+        return strcmp((string)$a['key'], (string)$b['key']);
+    });
+    $fundsCents = psr_cents($funds['value']);
+    $spentWage = 0;
+    $spentReserve = 0;
+    $assigned = [];
+    $groups = [];
+    foreach ($eligible as $item) {
+        $groups[$item['period_start']][] = $item;
+    }
+    foreach ($groups as $group) {
+        if ($fundsCents <= 0) {
+            break;
+        }
+        if ($policy === 'oldest_first') {
+            foreach ($group as $item) {
+                if ($fundsCents <= 0) {
+                    break;
+                }
+                $already = $assigned[$item['owed_key']] ?? 0;
+                $room = max(0, $item['cap_cents'] - $already);
+                $reserve = $item['reserve_cents'];
+                if ($room <= 0) {
+                    $lines[$item['index']]['suggested'] = 0.0;
+                    $lines[$item['index']]['cost_reserve'] = 0.0;
+                    $lines[$item['index']]['funding_required'] = 0.0;
+                    $lines[$item['index']]['reason'] = 'This person and period is already covered by an earlier proposal in this suggestion. It was not paid twice.';
+                    continue;
+                }
+                if ($fundsCents <= $reserve) {
+                    $lines[$item['index']]['reason'] = $reserve > 0
+                        ? 'Available funds do not cover the verified cost reserve for this older period. No later period was paid ahead of it.'
+                        : 'No funds left after older verified amounts and their cost reserves.';
+                    break 2;
+                }
+                $wage = min($room, $fundsCents - $reserve);
+                $lines[$item['index']]['suggested'] = psr_from_cents($wage);
+                $lines[$item['index']]['cost_reserve'] = psr_from_cents($reserve);
+                $lines[$item['index']]['funding_required'] = psr_from_cents($wage + $reserve);
+                $fundsCents -= ($wage + $reserve);
+                $spentWage += $wage;
+                $spentReserve += $reserve;
+                $assigned[$item['owed_key']] = $already + $wage;
+            }
+            continue;
+        }
+        $caps = [];
+        $meta = [];
+        foreach ($group as $item) {
+            $already = $assigned[$item['owed_key']] ?? 0;
+            $room = max(0, $item['cap_cents'] - $already);
+            $reserve = $item['reserve_cents'];
+            $caps[] = $room;
+            $meta[] = ['item' => $item, 'already' => $already, 'reserve' => $reserve];
+        }
+        $reserveNeed = 0;
+        foreach ($meta as $one) {
+            if ($one['item']['cap_cents'] > 0) {
+                $reserveNeed += $one['reserve'];
+            }
+        }
+        if ($reserveNeed >= $fundsCents) {
+            $lines[$meta[0]['item']['index']]['reason'] = 'Available funds do not cover the verified cost reserve for this date. The equal split was not forced past the budget.';
+            break;
+        }
+        $pot = $fundsCents - $reserveNeed;
+        $shares = psr_split_cents($pot, $caps);
+        foreach ($meta as $i => $one) {
+            $wage = $shares[$i];
+            $reserve = $wage > 0 ? $one['reserve'] : 0;
+            $lines[$one['item']['index']]['suggested'] = psr_from_cents($wage);
+            $lines[$one['item']['index']]['cost_reserve'] = psr_from_cents($reserve);
+            $lines[$one['item']['index']]['funding_required'] = psr_from_cents($wage + $reserve);
+            $fundsCents -= ($wage + $reserve);
+            $spentWage += $wage;
+            $spentReserve += $reserve;
+            $assigned[$one['item']['owed_key']] = $one['already'] + $wage;
+        }
+    }
+    foreach ($lines as $i => $line) {
+        if (!empty($line['eligible']) && $line['suggested'] === null) {
+            $lines[$i]['suggested'] = 0.0;
+            $lines[$i]['cost_reserve'] = 0.0;
+            $lines[$i]['funding_required'] = 0.0;
+            if (($lines[$i]['reason'] ?? '') === '') {
+                $lines[$i]['reason'] = 'No funds left after older verified amounts and their cost reserves.';
+            }
+        }
+    }
+    $need = 0;
+    $seenOwed = [];
+    foreach ($eligible as $item) {
+        if (isset($seenOwed[$item['owed_key']])) {
+            continue;
+        }
+        $seenOwed[$item['owed_key']] = true;
+        $need += $item['cap_cents'] + $item['reserve_cents'];
+    }
+    $spent = $spentWage + $spentReserve;
+    $shortfallCents = max(0, $need - $spent);
+    $accounted = !$incomplete;
+    $fits = $accounted && $shortfallCents === 0 && $spent <= psr_cents($funds['value']);
+    return [
+        'ok' => true,
+        'posts_payment' => false,
+        'approved' => false,
+        'marks_paid' => false,
+        'policy' => $policy,
+        'policy_label' => psr_suggest_policy_label($policy),
+        'plan_date' => $date,
+        'available_funds' => $funds['value'],
+        'lines' => $lines,
+        'total_wage' => psr_from_cents($spentWage),
+        'total_reserve' => $accounted ? psr_from_cents($spentReserve) : null,
+        'total_funding' => $accounted ? psr_from_cents($spent) : null,
+        'remaining_funds' => $accounted ? psr_from_cents($fundsCents) : null,
+        'shortfall' => $accounted ? psr_from_cents($shortfallCents) : null,
+        'incomplete' => $incomplete,
+        'claims_complete_fit' => $fits,
+        'error' => '',
+        'reserves_do_not_reduce_wages' => true,
+        'recovery_added_to_funds' => 0.0,
+        'planned_deposits_added' => 0.0,
+    ];
+}
+
+function psr_suggestion_fingerprint(array $suggestion, array $versions): string
+{
+    $slim = [
+        'date' => $suggestion['plan_date'] ?? '',
+        'funds' => $suggestion['available_funds'] ?? null,
+        'policy' => $suggestion['policy'] ?? '',
+        'versions' => $versions,
+        'lines' => [],
+    ];
+    foreach ($suggestion['lines'] as $line) {
+        $slim['lines'][] = [$line['key'] ?? '', $line['suggested'] ?? null];
+    }
+    return hash('sha256', json_encode($slim));
+}
+
+function psr_suggestion_is_stale(array $previewVersions, array $currentVersions): bool
+{
+    foreach ($previewVersions as $key => $version) {
+        if (!isset($currentVersions[$key]) || (int)$currentVersions[$key] !== (int)$version) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function psr_suggestion_versions(array $rows): array
+{
+    $versions = [];
+    foreach ($rows as $row) {
+        $versions[(string)($row['key'] ?? '')] = (int)($row['row_version'] ?? 1);
+    }
+    return $versions;
+}
+
+function psr_suggestion_updates(array $rows, array $suggestion): array
+{
+    $byKey = [];
+    foreach ($suggestion['lines'] ?? [] as $line) {
+        $byKey[(string)($line['key'] ?? '')] = $line;
+    }
+    $updates = [];
+    foreach ($rows as $row) {
+        $line = $byKey[(string)($row['key'] ?? '')] ?? null;
+        $existing = array_key_exists('today_pay', $row) ? $row['today_pay'] : null;
+        $suggested = $line['suggested'] ?? null;
+        $apply = $line && !empty($line['eligible']) && $suggested !== null && (float)$suggested > 0.009;
+        $updates[] = [
+            'key' => (string)($row['key'] ?? ''),
+            'changed' => $apply,
+            'sheet_row_id' => (int)($row['sheet_row_id'] ?? 0),
+            'proposed_amount' => $apply ? (float)$suggested : $existing,
+            'previous' => $existing,
+            'pay_on' => $apply ? ($suggestion['plan_date'] ?? null) : ($row['pay_on'] ?? ''),
+            'cost_reserve' => $apply ? ($line['cost_reserve'] ?? 0) : null,
+            'employee_name' => (string)($row['employee_name'] ?? ''),
+            'user_id' => (int)($row['user_id'] ?? 0),
+            'site_id' => (int)($row['site_id'] ?? 0),
+            'period_start' => $row['period_start'] ?? null,
+            'period_end' => $row['period_end'] ?? null,
+            'basis' => (string)($row['basis'] ?? 'unset'),
+            'route' => (string)($row['route'] ?? 'unset'),
+            'party_class' => (string)($row['party_class'] ?? 'unanswered'),
+            'row_version' => (int)($row['row_version'] ?? 1),
+            'actual_date' => (string)($row['actual_date'] ?? ''),
+            'posts_payment' => false,
+        ];
+    }
+    return $updates;
+}
+
+function psr_dated_round(array $suggestion, array $versions): array
+{
+    $lines = [];
+    foreach ($suggestion['lines'] ?? [] as $line) {
+        if ((float)($line['suggested'] ?? 0) > 0.009) {
+            $lines[] = $line;
+        }
+    }
+    return [
+        'plan_date' => $suggestion['plan_date'] ?? '',
+        'available_funds' => $suggestion['available_funds'] ?? null,
+        'policy' => $suggestion['policy'] ?? '',
+        'proposal_key' => psr_suggestion_fingerprint($suggestion, $versions),
+        'lines' => $lines,
+        'posts_payment' => false,
+        'approved' => false,
+        'marks_paid' => false,
+    ];
+}
+
+function psr_append_dated_round(array $history, array $round): array
+{
+    $key = (string)($round['proposal_key'] ?? '');
+    if ($key !== '') {
+        foreach ($history as $old) {
+            if ((string)($old['proposal_key'] ?? '') === $key) {
+                return ['history' => $history, 'already' => true, 'posts_payment' => false, 'approved' => false, 'marks_paid' => false];
+            }
+        }
+    }
+    $history[] = $round;
+    return ['history' => $history, 'already' => false, 'posts_payment' => false, 'approved' => false, 'marks_paid' => false];
+}
+
+function psr_revalidate_suggestion(array $stored, array $currentRows, int $scopeOrg): array
+{
+    if ((int)($stored['org_id'] ?? 0) !== $scopeOrg || $scopeOrg <= 0) {
+        return ['ok' => false, 'error' => 'That suggestion is for another company. Nothing was saved.'];
+    }
+    $currentVersions = psr_suggestion_versions($currentRows);
+    $previewVersions = is_array($stored['versions'] ?? null) ? $stored['versions'] : [];
+    if (psr_suggestion_is_stale($previewVersions, $currentVersions)) {
+        return ['ok' => false, 'error' => 'A row changed after the preview. Nothing was saved.'];
+    }
+    $again = psr_suggest_payments(
+        $currentRows,
+        $stored['available_funds'] ?? null,
+        (string)($stored['policy'] ?? ''),
+        $stored['plan_date'] ?? ''
+    );
+    if (empty($again['ok']) || psr_suggestion_fingerprint($again, $currentVersions) !== (string)($stored['fingerprint'] ?? '')) {
+        return ['ok' => false, 'error' => 'The suggestion no longer matches the preview. Nothing was saved.'];
+    }
+    if (!empty($again['posts_payment']) || !empty($again['marks_paid']) || !empty($again['approved'])) {
+        return ['ok' => false, 'error' => 'A suggestion tried to record a payment. Nothing was saved.'];
+    }
+    return ['ok' => true, 'suggestion' => $again, 'error' => ''];
 }
 
 function psr_flags_of($raw): array
@@ -184,17 +693,17 @@ function psr_balance_after(array $before, $todayAmount, string $basis): array
             'amount' => $before['amount'],
             'wage_changed' => false,
             'recovery' => psr_parse_amount($todayAmount)['value'],
-            'reason' => 'A negative today-pay is a pending recovery. It is not a payout, not a payroll deduction, and not money already received or deposited.',
+            'reason' => 'A negative pay proposal is a pending recovery. It is not a payout, not a payroll deduction, and not money already received or deposited.',
         ];
     }
     if ($effect === 'unset' || $effect === 'zero') {
         return ['state' => $before['state'], 'amount' => $before['amount'], 'wage_changed' => false, 'recovery' => null, 'reason' => ''];
     }
     if ($before['state'] !== 'amount' || $before['amount'] === null) {
-        return ['state' => 'incomplete', 'amount' => null, 'wage_changed' => false, 'recovery' => null, 'reason' => 'Today-pay is a proposal. The balance after it is incomplete because the balance before it is not a known amount.'];
+        return ['state' => 'incomplete', 'amount' => null, 'wage_changed' => false, 'recovery' => null, 'reason' => 'The pay proposal is not an actual payment. The balance after it is incomplete because the balance before it is not a known amount.'];
     }
     if (!in_array($basis, ['net', 'gross'], true)) {
-        return ['state' => 'incomplete', 'amount' => null, 'wage_changed' => false, 'recovery' => null, 'reason' => 'Set gross or net before the projected balance can use today-pay. No basis was assumed.'];
+        return ['state' => 'incomplete', 'amount' => null, 'wage_changed' => false, 'recovery' => null, 'reason' => 'Set gross or net before the projected balance can use the pay proposal. No basis was assumed.'];
     }
     $preview = psr_balance_preview([
         'amount_basis' => $basis,
@@ -211,7 +720,7 @@ function psr_balance_after(array $before, $todayAmount, string $basis): array
         'amount' => $preview['preview_balance']['amount'],
         'wage_changed' => false,
         'recovery' => null,
-        'reason' => 'Projected only. Today-pay is not an actual payment.',
+        'reason' => 'Projected only. The pay proposal is not an actual payment.',
     ];
 }
 
@@ -348,9 +857,13 @@ function psr_build_review_grid(array $systemLines, array $sheetRows, array $plan
         $sourceStatus = psr_normalize_status($sheet['reported_status'] ?? 'unknown');
         $before = psr_balance_before($net, $netKnown, $paid, $paidState, $sourceStatus, $fresh['aug_oct'] && $sourceStatus === 'not_paid' && empty($view['supersedes_stale_unpaid']));
         $today = $sheet['proposed_amount'] ?? null;
+        $payOn = '';
         foreach ($planLines as $plan) {
             if ((int)($plan['row_id'] ?? 0) === (int)$sheet['id'] && array_key_exists('proposed_amount', $plan)) {
                 $today = $plan['proposed_amount'];
+                if (!empty($plan['pay_on'])) {
+                    $payOn = (string)$plan['pay_on'];
+                }
             }
         }
         $basis = (string)($sheet['amount_basis'] ?? 'unset');
@@ -388,11 +901,20 @@ function psr_build_review_grid(array $systemLines, array $sheetRows, array $plan
             'reconciled' => $view,
             'balance_before' => $before,
             'today_pay' => psr_parse_amount($today)['ok'] ? psr_parse_amount($today)['value'] : null,
+            'pay_on' => $payOn,
             'today_effect' => psr_today_effect($today),
             'balance_after' => $after,
             'route' => (string)($sheet['pay_route'] ?? 'unset'),
             'basis' => $basis,
             'party_class' => (string)($sheet['party_class'] ?? 'unanswered'),
+            'er_cpp_state' => (string)($sheet['er_cpp_state'] ?? 'unknown'),
+            'er_cpp_amount' => $sheet['er_cpp_amount'] ?? null,
+            'er_ei_state' => (string)($sheet['er_ei_state'] ?? 'unknown'),
+            'er_ei_amount' => $sheet['er_ei_amount'] ?? null,
+            'er_other_state' => (string)($sheet['er_other_state'] ?? 'unknown'),
+            'er_other_amount' => $sheet['er_other_amount'] ?? null,
+            'gst_verified' => !empty($sheet['gst_verified']) ? 1 : 0,
+            'gst_invoice_principal' => $sheet['gst_invoice_principal'] ?? null,
             'gst' => psr_unverified_gst($sheet, $today),
             'candidate' => $candidate,
             'provenance' => $linked
@@ -417,12 +939,16 @@ function psr_build_review_grid(array $systemLines, array $sheetRows, array $plan
         $before = psr_balance_before($ln['net'] ?? null, $netKnown, $ln['paid'] ?? null, $paidState, 'unknown', false);
         $today = null;
         $basis = 'unset';
+        $payOn = '';
         foreach ($planLines as $plan) {
             if ((int)($plan['user_id'] ?? 0) === (int)$ln['user_id']
                 && (int)($plan['site_id'] ?? 0) === (int)$ln['site_id']
                 && psr_periods_overlap($plan, $ln)) {
                 $today = $plan['proposed_amount'] ?? null;
                 $basis = (string)($plan['amount_basis'] ?? 'unset');
+                if (!empty($plan['pay_on'])) {
+                    $payOn = (string)$plan['pay_on'];
+                }
             }
         }
         $rows[] = [
@@ -455,11 +981,20 @@ function psr_build_review_grid(array $systemLines, array $sheetRows, array $plan
             ],
             'balance_before' => $before,
             'today_pay' => psr_parse_amount($today)['ok'] ? psr_parse_amount($today)['value'] : null,
+            'pay_on' => $payOn,
             'today_effect' => psr_today_effect($today),
             'balance_after' => psr_balance_after($before, $today, $basis),
             'route' => 'unset',
             'basis' => $basis,
             'party_class' => 'unanswered',
+            'er_cpp_state' => 'unknown',
+            'er_cpp_amount' => null,
+            'er_ei_state' => 'unknown',
+            'er_ei_amount' => null,
+            'er_other_state' => 'unknown',
+            'er_other_amount' => null,
+            'gst_verified' => 0,
+            'gst_invoice_principal' => null,
             'gst' => ['state' => 'not_applied', 'amount' => null, 'verified' => false, 'reason' => 'No contractor invoice on this system line.'],
             'candidate' => null,
             'provenance' => 'System payroll.',
@@ -651,6 +1186,7 @@ function psr_grid_save_changes(array $postedRows, array $currentByKey): array
             && ($cur['sheet_gross'] ?? null) === $nextGross
             && ($cur['sheet_net'] ?? null) === $nextNet
             && ($cur['today_pay'] ?? null) === $today['value']
+            && (string)($cur['pay_on'] ?? '') === (string)(psr_valid_date($post['pay_on'] ?? '') ?? '')
             && (string)($cur['basis'] ?? 'unset') === (in_array(($post['basis'] ?? ''), ['gross', 'net'], true) ? $post['basis'] : 'unset')
             && (string)($cur['route'] ?? 'unset') === (in_array(($post['route'] ?? ''), ['cash', 'adp'], true) ? $post['route'] : 'unset')
             && (string)($cur['party_class'] ?? 'unanswered') === (in_array(($post['party_class'] ?? ''), ['employee', 'contractor'], true) ? $post['party_class'] : 'unanswered')
@@ -677,6 +1213,7 @@ function psr_grid_save_changes(array $postedRows, array $currentByKey): array
             'gross' => $nextGross,
             'net' => $nextNet,
             'today_pay' => $today['value'],
+            'pay_on' => psr_valid_date($post['pay_on'] ?? ''),
             'basis' => in_array(($post['basis'] ?? ''), ['gross', 'net'], true) ? $post['basis'] : 'unset',
             'route' => in_array(($post['route'] ?? ''), ['cash', 'adp'], true) ? $post['route'] : 'unset',
             'party_class' => in_array(($post['party_class'] ?? ''), ['employee', 'contractor'], true) ? $post['party_class'] : 'unanswered',
@@ -757,21 +1294,21 @@ function psr_apply_grid_drafts(PDO $pdo, int $orgId, int $actor, array $changes)
                 $existing = $ch['sheet_row_id'] > 0 ? $found->fetch(PDO::FETCH_ASSOC) : false;
                 if ($existing && empty($existing['approved_at'])) {
                     $pdo->prepare(
-                        'UPDATE payroll_sheet_plan_lines SET proposed_amount=?, amount_basis=?, pay_route=?, party_class=?, period_start=?, period_end=?, line_effect=?, user_id=?, site_id=?
+                        'UPDATE payroll_sheet_plan_lines SET proposed_amount=?, amount_basis=?, pay_route=?, party_class=?, period_start=?, period_end=?, line_effect=?, user_id=?, site_id=?, pay_on=?
                          WHERE id=? AND org_id=? AND approved_at IS NULL'
                     )->execute([
                         $ch['today_pay'], $ch['basis'], $ch['route'], $ch['party_class'], $ch['period_start'], $ch['period_end'],
-                        $effect, $ch['user_id'] ?: null, $ch['site_id'] ?: null, (int)$existing['id'], $orgId,
+                        $effect, $ch['user_id'] ?: null, $ch['site_id'] ?: null, $ch['pay_on'] ?: null, (int)$existing['id'], $orgId,
                     ]);
                 } elseif (!$existing) {
                     $pdo->prepare(
                         'INSERT INTO payroll_sheet_plan_lines
-                            (org_id, plan_id, row_id, employee_name, user_id, site_id, proposed_amount, amount_basis, pay_route, party_class, period_start, period_end, line_effect, note, created_at)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())'
+                            (org_id, plan_id, row_id, employee_name, user_id, site_id, proposed_amount, amount_basis, pay_route, party_class, period_start, period_end, line_effect, pay_on, note, created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())'
                     )->execute([
                         $orgId, $planId, $ch['sheet_row_id'] ?: null, $ch['employee_name'], $ch['user_id'] ?: null, $ch['site_id'] ?: null,
                         $ch['today_pay'], $ch['basis'], $ch['route'], $ch['party_class'], $ch['period_start'], $ch['period_end'],
-                        $effect, 'Spreadsheet proposal. Not an actual payment.',
+                        $effect, $ch['pay_on'] ?: null, 'Spreadsheet proposal. Not an actual payment.',
                     ]);
                 }
             }
@@ -829,6 +1366,100 @@ function psr_approve_plan_lines(PDO $pdo, int $orgId, int $actor, array $lineIds
         }
         $pdo->commit();
         return ['approved' => $done, 'already' => $skipped, 'payments_posted' => 0];
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+}
+
+function psr_save_suggestion_round(PDO $pdo, int $orgId, int $actor, array $suggestion, array $rows): array
+{
+    psr_ensure_grid_columns($pdo);
+    if (!empty($suggestion['posts_payment']) || !empty($suggestion['marks_paid']) || !empty($suggestion['approved'])) {
+        throw new RuntimeException('A suggestion tried to record a payment. Nothing was saved.');
+    }
+    $versions = psr_suggestion_versions($rows);
+    $round = psr_dated_round($suggestion, $versions);
+    if ($round['proposal_key'] === '') {
+        throw new RuntimeException('The suggestion has no key. Nothing was saved.');
+    }
+    $updates = psr_suggestion_updates($rows, $suggestion);
+    $pdo->beginTransaction();
+    try {
+        $have = $pdo->prepare('SELECT id FROM payroll_sheet_plans WHERE org_id = ? AND proposal_key = ? LIMIT 1');
+        $have->execute([$orgId, $round['proposal_key']]);
+        $existingId = (int)$have->fetchColumn();
+        if ($existingId > 0) {
+            $pdo->commit();
+            return ['already' => true, 'plan_id' => $existingId, 'payments_posted' => 0, 'approved' => false, 'marks_paid' => false];
+        }
+        $pdo->prepare(
+            'INSERT INTO payroll_sheet_plans (org_id, plan_date, title, available_amount, note, created_by, created_at, proposal_key, suggest_policy)
+             VALUES (?,?,?,?,?,?,NOW(),?,?)'
+        )->execute([
+            $orgId,
+            $round['plan_date'],
+            'Pay proposal ' . $round['plan_date'],
+            $round['available_funds'],
+            'Suggested draft for ' . $round['plan_date'] . '. ' . psr_suggest_policy_label((string)$round['policy']) . ' Not a payment, not approved, and not sent to ADP or a bank.',
+            $actor,
+            $round['proposal_key'],
+            $round['policy'],
+        ]);
+        $planId = (int)$pdo->lastInsertId();
+        $written = 0;
+        foreach ($updates as $up) {
+            if (empty($up['changed'])) {
+                continue;
+            }
+            if ($up['user_id'] > 0) {
+                $uq = $pdo->prepare('SELECT id FROM users WHERE id = ? AND org_id = ?');
+                $uq->execute([$up['user_id'], $orgId]);
+                if (!$uq->fetchColumn()) {
+                    throw new RuntimeException('That employee is not in this company. Nothing in this suggestion was saved.');
+                }
+            }
+            if ($up['site_id'] > 0) {
+                $sq = $pdo->prepare('SELECT SId FROM sites WHERE SId = ? AND org_id = ?');
+                $sq->execute([$up['site_id'], $orgId]);
+                if (!$sq->fetchColumn()) {
+                    throw new RuntimeException('That store is not in this company. Nothing in this suggestion was saved.');
+                }
+            }
+            $note = 'Suggested pay on ' . $round['plan_date'] . '. Cost reserve '
+                . number_format((float)$up['cost_reserve'], 2)
+                . ' is funding set aside and does not reduce the wage payable. Not an actual payment.';
+            $pdo->prepare(
+                'INSERT INTO payroll_sheet_plan_lines
+                    (org_id, plan_id, row_id, employee_name, user_id, site_id, proposed_amount, amount_basis, pay_route, party_class, period_start, period_end, line_effect, pay_on, note, created_at)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())'
+            )->execute([
+                $orgId, $planId, $up['sheet_row_id'] ?: null, $up['employee_name'], $up['user_id'] ?: null, $up['site_id'] ?: null,
+                $up['proposed_amount'], $up['basis'] ?: 'unset', $up['route'] ?: 'unset', $up['party_class'] ?: 'unanswered',
+                $up['period_start'], $up['period_end'], 'payout', $round['plan_date'], $note,
+            ]);
+            if ($up['sheet_row_id'] > 0) {
+                $upd = $pdo->prepare(
+                    'UPDATE payroll_sheet_rows SET proposed_amount = ?, row_version = row_version + 1, updated_at = NOW()
+                     WHERE id = ? AND org_id = ? AND deleted_at IS NULL AND row_version = ?'
+                );
+                $upd->execute([$up['proposed_amount'], $up['sheet_row_id'], $orgId, $up['row_version']]);
+                if ($upd->rowCount() < 1) {
+                    throw new RuntimeException('A row changed after the preview. Nothing in this suggestion was saved.');
+                }
+                psr_insert_revision($pdo, $orgId, 'row', $up['sheet_row_id'], 'suggest_draft', $actor, ['proposed_amount' => $up['previous'], 'actual_date' => $up['actual_date']], [
+                    'proposed_amount' => $up['proposed_amount'],
+                    'pay_on' => $round['plan_date'],
+                    'actual_date' => $up['actual_date'],
+                    'posts_payment' => false,
+                ]);
+            }
+            $written++;
+        }
+        $pdo->commit();
+        return ['already' => false, 'plan_id' => $planId, 'lines' => $written, 'payments_posted' => 0, 'approved' => false, 'marks_paid' => false];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();

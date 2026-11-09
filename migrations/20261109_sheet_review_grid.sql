@@ -11,3 +11,6 @@ ALTER TABLE payroll_sheet_plan_lines ADD COLUMN line_effect VARCHAR(20) NOT NULL
 ALTER TABLE payroll_sheet_plan_lines ADD COLUMN approved_at DATETIME NULL;
 ALTER TABLE payroll_sheet_plan_lines ADD COLUMN approved_by INT NULL;
 ALTER TABLE payroll_sheet_plan_lines ADD COLUMN row_version INT NOT NULL DEFAULT 1;
+ALTER TABLE payroll_sheet_plan_lines ADD COLUMN pay_on DATE NULL;
+ALTER TABLE payroll_sheet_plans ADD COLUMN proposal_key VARCHAR(64) NULL;
+ALTER TABLE payroll_sheet_plans ADD COLUMN suggest_policy VARCHAR(40) NULL;

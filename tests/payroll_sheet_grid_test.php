@@ -90,6 +90,7 @@ $approve = substr($src, strpos($src, 'function psr_approve_plan_lines'));
 check('proposal approval does not call payment posting', strpos($approve, 'pcr_apply_payment') === false);
 $html = file_get_contents(__DIR__ . '/../payroll_sheet_review.php');
 check('spreadsheet is the first review surface', strpos($html, 'Pay spreadsheet') < strpos($html, 'All-period total'));
+check('pay date and available funds replace a today-pay heading', strpos($html, 'name="plan_date"') !== false && strpos($html, 'available_funds') !== false && strpos($html, 'suggest_payments') !== false && strpos($html, '>Today pay<') === false);
 check('visible selection and draft preview exist', strpos($html, 'selectVisible') !== false && strpos($html, 'preview_grid_save') !== false && strpos($html, 'preview_plan_rows') !== false);
 check('source conflict and August freshness are shown', strpos($html, 'Source conflict') !== false && strpos($html, 'Aug–Oct needs reconciliation') !== false);
 check('staff audit source was not invented', !is_file(__DIR__ . '/../staff_audit.php'));

@@ -458,9 +458,69 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_plan_rows']))
         $warnings[] = $e->getMessage();
     }
 }
+$suggestRows = [];
+foreach ($gridFiltered as $grow) {
+    $grow['scope_org_id'] = $orgId;
+    $suggestRows[] = $grow;
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['suggest_payments'])) {
+    $suggested = psr_suggest_payments($suggestRows, $_POST['available_funds'] ?? '', (string)($_POST['suggest_policy'] ?? ''), $_POST['plan_date'] ?? '');
+    if (empty($suggested['ok'])) {
+        $warnings[] = $suggested['error'] !== '' ? $suggested['error'] : 'The suggestion was not created.';
+        unset($_SESSION['psr_suggestion']);
+    } else {
+        $versions = psr_suggestion_versions($suggestRows);
+        $_SESSION['psr_suggestion'] = [
+            'org_id' => $orgId,
+            'available_funds' => $suggested['available_funds'],
+            'policy' => $suggested['policy'],
+            'plan_date' => $suggested['plan_date'],
+            'versions' => $versions,
+            'fingerprint' => psr_suggestion_fingerprint($suggested, $versions),
+            'suggestion' => $suggested,
+        ];
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_suggestion'])) {
+    unset($_SESSION['psr_suggestion']);
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_suggestion'])) {
+    try {
+        $stored = $_SESSION['psr_suggestion'] ?? null;
+        if (!is_array($stored)) {
+            throw new RuntimeException('Preview the suggestion again. Nothing was saved.');
+        }
+        $check = psr_revalidate_suggestion($stored, $suggestRows, $orgId);
+        if (empty($check['ok'])) {
+            throw new RuntimeException($check['error']);
+        }
+        $savedRound = psr_save_suggestion_round($pdo, $orgId, $actorId, $check['suggestion'], $suggestRows);
+        unset($_SESSION['psr_suggestion']);
+        $_SESSION['psr_flash'] = !empty($savedRound['already'])
+            ? 'That dated suggestion was already saved. It was not applied again. Nobody was marked paid.'
+            : 'Suggestion saved as a draft pay proposal for ' . (string)$check['suggestion']['plan_date'] . '. It is not approved, not imported, and not a payment.';
+        header('Location: payroll_sheet_review.php?org_id=' . $orgId . '#plans');
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
 $planPreview = (isset($_SESSION['psr_plan_preview']['rows']) && (int)($_SESSION['psr_plan_preview']['org_id'] ?? 0) === $orgId)
     ? $_SESSION['psr_plan_preview']['rows']
     : [];
+$suggestionPreview = (isset($_SESSION['psr_suggestion']['suggestion']) && (int)($_SESSION['psr_suggestion']['org_id'] ?? 0) === $orgId)
+    ? $_SESSION['psr_suggestion']
+    : null;
+$suggestByKey = [];
+if ($suggestionPreview) {
+    foreach ($suggestionPreview['suggestion']['lines'] as $line) {
+        $suggestByKey[(string)$line['key']] = $line;
+    }
+}
+$payHeading = 'Pay proposal';
+if ($suggestionPreview && !empty($suggestionPreview['plan_date'])) {
+    $payHeading = 'Pay proposal for ' . $suggestionPreview['plan_date'];
+}
 $csrf = ps_csrf_token();
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
@@ -540,7 +600,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
             <div>
                 <h5 class="mb-1">Pay spreadsheet</h5>
-                <p class="mb-0">System lines and older sheet rows for this company. Today pay is a proposal until you preview and confirm it, and confirming a proposal does not mark anyone paid. Source Paid and Unpaid stay as evidence.</p>
+                <p class="mb-0">System lines and older sheet rows for this company. The pay proposal is a draft until you preview and confirm it. Confirming a proposal does not mark anyone paid. Source Paid and Unpaid stay as evidence. A blank imported date stays blank.</p>
             </div>
             <div>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="selectVisible">Select visible</button>
@@ -582,12 +642,55 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             Known net <?= $gridTotals['net_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['net_known_sum'], 2) ?>
             (<?= (int)$gridTotals['net_unknown'] ?> unknown).
             Confirmed paid <?= $gridTotals['paid_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['paid_known_sum'], 2) ?>.
-            Known balance before today-pay <?= $gridTotals['balance_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['balance_known_sum'], 2) ?>
+            Known balance before the pay proposal <?= $gridTotals['balance_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['balance_known_sum'], 2) ?>
             (<?= (int)$gridTotals['balance_incomplete'] ?> incomplete).
             Source conflicts <?= (int)$gridTotals['source_conflicts'] ?>.
             Unresolved <?= (int)$gridTotals['unresolved'] ?>.
             This is the filtered view, not a certified company liability.
         </p>
+        <div class="border rounded p-2 mb-2 bg-light">
+            <div class="form-row align-items-end">
+                <div class="col-md-2 mb-2">
+                    <label>Pay date</label>
+                    <input type="date" class="form-control form-control-sm" name="plan_date" value="<?= psr_h((string)($suggestionPreview['plan_date'] ?? '')) ?>">
+                </div>
+                <div class="col-md-2 mb-2">
+                    <label>Available funds (CAD)</label>
+                    <input class="form-control form-control-sm" name="available_funds" value="<?= $suggestionPreview ? psr_h((string)$suggestionPreview['available_funds']) : '' ?>" placeholder="0.00" inputmode="decimal">
+                </div>
+                <div class="col-md-4 mb-2">
+                    <label>Suggestion policy</label>
+                    <select class="form-control form-control-sm" name="suggest_policy">
+                        <option value="oldest_first" <?= (($suggestionPreview['policy'] ?? 'oldest_first') === 'oldest_first') ? 'selected' : '' ?>>Oldest verified amount owing first</option>
+                        <option value="equal_same_date" <?= (($suggestionPreview['policy'] ?? '') === 'equal_same_date') ? 'selected' : '' ?>>Equal split on the same period start</option>
+                    </select>
+                </div>
+                <div class="col-md-4 mb-2">
+                    <button class="btn btn-sm btn-outline-primary" name="suggest_payments" value="1">Suggest payments</button>
+                    <?php if ($suggestionPreview): ?>
+                        <button class="btn btn-sm btn-outline-secondary" name="cancel_suggestion" value="1">Cancel suggestion</button>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <p class="mb-0 text-muted">Suggestions use the filtered rows, including other pages of this filter, and they use saved drafts. Typed amounts stay as they are until you preview a draft save or apply a suggestion. A suggestion is editable, cancelable, and not approved. It is not imported, not sent to ADP or a bank, and not marked paid. Cost reserves are funding set aside. They do not reduce the wage payable. A planned recovery is not cash you can assign, and a planned deposit of these same funds is not extra money.</p>
+            <?php if ($suggestionPreview): $sug = $suggestionPreview['suggestion']; ?>
+                <div class="alert alert-warning mt-2 mb-0">
+                    <strong><?= psr_h($payHeading) ?></strong>
+                    — <?= psr_h($sug['policy_label']) ?>
+                    Available <?= number_format((float)$sug['available_funds'], 2) ?>.
+                    Proposed base payout <?= number_format((float)$sug['total_wage'], 2) ?>.
+                    Tax and employer cost reserve <?= $sug['total_reserve'] === null ? 'Incomplete' : number_format((float)$sug['total_reserve'], 2) ?>.
+                    Total funding required <?= $sug['total_funding'] === null ? 'Incomplete' : number_format((float)$sug['total_funding'], 2) ?>.
+                    <?php if ($sug['incomplete']): ?>Funding plan incomplete. Unknown employer or GST cost was not estimated, so this does not claim the available funds cover every cost.<?php else: ?>
+                        Funds remaining <?= number_format((float)$sug['remaining_funds'], 2) ?>.
+                        Shortfall <?= number_format((float)$sug['shortfall'], 2) ?>.
+                        <?= !empty($sug['claims_complete_fit']) ? 'Known wage payouts and verified reserves fit in the available funds.' : 'The available funds do not cover every verified amount and reserve.' ?>
+                    <?php endif; ?>
+                    <div>Reserves do not reduce anyone's wage payable. Applying this writes a new dated draft only.</div>
+                    <button class="btn btn-sm btn-warning mt-2" name="confirm_suggestion" value="1">Apply suggestion to draft</button>
+                </div>
+            <?php endif; ?>
+        </div>
         <div class="grid-wrap">
         <table class="table table-sm table-bordered paygrid mb-0">
             <thead><tr>
@@ -600,7 +703,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <th>Net</th>
                 <th>Confirmed paid</th>
                 <th>Balance before</th>
-                <th>Today pay</th>
+                <th><?= psr_h($payHeading) ?></th>
                 <th>Balance after</th>
                 <th>Route / basis</th>
                 <th>GST</th>
@@ -651,7 +754,14 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                         <label class="small"><input type="checkbox" name="g[<?= psr_h($grow['key']) ?>][actual_confirmed]" value="1" <?= !empty($grow['actual_confirmed']) ? 'checked' : '' ?>> Confirm actual evidence</label>
                     </td>
                     <td><?= $grow['balance_before']['state'] === 'amount' ? number_format((float)$grow['balance_before']['amount'], 2) : 'Pending' ?><div class="text-muted"><?= psr_h($grow['balance_before']['reason'] ?? '') ?></div></td>
-                    <td class="today"><input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][today_pay]" value="<?= $grow['today_pay'] !== null ? psr_h($grow['today_pay']) : '' ?>" placeholder="Proposal"><?php if ($grow['today_effect'] === 'recovery'): ?><div class="pending">Recovery, not a payout</div><?php endif; ?></td>
+                    <td class="today">
+                        <input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][today_pay]" value="<?= $grow['today_pay'] !== null ? psr_h($grow['today_pay']) : '' ?>" placeholder="Proposal">
+                        <input type="date" class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][pay_on]" value="<?= psr_h((string)($grow['pay_on'] ?? '')) ?>" title="Pay date for this row">
+                        <?php if ($grow['today_effect'] === 'recovery'): ?><div class="pending">Recovery, not a payout and not available cash</div><?php endif; ?>
+                        <?php $hint = $suggestByKey[$grow['key']] ?? null; if ($hint): ?>
+                            <div class="pending"><?php if (!$hint['eligible']): ?>Not suggested. <?= psr_h($hint['reason']) ?><?php else: ?>Suggested preview <?= number_format((float)$hint['suggested'], 2) ?>. Reserve <?= number_format((float)($hint['cost_reserve'] ?? 0), 2) ?>. Wage payable stays <?= $hint['wage_payable'] === null ? 'Pending' : number_format((float)$hint['wage_payable'], 2) ?>.<?php if (!empty($hint['reason'])): ?> <?= psr_h($hint['reason']) ?><?php endif; ?><?php endif; ?></div>
+                        <?php endif; ?>
+                    </td>
                     <td><?= $grow['balance_after']['state'] === 'amount' ? number_format((float)$grow['balance_after']['amount'], 2) : 'Pending' ?><div class="text-muted"><?= psr_h($grow['balance_after']['reason'] ?? '') ?></div></td>
                     <td>
                         <select class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][route]"><?php foreach (['unset','cash','adp'] as $opt): ?><option <?= $grow['route']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select>
@@ -922,7 +1032,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
 
     <div class="sheet" id="plans">
         <h5>Dated proposal plans</h5>
-        <p>Amount available is the pool you type. Proposed lines are not allocated for you and are not actual payments.</p>
+        <p>Each saved suggestion is its own dated round. Amount available is the pool you type. Proposed lines are not actual payments, and a later round does not delete an earlier one.</p>
         <form method="POST" class="mb-3">
             <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
             <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
