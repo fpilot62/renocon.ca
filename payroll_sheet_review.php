@@ -23,6 +23,7 @@ error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
 require_once __DIR__ . '/engine/payroll_sheet_review_lib.php';
+require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -69,6 +70,7 @@ if ($orgId <= 0) {
 }
 try {
     psr_ensure($pdo);
+    psr_ensure_grid_columns($pdo);
     psr_ensure_menu($pdo);
 } catch (Throwable $e) {
     exit('Sheet review storage is not ready. ' . psr_h($e->getMessage()));
@@ -262,7 +264,7 @@ foreach ($effects as $ef) {
         }
     }
 }
-$rows = $pdo->prepare('SELECT * FROM payroll_sheet_rows WHERE org_id = ? ORDER BY source_sheet, source_row, id');
+$rows = $pdo->prepare('SELECT * FROM payroll_sheet_rows WHERE org_id = ? AND deleted_at IS NULL ORDER BY source_sheet, source_row, id');
 $rows->execute([$orgId]);
 $sheetRows = $rows->fetchAll(PDO::FETCH_ASSOC);
 $approved = [];
@@ -359,6 +361,106 @@ if ($edit) {
     $rv->execute([$orgId, 'row', (int)$edit['id']]);
     $revisions = $rv->fetchAll(PDO::FETCH_ASSOC);
 }
+$flatPlans = [];
+foreach ($planLines as $list) {
+    foreach ($list as $line) {
+        $flatPlans[] = $line;
+    }
+}
+$directory = [];
+foreach ($staffRows as $person) {
+    $directory[] = ['id' => (int)$person['id'], 'name' => (string)$person['Name']];
+}
+foreach ($systemLines as $ln) {
+    $directory[] = ['id' => (int)$ln['user_id'], 'name' => (string)$ln['employee_name']];
+}
+$gridFilter = [
+    'store' => trim((string)($_GET['store'] ?? '')),
+    'person' => trim((string)($_GET['person'] ?? '')),
+    'year' => trim((string)($_GET['year'] ?? '')),
+    'period_start' => $filter['period_start'],
+    'period_end' => $filter['period_end'],
+    'source' => (string)($_GET['source'] ?? 'all'),
+    'pay_status' => (string)($_GET['pay_status'] ?? 'all'),
+    'unresolved' => !empty($_GET['unresolved']),
+    'route' => (string)($_GET['route'] ?? 'all'),
+    'active' => (string)($_GET['active'] ?? 'all'),
+];
+$gridAll = psr_build_review_grid($systemLines, $sheetRows, $flatPlans, $directory, $orgId);
+$gridFiltered = psr_grid_filter($gridAll, $gridFilter);
+$gridPage = psr_grid_page($gridFiltered, (int)($_GET['page'] ?? 1), (int)($_GET['per_page'] ?? 25));
+$gridTotals = psr_grid_totals($gridFiltered);
+$gridDiff = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_grid_save'])) {
+    $byKey = [];
+    foreach ($gridPage['rows'] as $grow) {
+        $byKey[$grow['key']] = $grow;
+    }
+    $gridDiff = psr_grid_save_changes($_POST['g'] ?? [], $byKey);
+    $_SESSION['psr_grid'] = ['org_id' => $orgId, 'diff' => $gridDiff];
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_grid_save'])) {
+    $saved = $_SESSION['psr_grid'] ?? null;
+    try {
+        if (!$saved || (int)$saved['org_id'] !== $orgId || empty($saved['diff']['ok'])) {
+            throw new RuntimeException('Preview the spreadsheet changes again. Nothing was saved.');
+        }
+        psr_apply_grid_drafts($pdo, $orgId, $actorId, $saved['diff']['changes']);
+        unset($_SESSION['psr_grid']);
+        $_SESSION['psr_flash'] = 'Draft spreadsheet saved. Payroll wages and payments were not changed. Source Paid and Unpaid text was only edited where you typed a correction.';
+        header('Location: payroll_sheet_review.php?org_id=' . $orgId);
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_plan_rows'])) {
+    $planPreview = [];
+    foreach ((array)($_POST['plan_ids'] ?? []) as $sheetId) {
+        $sheetId = (int)$sheetId;
+        $match = null;
+        foreach ($gridPage['rows'] as $grow) {
+            if ((int)$grow['sheet_row_id'] === $sheetId) {
+                $match = $grow;
+            }
+        }
+        if (!$match) {
+            $planPreview[] = ['sheet_row_id' => $sheetId, 'ok' => false, 'note' => 'That row is not on this page.'];
+            continue;
+        }
+        $planPreview[] = ['sheet_row_id' => $sheetId, 'name' => $match['employee_name'], 'plan' => psr_plan_approval_plan($match)];
+    }
+    $_SESSION['psr_plan_preview'] = ['org_id' => $orgId, 'rows' => $planPreview];
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_plan_rows'])) {
+    $saved = $_SESSION['psr_plan_preview'] ?? null;
+    try {
+        if (!$saved || (int)$saved['org_id'] !== $orgId) {
+            throw new RuntimeException('Preview the proposal again. Nothing was approved.');
+        }
+        $ids = [];
+        foreach ($saved['rows'] as $item) {
+            if (empty($item['plan']['posts_payment']) && empty($item['plan']['creates_wage'])) {
+                $q = $pdo->prepare('SELECT id FROM payroll_sheet_plan_lines WHERE org_id = ? AND row_id = ? ORDER BY id DESC LIMIT 1');
+                $q->execute([$orgId, (int)$item['sheet_row_id']]);
+                $pid = (int)$q->fetchColumn();
+                if ($pid > 0) {
+                    $ids[] = $pid;
+                }
+            }
+        }
+        $result = psr_approve_plan_lines($pdo, $orgId, $actorId, $ids);
+        unset($_SESSION['psr_plan_preview']);
+        $_SESSION['psr_flash'] = 'Proposal approval recorded for ' . (int)$result['approved'] . ' line(s). Already approved: ' . (int)$result['already'] . '. Payments posted: 0.';
+        header('Location: payroll_sheet_review.php?org_id=' . $orgId);
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
+$planPreview = (isset($_SESSION['psr_plan_preview']['rows']) && (int)($_SESSION['psr_plan_preview']['org_id'] ?? 0) === $orgId)
+    ? $_SESSION['psr_plan_preview']['rows']
+    : [];
 $csrf = ps_csrf_token();
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
@@ -379,6 +481,15 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .pending { color:#9a3412; font-weight:700; }
         .preview { background:#fff7ed; }
         .live { background:#f0fdf4; }
+        .grid-wrap { max-height: 72vh; overflow: auto; border: 1px solid #cbd5e1; }
+        table.paygrid { border-collapse: separate; border-spacing: 0; min-width: 1680px; }
+        table.paygrid th { position: sticky; top: 0; z-index: 3; background: #0f172a; color: #fff; font-size: 11px; }
+        table.paygrid td.ident, table.paygrid th.ident { position: sticky; left: 0; z-index: 2; background: #fff; }
+        table.paygrid th.ident { z-index: 4; background: #0f172a; }
+        td.today input { background: #fef3c7; border: 2px solid #d97706; font-weight: 800; }
+        .src-paid { background: #dcfce7; }
+        .src-stale { background: #ffedd5; }
+        .src-conflict { background: #fee2e2; }
     </style>
 </head>
 <body>
@@ -408,15 +519,180 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <?php else: ?><input type="hidden" name="org_id" value="<?= (int)$orgId ?>"><?php endif; ?>
             <div class="col-md-2 mb-2"><label>Employee id</label><input class="form-control form-control-sm" name="user_id" value="<?= (int)$filter['user_id'] ?: '' ?>"></div>
             <div class="col-md-2 mb-2"><label>Store id</label><input class="form-control form-control-sm" name="site_id" value="<?= (int)$filter['site_id'] ?: '' ?>"></div>
-            <div class="col-md-2 mb-2"><label>Filter from</label><input type="date" class="form-control form-control-sm" name="period_start" value="<?= psr_h((string)$filter['period_start']) ?>"></div>
-            <div class="col-md-2 mb-2"><label>Filter to</label><input type="date" class="form-control form-control-sm" name="period_end" value="<?= psr_h((string)$filter['period_end']) ?>"></div>
+            <div class="col-md-2 mb-2"><label>Period from</label><input type="date" class="form-control form-control-sm" name="period_start" value="<?= psr_h((string)$filter['period_start']) ?>"></div>
+            <div class="col-md-2 mb-2"><label>Period to</label><input type="date" class="form-control form-control-sm" name="period_end" value="<?= psr_h((string)$filter['period_end']) ?>"></div>
+            <div class="col-md-2 mb-2"><label>Person</label><input class="form-control form-control-sm" name="person" value="<?= psr_h($gridFilter['person']) ?>"></div>
+            <div class="col-md-2 mb-2"><label>Store</label><input class="form-control form-control-sm" name="store" value="<?= psr_h($gridFilter['store']) ?>"></div>
+            <div class="col-md-1 mb-2"><label>Year</label><input class="form-control form-control-sm" name="year" value="<?= psr_h($gridFilter['year']) ?>"></div>
+            <div class="col-md-2 mb-2"><label>Source</label><select class="form-control form-control-sm" name="source"><?php foreach (['all','system','sheet','combined'] as $opt): ?><option <?= $gridFilter['source']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2 mb-2"><label>Source pay status</label><select class="form-control form-control-sm" name="pay_status"><?php foreach (['all','paid','not_paid','unknown','system_paid','conflict'] as $opt): ?><option <?= $gridFilter['pay_status']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2 mb-2"><label>Route</label><select class="form-control form-control-sm" name="route"><?php foreach (['all','unset','cash','adp'] as $opt): ?><option <?= $gridFilter['route']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2 mb-2"><label>Staff</label><select class="form-control form-control-sm" name="active"><?php foreach (['all','active'] as $opt): ?><option <?= $gridFilter['active']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2 mb-2"><label>Unresolved</label><select class="form-control form-control-sm" name="unresolved"><option value="">All</option><option value="1" <?= !empty($gridFilter['unresolved'])?'selected':'' ?>>Needs review</option></select></div>
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>
-        <p class="mb-0 text-muted">The filter narrows the filtered columns only. The all-period total stays every payroll period in this company.</p>
+        <p class="mb-0 text-muted">Filters change this spreadsheet only. They do not certify a live unpaid balance. The company all-period total stays available under the details below.</p>
     </form>
 
-    <?php foreach ($report['companies'] as $company): ?>
+    <form method="POST" id="gridForm" class="sheet">
+        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
+            <div>
+                <h5 class="mb-1">Pay spreadsheet</h5>
+                <p class="mb-0">System lines and older sheet rows for this company. Today pay is a proposal until you preview and confirm it, and confirming a proposal does not mark anyone paid. Source Paid and Unpaid stay as evidence.</p>
+            </div>
+            <div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="selectVisible">Select visible</button>
+                <button class="btn btn-sm btn-primary" name="preview_grid_save" value="1">Preview draft save</button>
+                <button class="btn btn-sm btn-outline-dark" name="preview_approval" value="1">Preview obligation approval</button>
+                <button class="btn btn-sm btn-outline-warning" name="preview_plan_rows" value="1">Preview proposal approval</button>
+            </div>
+        </div>
+        <?php if ($gridDiff): ?>
+            <div class="alert <?= !empty($gridDiff['ok']) ? 'alert-info' : 'alert-warning' ?>">
+                <?php if (!empty($gridDiff['ok'])): ?>
+                    <form method="POST" class="mb-0">
+                        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                        <?= count($gridDiff['changes']) ?> draft change(s). Payroll will not be written.
+                        <button class="btn btn-sm btn-warning" name="confirm_grid_save" value="1">Confirm draft save</button>
+                    </form>
+                <?php else: foreach ($gridDiff['blocked'] as $block): ?>
+                    <div><?= psr_h($block['key']) ?>: <?= psr_h($block['reason']) ?></div>
+                <?php endforeach; endif; ?>
+            </div>
+        <?php endif; ?>
+        <?php if ($planPreview): ?>
+            <div class="alert alert-warning">
+                <?php foreach ($planPreview as $item): ?>
+                    <div><?= psr_h($item['name'] ?? ('Row ' . ($item['sheet_row_id'] ?? ''))) ?>: <?= psr_h($item['plan']['note'] ?? ($item['note'] ?? '')) ?> Payment posted: no. Wage created: no.</div>
+                <?php endforeach; ?>
+                <form method="POST" class="mt-2 mb-0">
+                    <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                    <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                    <button class="btn btn-sm btn-warning" name="confirm_plan_rows" value="1">Confirm proposal approval</button>
+                </form>
+            </div>
+        <?php endif; ?>
+        <p>
+            Filtered rows <?= (int)$gridTotals['rows'] ?>.
+            Known gross <?= $gridTotals['gross_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['gross_known_sum'], 2) ?>
+            (<?= (int)$gridTotals['gross_missing'] ?> missing).
+            Known net <?= $gridTotals['net_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['net_known_sum'], 2) ?>
+            (<?= (int)$gridTotals['net_unknown'] ?> unknown).
+            Confirmed paid <?= $gridTotals['paid_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['paid_known_sum'], 2) ?>.
+            Known balance before today-pay <?= $gridTotals['balance_known_sum'] === null ? 'Pending' : number_format((float)$gridTotals['balance_known_sum'], 2) ?>
+            (<?= (int)$gridTotals['balance_incomplete'] ?> incomplete).
+            Source conflicts <?= (int)$gridTotals['source_conflicts'] ?>.
+            Unresolved <?= (int)$gridTotals['unresolved'] ?>.
+            This is the filtered view, not a certified company liability.
+        </p>
+        <div class="grid-wrap">
+        <table class="table table-sm table-bordered paygrid mb-0">
+            <thead><tr>
+                <th class="ident">Select</th>
+                <th class="ident">Person / store</th>
+                <th>Period</th>
+                <th>Source status</th>
+                <th>Reconciled view</th>
+                <th>Gross</th>
+                <th>Net</th>
+                <th>Confirmed paid</th>
+                <th>Balance before</th>
+                <th>Today pay</th>
+                <th>Balance after</th>
+                <th>Route / basis</th>
+                <th>GST</th>
+                <th>Provenance</th>
+            </tr></thead>
+            <tbody>
+            <?php $lastStore = null; foreach ($gridPage['rows'] as $grow):
+                if ($grow['store_name'] !== $lastStore) {
+                    $lastStore = $grow['store_name'];
+                    echo '<tr><td colspan="14"><strong>' . psr_h($lastStore !== '' ? $lastStore : 'Store not set') . '</strong></td></tr>';
+                }
+                $rowClass = !empty($grow['source_conflict']) ? 'src-conflict' : (!empty($grow['freshness']['aug_oct']) ? 'src-stale' : (!empty($grow['source_status']) && $grow['source_status'] === 'paid' ? 'src-paid' : ''));
+            ?>
+                <tr class="<?= psr_h($rowClass) ?>">
+                    <td class="ident">
+                        <?php if ($grow['sheet_row_id']): ?>
+                            <input type="checkbox" class="row-check" name="row_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>" title="Obligation">
+                            <input type="checkbox" name="plan_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>" title="Proposal">
+                            <label class="small"><input type="checkbox" name="g[<?= psr_h($grow['key']) ?>][delete]" value="1"> Remove draft</label>
+                        <?php else: ?><span class="text-muted">System</span><?php endif; ?>
+                        <input type="hidden" name="g[<?= psr_h($grow['key']) ?>][row_version]" value="<?= (int)$grow['row_version'] ?>">
+                    </td>
+                    <td class="ident">
+                        <input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][employee_name]" value="<?= psr_h($grow['employee_name']) ?>">
+                        <input class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][store_name]" value="<?= psr_h($grow['store_name']) ?>">
+                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][user_id]"><option value="0">Not linked</option><?php foreach ($staffRows as $p): ?><option value="<?= (int)$p['id'] ?>" <?= (int)$grow['user_id']===(int)$p['id']?'selected':'' ?>><?= psr_h($p['Name']) ?></option><?php endforeach; ?></select>
+                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][site_id]"><option value="0">Store not linked</option><?php foreach ($siteRows as $s): ?><option value="<?= (int)$s['SId'] ?>" <?= (int)$grow['site_id']===(int)$s['SId']?'selected':'' ?>><?= psr_h($s['nick_name']) ?></option><?php endforeach; ?></select>
+                        <?php if (!empty($grow['candidate'])): ?><div class="pending"><?= psr_h($grow['candidate']['reason']) ?></div><?php endif; ?>
+                        <?php if ((int)($grow['active'] ?? 1) === 0): ?><div class="text-muted">Inactive</div><?php endif; ?>
+                    </td>
+                    <td>
+                        <input type="date" class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][period_start]" value="<?= psr_h($grow['period_start']) ?>">
+                        <input type="date" class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][period_end]" value="<?= psr_h($grow['period_end']) ?>">
+                    </td>
+                    <td>
+                        <?= $grow['source_status'] === '' ? '—' : psr_h($grow['source_status']) ?>
+                        <?php if (!empty($grow['source_conflict'])): ?><div class="pending">Source conflict</div><?php endif; ?>
+                        <?php if (!empty($grow['freshness']['aug_oct'])): ?><div class="pending">Aug–Oct needs reconciliation</div><?php endif; ?>
+                        <div class="text-muted"><?= psr_h($grow['freshness']['label']) ?></div>
+                    </td>
+                    <td><?= psr_h($grow['reconciled']['derived']) ?><div class="text-muted"><?= psr_h($grow['reconciled']['note']) ?></div></td>
+                    <td><?php if ($grow['sheet_row_id']): ?><input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][gross]" value="<?= $grow['sheet_gross'] !== null ? psr_h($grow['sheet_gross']) : '' ?>" placeholder="Unknown"><?php else: ?><?= $grow['gross'] === null ? 'Pending' : number_format((float)$grow['gross'], 2) ?><?php endif; ?></td>
+                    <td><?php if ($grow['sheet_row_id']): ?><input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][net]" value="<?= $grow['sheet_net'] !== null ? psr_h($grow['sheet_net']) : '' ?>" placeholder="Unknown"><?php else: ?><?= empty($grow['net_known']) ? 'Pending' : number_format((float)$grow['net'], 2) ?><?php endif; ?></td>
+                    <td><?= $grow['paid_state'] === 'amount' ? number_format((float)$grow['paid'], 2) : ($grow['paid_state'] === 'none_confirmed' ? 'None confirmed' : 'Pending') ?>
+                        <input class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][actual_amount]" value="<?= $grow['actual_amount'] !== null ? psr_h($grow['actual_amount']) : '' ?>" placeholder="Draft actual amount">
+                        <input type="date" class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][actual_date]" value="<?= psr_h((string)$grow['actual_date']) ?>">
+                        <input class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][actual_method]" value="<?= psr_h((string)$grow['actual_method']) ?>" placeholder="Cash, Cheque, or E-Transfer">
+                        <label class="small"><input type="checkbox" name="g[<?= psr_h($grow['key']) ?>][actual_confirmed]" value="1" <?= !empty($grow['actual_confirmed']) ? 'checked' : '' ?>> Confirm actual evidence</label>
+                    </td>
+                    <td><?= $grow['balance_before']['state'] === 'amount' ? number_format((float)$grow['balance_before']['amount'], 2) : 'Pending' ?><div class="text-muted"><?= psr_h($grow['balance_before']['reason'] ?? '') ?></div></td>
+                    <td class="today"><input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][today_pay]" value="<?= $grow['today_pay'] !== null ? psr_h($grow['today_pay']) : '' ?>" placeholder="Proposal"><?php if ($grow['today_effect'] === 'recovery'): ?><div class="pending">Recovery, not a payout</div><?php endif; ?></td>
+                    <td><?= $grow['balance_after']['state'] === 'amount' ? number_format((float)$grow['balance_after']['amount'], 2) : 'Pending' ?><div class="text-muted"><?= psr_h($grow['balance_after']['reason'] ?? '') ?></div></td>
+                    <td>
+                        <select class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][route]"><?php foreach (['unset','cash','adp'] as $opt): ?><option <?= $grow['route']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select>
+                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][basis]"><?php foreach (['unset','net','gross'] as $opt): ?><option <?= $grow['basis']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select>
+                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][party_class]"><?php foreach (['unanswered','employee','contractor'] as $opt): ?><option <?= $grow['party_class']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select>
+                    </td>
+                    <td><?= $grow['gst']['state'] === 'amount' || $grow['gst']['state'] === 'unverified_estimate' ? number_format((float)$grow['gst']['amount'], 2) : psr_h($grow['gst']['state']) ?><div class="text-muted"><?= psr_h($grow['gst']['reason']) ?></div></td>
+                    <td><?= psr_h($grow['provenance']) ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mt-2">
+            <div>Page <?= (int)$gridPage['page'] ?> of <?= (int)$gridPage['pages'] ?> (<?= (int)$gridPage['total'] ?> filtered). Selection applies to this page only.</div>
+            <div>
+                <?php
+                $qs = $_GET;
+                $qs['org_id'] = $orgId;
+                $prev = $qs; $prev['page'] = max(1, $gridPage['page'] - 1);
+                $next = $qs; $next['page'] = min($gridPage['pages'], $gridPage['page'] + 1);
+                ?>
+                <a class="btn btn-sm btn-outline-secondary" href="?<?= psr_h(http_build_query($prev)) ?>">Previous</a>
+                <a class="btn btn-sm btn-outline-secondary" href="?<?= psr_h(http_build_query($next)) ?>">Next</a>
+                <button class="btn btn-sm btn-primary" name="preview_grid_save" value="1">Preview draft save</button>
+            </div>
+        </div>
+    </form>
     <div class="sheet">
+        <h6>Unallocated cash evidence</h6>
+        <p class="mb-1">These are not applied to a person or period and are not certified payable.</p>
+        <?php if (!$eventRows): ?><p class="text-muted mb-0">None on file.</p><?php endif; ?>
+        <?php foreach ($eventRows as $ev): ?>
+            <div><?= psr_h($ev['allocation_status']) ?> <?= $ev['signed_amount'] === null ? 'Pending' : number_format((float)$ev['signed_amount'], 2) ?> <?= psr_h((string)$ev['flags_json']) ?></div>
+        <?php endforeach; ?>
+    </div>
+
+    <details class="sheet">
+        <summary>Company all-period totals (not the spreadsheet above)</summary>
+    <?php foreach ($report['companies'] as $company): ?>
+    <div class="mt-3">
         <h5><?= psr_h($company['org_name']) ?> — All-period total</h5>
         <p><?= psr_h($company['filter_label']) ?> <?= psr_h($report['cross_company_note']) ?></p>
         <table class="table table-sm table-bordered">
@@ -457,6 +733,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         </table>
     </div>
     <?php endforeach; ?>
+    </details>
 
     <?php if ($isSuper): ?>
     <form method="POST" class="sheet">
@@ -714,5 +991,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <ul><?php foreach (psr_deferred_items() as $item): ?><li><?= psr_h($item) ?></li><?php endforeach; ?></ul>
     </div>
 </div>
+<script>
+document.getElementById('selectVisible').addEventListener('click', function () {
+    document.querySelectorAll('#gridForm .row-check').forEach(function (box) { box.checked = true; });
+});
+</script>
 </body>
 </html>
