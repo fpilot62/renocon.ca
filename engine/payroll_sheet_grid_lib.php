@@ -873,6 +873,327 @@ function psr_name_candidates(string $name, array $directory): array
     return array_values(array_unique($hits));
 }
 
+function psr_employee_label(array $person, bool $withStore): string
+{
+    $name = trim((string)($person['name'] ?? ''));
+    $store = trim((string)($person['site_name'] ?? ''));
+    if ($withStore && $store !== '') {
+        return $name . ' - ' . $store;
+    }
+    return $name;
+}
+
+function psr_employees_for_store(array $employees, int $siteId): array
+{
+    if ($siteId <= 0) {
+        return array_values($employees);
+    }
+    $out = [];
+    foreach ($employees as $person) {
+        if ((int)($person['site_id'] ?? 0) === $siteId) {
+            $out[] = $person;
+        }
+    }
+    return $out;
+}
+
+function psr_sites_named(string $storeName, array $sites): array
+{
+    $want = psr_norm_name($storeName);
+    if ($want === '') {
+        return [];
+    }
+    $hits = [];
+    foreach ($sites as $site) {
+        $nick = psr_norm_name($site['name'] ?? '');
+        if ($nick !== '' && ($nick === $want || strpos($want, $nick) !== false || strpos($nick, $want) !== false)) {
+            $hits[] = (int)$site['id'];
+        }
+    }
+    return array_values(array_unique($hits));
+}
+
+function psr_link_choice(array $hits, int $scopeSite): array
+{
+    $byUser = [];
+    foreach ($hits as $person) {
+        $id = (int)($person['id'] ?? 0);
+        $site = (int)($person['site_id'] ?? 0);
+        if ($id <= 0 || $site <= 0) {
+            continue;
+        }
+        $byUser[$id][$site] = $person;
+    }
+    if (!$byUser) {
+        return ['status' => 'none', 'user_id' => 0, 'site_id' => 0, 'candidates' => []];
+    }
+    $candidates = [];
+    foreach ($byUser as $sitesForUser) {
+        foreach ($sitesForUser as $person) {
+            $candidates[] = [
+                'id' => (int)$person['id'],
+                'name' => (string)$person['name'],
+                'site_id' => (int)$person['site_id'],
+                'site_name' => (string)($person['site_name'] ?? ''),
+            ];
+        }
+    }
+    if (count($byUser) === 1) {
+        $sitesForUser = reset($byUser);
+        if ($scopeSite > 0) {
+            if (isset($sitesForUser[$scopeSite])) {
+                $person = $sitesForUser[$scopeSite];
+                return ['status' => 'suggested', 'user_id' => (int)$person['id'], 'site_id' => (int)$person['site_id'], 'site_name' => (string)($person['site_name'] ?? ''), 'candidates' => $candidates];
+            }
+            return ['status' => 'ambiguous', 'user_id' => 0, 'site_id' => 0, 'candidates' => $candidates];
+        }
+        if (count($sitesForUser) === 1) {
+            $person = reset($sitesForUser);
+            return ['status' => 'suggested', 'user_id' => (int)$person['id'], 'site_id' => (int)$person['site_id'], 'site_name' => (string)($person['site_name'] ?? ''), 'candidates' => $candidates];
+        }
+    } elseif ($scopeSite > 0) {
+        $inStore = [];
+        foreach ($byUser as $sitesForUser) {
+            if (isset($sitesForUser[$scopeSite])) {
+                $inStore[] = $sitesForUser[$scopeSite];
+            }
+        }
+        if (count($inStore) === 1) {
+            $person = $inStore[0];
+            return ['status' => 'suggested', 'user_id' => (int)$person['id'], 'site_id' => (int)$person['site_id'], 'site_name' => (string)($person['site_name'] ?? ''), 'candidates' => $candidates];
+        }
+    }
+    return ['status' => 'ambiguous', 'user_id' => 0, 'site_id' => 0, 'candidates' => $candidates];
+}
+
+function psr_suggest_link(array $row, array $employees, array $sites, int $filterSiteId): array
+{
+    $empty = [
+        'status' => 'none',
+        'user_id' => (int)($row['user_id'] ?? 0),
+        'site_id' => (int)($row['site_id'] ?? 0),
+        'site_name' => '',
+        'saved' => false,
+        'approved' => false,
+        'marks_paid' => false,
+        'candidates' => [],
+        'reason' => '',
+    ];
+    $rowOrg = (int)($row['org_id'] ?? 0);
+    $pool = [];
+    foreach ($employees as $person) {
+        if ($rowOrg > 0 && (int)($person['org_id'] ?? 0) > 0 && (int)$person['org_id'] !== $rowOrg) {
+            continue;
+        }
+        if ($filterSiteId > 0 && (int)($person['site_id'] ?? 0) !== $filterSiteId) {
+            continue;
+        }
+        $pool[] = $person;
+    }
+    if ((int)($row['user_id'] ?? 0) > 0 && (int)($row['site_id'] ?? 0) > 0) {
+        $empty['status'] = 'saved';
+        $empty['saved'] = true;
+        $empty['reason'] = 'Already linked.';
+        return $empty;
+    }
+    $scopeSite = $filterSiteId;
+    if ($scopeSite <= 0) {
+        $named = psr_sites_named((string)($row['store_name'] ?? ''), $sites);
+        if (count($named) === 1) {
+            $scopeSite = $named[0];
+        }
+    }
+    $name = psr_norm_name($row['employee_name'] ?? '');
+    if ($name === '') {
+        if ($filterSiteId > 0 && (int)($row['site_id'] ?? 0) <= 0) {
+            $empty['status'] = 'suggested';
+            $empty['site_id'] = $filterSiteId;
+            $empty['reason'] = 'Store defaulted from the filter. Not saved.';
+        }
+        return $empty;
+    }
+    $exact = [];
+    foreach ($pool as $person) {
+        if (psr_norm_name($person['name'] ?? '') === $name) {
+            $exact[] = $person;
+        }
+    }
+    if ($exact) {
+        $choice = psr_link_choice($exact, $scopeSite);
+        $choice['saved'] = false;
+        $choice['approved'] = false;
+        $choice['marks_paid'] = false;
+        $choice['reason'] = $choice['status'] === 'suggested'
+            ? 'Suggested from the name. Not saved.'
+            : 'More than one employee matches. Nothing was selected.';
+        return $choice;
+    }
+    if ($scopeSite <= 0) {
+        return $empty;
+    }
+    $first = explode(' ', $name)[0] ?? '';
+    $loose = [];
+    foreach ($pool as $person) {
+        if ((int)($person['site_id'] ?? 0) !== $scopeSite) {
+            continue;
+        }
+        $personName = psr_norm_name($person['name'] ?? '');
+        $personFirst = explode(' ', $personName)[0] ?? '';
+        $firstHit = strlen($first) >= 3 && $personFirst === $first;
+        $fuzzyHit = strlen($name) >= 5 && strlen($personName) >= 5 && levenshtein($name, $personName) <= 2;
+        if ($firstHit || $fuzzyHit) {
+            $loose[] = $person;
+        }
+    }
+    if (!$loose) {
+        if ($filterSiteId > 0 && (int)($row['site_id'] ?? 0) <= 0) {
+            $empty['status'] = 'suggested';
+            $empty['site_id'] = $filterSiteId;
+            $empty['user_id'] = 0;
+            $empty['reason'] = 'Store defaulted from the filter. Not saved.';
+        }
+        return $empty;
+    }
+    $choice = psr_link_choice($loose, $scopeSite);
+    $choice['saved'] = false;
+    $choice['approved'] = false;
+    $choice['marks_paid'] = false;
+    $choice['reason'] = $choice['status'] === 'suggested'
+        ? 'Suggested from the first name or a close spelling in this store. Not saved.'
+        : 'More than one close name in this store. Nothing was selected.';
+    return $choice;
+}
+
+function psr_accept_link_changes(array $rows, array $employees, array $sites, int $filterSiteId): array
+{
+    $changes = [];
+    foreach ($rows as $row) {
+        if ((int)($row['sheet_row_id'] ?? 0) <= 0) {
+            continue;
+        }
+        $link = psr_suggest_link($row, $employees, $sites, $filterSiteId);
+        if (($link['status'] ?? '') !== 'suggested' || (int)($link['user_id'] ?? 0) <= 0 || (int)($link['site_id'] ?? 0) <= 0) {
+            continue;
+        }
+        if ((int)($row['user_id'] ?? 0) > 0 && (int)($row['site_id'] ?? 0) > 0) {
+            continue;
+        }
+        $storeName = trim((string)($row['store_name'] ?? ''));
+        if ($storeName === '' && !empty($link['site_name'])) {
+            $storeName = (string)$link['site_name'];
+        }
+        $changes[] = [
+            'key' => (string)($row['key'] ?? ''),
+            'sheet_row_id' => (int)$row['sheet_row_id'],
+            'user_id' => (int)$link['user_id'],
+            'site_id' => (int)$link['site_id'],
+            'employee_name' => substr(trim((string)($row['employee_name'] ?? '')), 0, 160),
+            'store_name' => substr($storeName, 0, 160),
+            'period_start' => $row['period_start'] ?? null,
+            'period_end' => $row['period_end'] ?? null,
+            'gross' => $row['sheet_gross'] ?? null,
+            'net' => $row['sheet_net'] ?? null,
+            'today_pay' => $row['today_pay'] ?? null,
+            'pay_on' => $row['pay_on'] ?? null,
+            'basis' => $row['basis'] ?? 'unset',
+            'route' => $row['route'] ?? 'unset',
+            'party_class' => $row['party_class'] ?? 'unanswered',
+            'actual_amount' => $row['actual_amount'] ?? null,
+            'actual_date' => $row['actual_date'] ?? null,
+            'actual_method' => $row['actual_method'] ?? '',
+            'actual_confirmed' => !empty($row['actual_confirmed']) ? 1 : 0,
+            'delete' => false,
+            'row_version' => (int)($row['row_version'] ?? 1),
+            'link_only' => true,
+            'marks_paid' => false,
+        ];
+    }
+    return ['ok' => true, 'changes' => $changes, 'writes_payroll' => false, 'marks_paid' => false, 'approved' => false];
+}
+
+function psr_link_change_hash(array $changes): string
+{
+    $slim = [];
+    foreach ($changes as $change) {
+        $slim[] = [(int)$change['sheet_row_id'], (int)$change['user_id'], (int)$change['site_id'], (int)$change['row_version']];
+    }
+    return hash('sha256', json_encode($slim));
+}
+
+function psr_fetch_staff_directory(PDO $pdo, int $orgId): array
+{
+    $people = [];
+    $add = static function (array $person) use (&$people): void {
+        $id = (int)($person['id'] ?? 0);
+        $site = (int)($person['site_id'] ?? 0);
+        if ($id <= 0) {
+            return;
+        }
+        $people[$id . ':' . $site] = [
+            'id' => $id,
+            'name' => (string)($person['name'] ?? ''),
+            'site_id' => $site,
+            'site_name' => (string)($person['site_name'] ?? ''),
+            'org_id' => (int)($person['org_id'] ?? 0),
+        ];
+    };
+    try {
+        $st = $pdo->prepare(
+            'SELECT u.id, u.Name AS name, s.SId AS site_id, s.nick_name AS site_name, COUNT(*) AS n
+             FROM users u
+             INNER JOIN payroll_finalized f ON f.user_id = u.id
+             INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
+             WHERE u.org_id = ?
+             GROUP BY u.id, u.Name, s.SId, s.nick_name'
+        );
+        $st->execute([$orgId]);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $person) {
+            $person['org_id'] = $orgId;
+            $add($person);
+        }
+    } catch (Throwable $e) {
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT u.id, u.Name AS name, s.SId AS site_id, s.nick_name AS site_name, COUNT(*) AS n
+             FROM users u
+             INNER JOIN attendance a ON a.user_id = u.id
+             INNER JOIN sites s ON s.SId = a.site_id AND s.org_id = u.org_id
+             WHERE u.org_id = ? AND a.clock_in >= DATE_SUB(CURDATE(), INTERVAL 18 MONTH)
+             GROUP BY u.id, u.Name, s.SId, s.nick_name'
+        );
+        $st->execute([$orgId]);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $person) {
+            $person['org_id'] = $orgId;
+            $add($person);
+        }
+    } catch (Throwable $e) {
+    }
+    try {
+        $st = $pdo->prepare('SELECT id, Name AS name FROM users WHERE org_id = ? ORDER BY Name ASC');
+        $st->execute([$orgId]);
+        foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $person) {
+            $seen = false;
+            foreach ($people as $have) {
+                if ((int)$have['id'] === (int)$person['id'] && (int)$have['site_id'] > 0) {
+                    $seen = true;
+                    break;
+                }
+            }
+            if (!$seen) {
+                $add(['id' => (int)$person['id'], 'name' => (string)$person['name'], 'site_id' => 0, 'site_name' => '', 'org_id' => $orgId]);
+            }
+        }
+    } catch (Throwable $e) {
+    }
+    $out = array_values($people);
+    usort($out, static function ($a, $b) {
+        $name = strcmp(psr_norm_name($a['name']), psr_norm_name($b['name']));
+        return $name !== 0 ? $name : strcmp(psr_norm_name($a['site_name']), psr_norm_name($b['site_name']));
+    });
+    return $out;
+}
+
 function psr_overlap_lines(array $row, array $systemLines): array
 {
     $uid = (int)($row['user_id'] ?? 0);
@@ -1142,6 +1463,15 @@ function psr_grid_filter(array $rows, array $filter): array
     foreach ($rows as $row) {
         if (!empty($filter['store']) && stripos((string)$row['store_name'], (string)$filter['store']) === false && (int)$row['site_id'] !== (int)$filter['store']) {
             continue;
+        }
+        if (!empty($filter['site_id'])) {
+            $sid = (int)$filter['site_id'];
+            $want = psr_norm_name($filter['site_name'] ?? '');
+            $rowStore = psr_norm_name($row['store_name'] ?? '');
+            $nameMatch = $want !== '' && $rowStore !== '' && ($rowStore === $want || strpos($rowStore, $want) !== false || strpos($want, $rowStore) !== false);
+            if ((int)($row['site_id'] ?? 0) !== $sid && !$nameMatch && $rowStore !== '') {
+                continue;
+            }
         }
         if (!empty($filter['person']) && stripos((string)$row['employee_name'], (string)$filter['person']) === false && (int)$row['user_id'] !== (int)$filter['person']) {
             continue;
@@ -1501,7 +1831,7 @@ function psr_apply_grid_drafts(PDO $pdo, int $orgId, int $actor, array $changes)
                 if ($upd->rowCount() < 1) {
                     throw new RuntimeException('A row changed before this save. Nothing in this batch was saved.');
                 }
-                psr_insert_revision($pdo, $orgId, 'row', $ch['sheet_row_id'], 'grid_draft', $actor, null, $ch);
+                psr_insert_revision($pdo, $orgId, 'row', $ch['sheet_row_id'], !empty($ch['link_only']) ? 'accept_link' : 'grid_draft', $actor, null, $ch);
                 $saved++;
             }
             if ($ch['today_pay'] !== null && empty($ch['delete'])) {

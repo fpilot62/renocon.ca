@@ -361,6 +361,18 @@ $staffRows = $staff->fetchAll(PDO::FETCH_ASSOC);
 $sites = $pdo->prepare('SELECT SId, nick_name FROM sites WHERE org_id = ? ORDER BY nick_name ASC');
 $sites->execute([$orgId]);
 $siteRows = $sites->fetchAll(PDO::FETCH_ASSOC);
+$staffDirectory = psr_fetch_staff_directory($pdo, $orgId);
+$siteList = [];
+foreach ($siteRows as $siteRow) {
+    $siteList[] = ['id' => (int)$siteRow['SId'], 'name' => (string)$siteRow['nick_name']];
+}
+$filterSiteId = (int)($_GET['site_id'] ?? 0);
+$filterSiteName = '';
+foreach ($siteList as $siteRow) {
+    if ((int)$siteRow['id'] === $filterSiteId) {
+        $filterSiteName = (string)$siteRow['name'];
+    }
+}
 $edit = null;
 if ((int)($_GET['edit'] ?? 0) > 0) {
     foreach ($sheetRows as $row) {
@@ -399,6 +411,8 @@ $gridFilter = [
     'unresolved' => !empty($_GET['unresolved']),
     'route' => (string)($_GET['route'] ?? 'all'),
     'active' => (string)($_GET['active'] ?? 'all'),
+    'site_id' => $filterSiteId,
+    'site_name' => $filterSiteName,
 ];
 $gridAll = psr_build_review_grid($systemLines, $sheetRows, $flatPlans, $directory, $orgId);
 $gridFiltered = psr_grid_filter($gridAll, $gridFilter);
@@ -435,6 +449,32 @@ foreach ($gridFiltered as $grow) {
 $selectedIds = $_SERVER['REQUEST_METHOD'] === 'POST' ? psr_resolve_selection($_POST, $pageSheetIds, $filteredSheetIds) : [];
 $openApprovals = false;
 $gridDiff = null;
+$linkPreview = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_accept_links'])) {
+    $openApprovals = true;
+    $linkPreview = psr_accept_link_changes($gridFiltered, $staffDirectory, $siteList, $filterSiteId);
+    $_SESSION['psr_links'] = ['org_id' => $orgId, 'hash' => psr_link_change_hash($linkPreview['changes']), 'changes' => $linkPreview['changes']];
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_accept_links'])) {
+    $savedLinks = $_SESSION['psr_links'] ?? null;
+    try {
+        if (!$savedLinks || (int)$savedLinks['org_id'] !== $orgId) {
+            throw new RuntimeException('Review the suggested links again. Nothing was saved.');
+        }
+        $freshLinks = psr_accept_link_changes($gridFiltered, $staffDirectory, $siteList, $filterSiteId);
+        if (psr_link_change_hash($freshLinks['changes']) !== (string)$savedLinks['hash']) {
+            throw new RuntimeException('A suggested link changed. Review it again. Nothing was saved.');
+        }
+        psr_apply_grid_drafts($pdo, $orgId, $actorId, $freshLinks['changes']);
+        unset($_SESSION['psr_links']);
+        $_SESSION['psr_flash'] = count($freshLinks['changes']) . ' suggested link(s) saved. Nobody was marked paid.';
+        header('Location: payroll_sheet_review.php?org_id=' . $orgId . ($filterSiteId > 0 ? '&site_id=' . $filterSiteId : ''));
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+        $openApprovals = true;
+    }
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_grid_save'])) {
     $openApprovals = true;
     $byKey = [];
@@ -655,7 +695,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             </div>
             <?php else: ?><input type="hidden" name="org_id" value="<?= (int)$orgId ?>"><?php endif; ?>
             <div class="col-md-2 mb-2"><label>Employee id</label><input class="form-control form-control-sm" name="user_id" value="<?= (int)$filter['user_id'] ?: '' ?>"></div>
-            <div class="col-md-2 mb-2"><label>Store id</label><input class="form-control form-control-sm" name="site_id" value="<?= (int)$filter['site_id'] ?: '' ?>"></div>
+            <div class="col-md-2 mb-2"><label>Store</label><select name="site_id" class="form-control form-control-sm" onchange="this.form.submit()"><option value="0">All stores</option><?php foreach ($siteRows as $siteChoice): ?><option value="<?= (int)$siteChoice['SId'] ?>" <?= $filterSiteId === (int)$siteChoice['SId'] ? 'selected' : '' ?>><?= psr_h($siteChoice['nick_name']) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Period from</label><input type="date" class="form-control form-control-sm" name="period_start" value="<?= psr_h((string)$filter['period_start']) ?>"></div>
             <div class="col-md-2 mb-2"><label>Period to</label><input type="date" class="form-control form-control-sm" name="period_end" value="<?= psr_h((string)$filter['period_end']) ?>"></div>
             <div class="col-md-2 mb-2"><label>Person</label><input class="form-control form-control-sm" name="person" value="<?= psr_h($gridFilter['person']) ?>"></div>
@@ -698,7 +738,20 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <h6>1. Save my edits</h6>
                     <p class="mb-1">Saves the amounts typed on this page as drafts. This is not an approval.</p>
                     <p class="mb-2">This page: <?= (int)$approvalPanel['page_rows'] ?> draft row(s). Payroll is not written.</p>
+                    <p class="mb-2">A suggested employee is already selected and marked suggested. It is not saved until you confirm. Accepting links does not approve pay.</p>
+                    <button class="btn btn-outline-primary" name="preview_accept_links" value="1">Accept all suggested links</button>
                     <button class="btn btn-outline-primary" name="preview_grid_save" value="1">Review save</button>
+                    <?php if ($linkPreview): ?>
+                        <div class="alert alert-info mt-2">
+                            <?php if (!$linkPreview['changes']): ?>No unique suggested link to save. Ambiguous names were left blank.<?php else: ?>
+                                <?= count($linkPreview['changes']) ?> suggested link(s). Nobody is marked paid.
+                                <?php foreach (array_slice($linkPreview['changes'], 0, 12) as $linkChange): ?>
+                                    <div><?= psr_h($linkChange['employee_name']) ?> → employee <?= (int)$linkChange['user_id'] ?>, store <?= (int)$linkChange['site_id'] ?></div>
+                                <?php endforeach; ?>
+                                <button class="btn btn-primary mt-2" name="confirm_accept_links" value="1">Confirm suggested links</button>
+                            <?php endif; ?>
+                        </div>
+                    <?php endif; ?>
                     <?php if ($gridDiff && !empty($gridDiff['ok'])): ?>
                         <div class="alert alert-info mt-2"><?= count($gridDiff['changes']) ?> typed change(s) ready to save. Nobody is marked paid.</div>
                         <button class="btn btn-primary" name="confirm_grid_save" value="1">Confirm save</button>
@@ -847,9 +900,36 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <td class="ident">
                         <input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][employee_name]" value="<?= psr_h($grow['employee_name']) ?>">
                         <input class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][store_name]" value="<?= psr_h($grow['store_name']) ?>">
-                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][user_id]"><option value="0">Not linked</option><?php foreach ($staffRows as $p): ?><option value="<?= (int)$p['id'] ?>" <?= (int)$grow['user_id']===(int)$p['id']?'selected':'' ?>><?= psr_h($p['Name']) ?></option><?php endforeach; ?></select>
-                        <select class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][site_id]"><option value="0">Store not linked</option><?php foreach ($siteRows as $s): ?><option value="<?= (int)$s['SId'] ?>" <?= (int)$grow['site_id']===(int)$s['SId']?'selected':'' ?>><?= psr_h($s['nick_name']) ?></option><?php endforeach; ?></select>
-                        <?php if (!empty($grow['candidate'])): ?><div class="pending"><?= psr_h($grow['candidate']['reason']) ?></div><?php endif; ?>
+                        <?php
+                        $link = psr_suggest_link($grow, $staffDirectory, $siteList, $filterSiteId);
+                        $pickedUser = (int)$grow['user_id'] > 0 ? (int)$grow['user_id'] : (($link['status'] ?? '') === 'suggested' ? (int)$link['user_id'] : 0);
+                        $pickedSite = (int)$grow['site_id'] > 0 ? (int)$grow['site_id'] : (int)($link['site_id'] ?? 0);
+                        $linkIsNew = ($link['status'] ?? '') === 'suggested' && (int)$grow['user_id'] <= 0;
+                        ?>
+                        <select class="form-control form-control-sm mt-1 link-user" name="g[<?= psr_h($grow['key']) ?>][user_id]">
+                            <option value="0">Not linked</option>
+                            <?php foreach ($staffDirectory as $person):
+                                if ((int)$person['site_id'] <= 0) {
+                                    continue;
+                                }
+                                $suggestedOption = $linkIsNew && (int)$person['id'] === (int)$link['user_id'] && (int)$person['site_id'] === (int)$link['site_id'];
+                                $label = psr_employee_label($person, true);
+                                if ($suggestedOption) {
+                                    $label .= ' (suggested)';
+                                }
+                            ?>
+                                <option value="<?= (int)$person['id'] ?>" data-site="<?= (int)$person['site_id'] ?>" data-name="<?= psr_h($person['name']) ?>" data-store="<?= psr_h($person['site_name']) ?>" data-suggested="<?= $suggestedOption ? '1' : '0' ?>" <?= $pickedUser === (int)$person['id'] && $pickedSite === (int)$person['site_id'] ? 'selected' : '' ?>><?= psr_h($label) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <select class="form-control form-control-sm mt-1 link-site" name="g[<?= psr_h($grow['key']) ?>][site_id]">
+                            <option value="0">Store not linked</option>
+                            <?php foreach ($siteRows as $siteChoice): ?>
+                                <option value="<?= (int)$siteChoice['SId'] ?>" <?= $pickedSite === (int)$siteChoice['SId'] ? 'selected' : '' ?>><?= psr_h($siteChoice['nick_name']) ?><?= $linkIsNew && $pickedSite === (int)$siteChoice['SId'] ? ' (suggested)' : '' ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <?php if ($linkIsNew): ?><div class="pending">suggested — not saved</div><?php endif; ?>
+                        <?php if (($link['status'] ?? '') === 'ambiguous'): ?><div class="pending">Not linked. <?php foreach ($link['candidates'] as $candidate): ?><?= psr_h(psr_employee_label($candidate, true)) ?>. <?php endforeach; ?></div><?php endif; ?>
+                        <?php if (!empty($grow['candidate']) && ($link['status'] ?? '') === 'none'): ?><div class="pending"><?= psr_h($grow['candidate']['reason']) ?></div><?php endif; ?>
                         <?php if ((int)($grow['active'] ?? 1) === 0): ?><div class="text-muted">Inactive</div><?php endif; ?>
                     </td>
                     <td>
@@ -1235,6 +1315,27 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         }
         return Object.keys(checked).length;
     }
+    function narrowLinks(scope) {
+        (scope || form).querySelectorAll('.link-user').forEach(function (user) {
+            var td = user.closest('td');
+            if (!td) return;
+            var site = td.querySelector('.link-site');
+            var siteId = site ? site.value : '0';
+            Array.prototype.forEach.call(user.options, function (opt) {
+                if (!opt.value || opt.value === '0') return;
+                var optSite = opt.getAttribute('data-site') || '0';
+                var show = siteId === '0' || optSite === siteId;
+                opt.hidden = !show;
+                opt.disabled = !show;
+                var name = opt.getAttribute('data-name') || '';
+                var store = opt.getAttribute('data-store') || '';
+                var suggested = opt.getAttribute('data-suggested') === '1' ? ' (suggested)' : '';
+                opt.textContent = (siteId === '0' && store ? name + ' - ' + store : name) + suggested;
+            });
+            var current = user.options[user.selectedIndex];
+            if (current && current.disabled) user.value = '0';
+        });
+    }
     function paint() {
         var n = count();
         var label = document.getElementById('selectedCount');
@@ -1260,6 +1361,14 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         paint();
     });
     form.addEventListener('change', function (event) {
+        if (event.target.classList.contains('link-user')) {
+            var chosen = event.target.options[event.target.selectedIndex];
+            var site = event.target.closest('td').querySelector('.link-site');
+            var siteId = chosen ? chosen.getAttribute('data-site') : '';
+            if (site && siteId && siteId !== '0') site.value = siteId;
+            narrowLinks(event.target.closest('td'));
+        }
+        if (event.target.classList.contains('link-site')) narrowLinks(event.target.closest('td'));
         if (event.target.classList.contains('row-check')) paint();
         if (event.target.classList.contains('group-check')) {
             var groupId = event.target.getAttribute('data-group');
@@ -1285,6 +1394,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     var bottom = document.getElementById('openApprovalsBottom');
     if (bottom) bottom.addEventListener('click', openModal);
     document.getElementById('closeApprovals').addEventListener('click', function () { modal.classList.remove('open'); });
+    narrowLinks(form);
     paint();
 })();
 </script>
