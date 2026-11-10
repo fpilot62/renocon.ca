@@ -1012,8 +1012,9 @@ function psr_fetch_system_lines(PDO $pdo, int $orgId, ?int $userId = null): arra
             INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
             INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id";
     $params = [$orgId];
+    $sql .= ' WHERE ' . att_finalized_live_predicate($pdo, 'f');
     if ($userId) {
-        $sql .= ' WHERE f.user_id = ?';
+        $sql .= ' AND f.user_id = ?';
         $params[] = $userId;
     }
     $sql .= ' ORDER BY u.Name ASC, f.work_date ASC, f.id ASC';

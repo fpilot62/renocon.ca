@@ -53,6 +53,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
+require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 require_once __DIR__ . '/engine/payroll_cheque_lib.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 ps_require_payroll_admin();
@@ -291,7 +292,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_back_to_audit'])
     if ($target > 0) {
         $auth = $pdo->prepare("SELECT COUNT(*) FROM attendance a
             INNER JOIN users u ON u.id=a.user_id AND u.org_id=?
-            INNER JOIN sites s ON s.SId=a.site_id AND s.org_id=u.org_id WHERE a.id=?");
+            INNER JOIN sites s ON s.SId=a.site_id AND s.org_id=u.org_id WHERE a.id=? AND " . att_live_predicate($pdo, 'a'));
         $auth->execute([$user_org_id, $target]);
         if (!$auth->fetchColumn()) { http_response_code(403); exit('Attendance row is outside your organization.'); }
         $fin = $pdo->prepare(
@@ -372,7 +373,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
         try {
             $pdo->beginTransaction();
             ps_assert_user($pdo, $uid, $user_org_id);
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", att_finalized_live_predicate($pdo, 'f')];
             $p = [$uid, $pstart, $pend, $user_org_id];
             if ($psite > 0) { $w[] = "f.site_id = ?"; $p[] = $psite; }
             elseif ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
@@ -418,7 +419,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
          FROM payroll_finalized f
          INNER JOIN users u ON f.user_id = u.id
          LEFT  JOIN sites s ON f.site_id = s.Sid
-         WHERE f.id IN ($in) AND u.org_id = ? AND s.org_id = u.org_id"
+         WHERE f.id IN ($in) AND u.org_id = ? AND s.org_id = u.org_id AND " . att_finalized_live_predicate($pdo, 'f')
     );
     $q->execute(array_merge($ids, [$user_org_id]));
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
@@ -475,7 +476,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
 }
 
 // ---------------------------------------------------------------- DATA PULL (stored columns)
-$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
+$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", att_finalized_live_predicate($pdo, 'f')];
 $params = [$from_date, $to_date, $user_org_id];
 if ($site_filter !== 'all' && $site_filter !== '')     { $where[] = "f.site_id = ?"; $params[] = (int)$site_filter; }
 if ($employee_filter !== 'all' && $employee_filter !== '') { $where[] = "f.user_id = ?"; $params[] = (int)$employee_filter; }

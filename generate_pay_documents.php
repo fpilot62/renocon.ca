@@ -22,6 +22,7 @@ error_reporting(E_ALL);
 $is_cli = (PHP_SAPI === 'cli');
 if (!$is_cli && session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 
 $paydoc_org_id = 0;
 $record_cheques = false;
@@ -151,7 +152,8 @@ if ($is_cli) {
         $req_period_end   = $req_period_end ?: $cli_to;
         $sqlCli = "SELECT f.id FROM payroll_finalized f
                    LEFT JOIN users u ON u.id = f.user_id
-                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?";
+                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?
+                     AND " . att_finalized_live_predicate($pdo, 'f');
         $paramsCli = [$cli_site, $cli_from, $cli_to];
         if ($cli_name !== '') {
             $sqlCli .= " AND u.Name LIKE ?";
@@ -218,6 +220,7 @@ $sql = "SELECT
         LEFT JOIN users u ON f.user_id = u.id
         LEFT JOIN sites s ON f.site_id = s.Sid
         WHERE f.id IN ($in)" . ($is_cli ? '' : ' AND u.org_id = ?') . "
+          AND " . att_finalized_live_predicate($pdo, 'f') . "
         ORDER BY s.nick_name ASC, u.Name ASC, f.work_date ASC";
 $stmt = $pdo->prepare($sql);
 $stmt->execute($is_cli ? $line_ids : array_merge($line_ids, [$paydoc_org_id]));
@@ -377,7 +380,8 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
                 COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                 COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
            FROM payroll_finalized
-          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?"
+          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
+            AND " . att_finalized_live_predicate($pdo, 'payroll_finalized')
     );
     $st->execute([$uid, $sid, $from, $asof]);
     $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -391,6 +395,7 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
         "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
            FROM payroll_finalized
           WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
+            AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
           GROUP BY category, display_label"
     );
     try {
@@ -407,6 +412,7 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
             "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(reg_pay),0) rp
                FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
+                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
               GROUP BY category, display_label"
         );
         $st2->execute([$uid, $sid, $from, $asof]);
@@ -482,7 +488,8 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
                     COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                     COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
                FROM payroll_finalized
-              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?"
+              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
+                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized')
         );
         $st2->execute([$uid, $sid, $snap, $asof]);
         $add = $st2->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -501,6 +508,7 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
                     COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
                FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
+                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
               GROUP BY category, display_label"
         );
         $st3->execute([$uid, $sid, $snap, $asof]);
