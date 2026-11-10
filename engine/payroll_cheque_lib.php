@@ -9,6 +9,8 @@
  * payroll_finalized. A payment is capped at the stored net still outstanding.
  */
 
+require_once __DIR__ . '/attendance_integrity_lib.php';
+
 function pcr_payment_methods(): array
 {
     return ['E-Transfer', 'Cheque', 'Cash'];
@@ -404,7 +406,7 @@ function pcr_apply_payment(
          FROM payroll_finalized f
          INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
          INNER JOIN sites s ON s.SId=f.site_id AND s.org_id=u.org_id
-         WHERE f.id = ? LIMIT 1"
+         WHERE f.id = ? AND " . att_finalized_live_predicate($pdo, 'f') . " LIMIT 1"
     );
     $q->execute([$orgId, $lineId]);
     $line = $q->fetch(PDO::FETCH_ASSOC);

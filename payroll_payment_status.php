@@ -22,6 +22,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
+require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 if (is_file(__DIR__ . '/engine/org_modules_lib.php')) {
     require_once __DIR__ . '/engine/org_modules_lib.php';
 }
@@ -121,6 +122,7 @@ $q = $pdo->prepare(
      INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
      INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
      WHERE f.work_date BETWEEN ? AND ?
+       AND " . att_finalized_live_predicate($pdo, 'f') . "
      ORDER BY s.nick_name ASC, u.Name ASC, f.work_date ASC, f.id ASC"
 );
 $q->execute([$orgId, $startIn, $endIn]);

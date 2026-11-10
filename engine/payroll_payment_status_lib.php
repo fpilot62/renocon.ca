@@ -756,7 +756,7 @@ function pstat_remove_manual_line(PDO $pdo, int $finalizedId, int $orgId): bool
     $st = $pdo->prepare(
         'SELECT f.* FROM payroll_finalized f
          INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
-         WHERE f.id = ? LIMIT 1'
+         WHERE f.id = ? AND ' . att_finalized_live_predicate($pdo, 'f') . ' LIMIT 1'
     );
     $st->execute([$orgId, $finalizedId]);
     $row = $st->fetch(PDO::FETCH_ASSOC);
@@ -797,7 +797,7 @@ function pstat_remove_manual_user(PDO $pdo, int $userId, int $orgId): void
         return;
     }
     try {
-        $att = $pdo->prepare('SELECT COUNT(*) FROM attendance WHERE user_id = ?');
+        $att = $pdo->prepare('SELECT COUNT(*) FROM attendance WHERE user_id = ? AND ' . att_live_predicate($pdo, 'attendance'));
         $att->execute([$userId]);
         if ((int)$att->fetchColumn() > 0) {
             return;
