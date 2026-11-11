@@ -16,6 +16,7 @@ error_reporting(E_ALL);
 require_once 'db.php';
 require_once __DIR__ . '/payroll_scope.php'; 
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+require_once __DIR__ . '/engine/auto_break_lib.php';
 
 if (file_exists('engine/menu_generator.php')) {
     require_once 'engine/menu_generator.php';
@@ -146,6 +147,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)";
             
             $insStmt = $pdo->prepare($insQuery);
+            $pdo->beginTransaction();
             $insStmt->execute([
                 $src['org_id'],
                 $src['site_id'],
@@ -168,21 +170,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $src['remarks'],
                 $src['transfer_status']
             ]);
-            
-            $new_shift_id = $pdo->lastInsertId();
-            
-            $brkSrc = $pdo->prepare("SELECT * FROM breaks WHERE shift_id = ?");
-            $brkSrc->execute([$target_id]);
-            $breaks = $brkSrc->fetchAll(PDO::FETCH_ASSOC);
-            
-            foreach ($breaks as $b) {
-                $insBrk = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, break_end, start_selfie, end_selfie, start_lat, start_lng, end_lat, end_lng) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $insBrk->execute([$new_shift_id, $b['break_start'], $b['break_end'], $b['start_selfie'], $b['end_selfie'], $b['start_lat'], $b['start_lng'], $b['end_lat'], $b['end_lng']]);
-            }
+
+            $new_shift_id = (int)$pdo->lastInsertId();
+            ab_copy_breaks($pdo, $target_id, $new_shift_id);
+            ab_apply_to_shift($pdo, $new_shift_id);
+            $pdo->commit();
             
             echo json_encode(['success' => true]);
             exit;
         } catch (Exception $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             echo json_encode(['success' => false, 'error' => $e->getMessage()]);
             exit;
         }
@@ -233,25 +232,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     }
     
-    // Real-time update processor for break configurations
+    // Real-time update processor for break configurations.
+    // Saving a real break removes an Auto break. Clearing the list does not add one back.
     if ($_POST['action'] === 'update_breaks' && !empty($_POST['shift_id'])) {
         $shift_id = (int)$_POST['shift_id'];
-        
-        // Wipe existing child links to overwrite cleanly
-        $pdo->prepare("DELETE FROM breaks WHERE shift_id = ?")->execute([$shift_id]);
-        
-        if (!empty($_POST['break_start'])) {
-            foreach ($_POST['break_start'] as $idx => $bStartStr) {
-                $bEndStr = $_POST['break_end'][$idx] ?? '';
-                if (!empty(trim($bStartStr))) {
-                    $insB = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, break_end) VALUES (?, ?, ?)");
-                    $insB->execute([
-                        $shift_id,
-                        trim($bStartStr),
-                        !empty(trim($bEndStr)) ? trim($bEndStr) : null
-                    ]);
-                }
-            }
+        $starts = (isset($_POST['break_start']) && is_array($_POST['break_start'])) ? $_POST['break_start'] : [];
+        $ends = (isset($_POST['break_end']) && is_array($_POST['break_end'])) ? $_POST['break_end'] : [];
+        $sources = (isset($_POST['break_source']) && is_array($_POST['break_source'])) ? $_POST['break_source'] : [];
+        $saved = ab_save_editor_breaks($pdo, $shift_id, $starts, $ends, $sources);
+        if (!$saved['ok']) {
+            $_SESSION['ab_break_error'] = $saved['error'];
         }
         header("Location: " . $_SERVER['REQUEST_URI']);
         exit;
@@ -1554,6 +1544,8 @@ if (!function_exists('sa_render_pager')) {
 
         .break-editor-modal { display: none; position: fixed; z-index: 999999; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.55); backdrop-filter: blur(5px); align-items: center; justify-content: center; }
         .modal-content-card { background: white; width: 100%; max-width: 520px; border-radius: 16px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25); border: 1px solid #cbd5e1; padding: 24px; animation: modalSlide 0.2s ease-out; }
+        .break-badge-auto { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; border-radius: 4px; padding: 1px 4px; font-weight: 800; }
+        .ab-break-error { background: #fff7ed; border: 1px solid #fdba74; color: #9a3412; padding: 12px 16px; border-radius: 8px; font-weight: 700; margin: 12px 20px; }
         .break-input-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; background: #f8fafc; padding: 8px; border-radius: 8px; border: 1px solid #e2e8f0; }
         .modal-btn-save { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; }
         .modal-btn-cancel { background: #e2e8f0; color: #475569; border: none; padding: 10px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; margin-right: 8px; }
@@ -1601,6 +1593,10 @@ if (!function_exists('sa_render_pager')) {
     ?>
 
     <div id="status-msg-alert"></div>
+    <?php if (!empty($_SESSION['ab_break_error'])): ?>
+        <div class="ab-break-error"><?= htmlspecialchars((string)$_SESSION['ab_break_error']) ?></div>
+        <?php unset($_SESSION['ab_break_error']); ?>
+    <?php endif; ?>
 
     <div class="sa-page">
 
@@ -1611,8 +1607,8 @@ if (!function_exists('sa_render_pager')) {
     <div id="breakModal" class="break-editor-modal">
         <div class="modal-content-card">
             <h5 style="margin-top:0; font-weight:800; color:#1e293b; font-size:14px; margin-bottom:6px;"><i class="fas fa-clock" style="color:#2563eb;"></i> Adjust Shift Break Windows</h5>
-            <p style="color:#64748b; font-size:11px; margin-bottom:15px;">Modify existing timestamps or append supplementary rest intervals below. Leave end-times open if active.</p>
-            <form id="breakForm" method="POST" action="staff_audit.php">
+            <p style="color:#64748b; font-size:11px; margin-bottom:15px;">Modify existing timestamps or append supplementary rest intervals below. A break must start and end inside the shift. An Auto break is removed when you save a real break. Clearing every row leaves no break.</p>
+            <form id="breakForm" method="POST" action="staff_audit.php<?= htmlspecialchars((isset($_SERVER['QUERY_STRING']) && $_SERVER['QUERY_STRING'] !== '') ? ('?' . $_SERVER['QUERY_STRING']) : '') ?>">
                 <input type="hidden" name="action" value="update_breaks">
                 <input type="hidden" name="shift_id" id="modalShiftId">
                 <div id="modalBreakContainer"></div>
@@ -1873,6 +1869,8 @@ if (!function_exists('sa_render_pager')) {
             <?php 
             $last_group = null;
             $group_counter = 0;
+            $abHasSource = ab_has_source($pdo);
+            $abBreakStmt = $pdo->prepare('SELECT break_start, break_end' . ($abHasSource ? ', source' : '') . ' FROM breaks WHERE shift_id = ? ORDER BY id ASC');
             if (!empty($rows)):
                 foreach ($rows as $r): 
                     $status_val = trim((string)($r['status'] ?? '0'));
@@ -1919,16 +1917,16 @@ if (!function_exists('sa_render_pager')) {
                     else { $out_ts = (!empty($out_time_str) && $out_time_str != '0000-00-00 00:00:00') ? strtotime($out_time_str) : 0; }
 
                     $all_breaks = [];
-                    if (!$is_transit && !$is_split && !empty($r['id'])) {
-                        $bListStmt = $pdo->prepare("SELECT break_start, break_end FROM breaks WHERE shift_id = ? ORDER BY id ASC");
-                        $bListStmt->execute([$r['id']]);
-                        $all_breaks = $bListStmt->fetchAll(PDO::FETCH_ASSOC);
+                    if (!empty($r['id'])) {
+                        $abBreakStmt->execute([(int)$r['id']]);
+                        $all_breaks = $abBreakStmt->fetchAll(PDO::FETCH_ASSOC);
                     }
 
                     $break_sec = 0;
                     foreach ($all_breaks as $b) {
                         if (!empty($b['break_end'])) { $break_sec += abs(strtotime($b['break_end']) - strtotime($b['break_start'])); }
                     }
+                    if ($is_transit) { $break_sec = 0; }
                     
                     $net_sec = ($out_ts > 0) ? ($out_ts - $in_ts - $break_sec) : (time() - $in_ts - $break_sec);
                     if ($net_sec < 0) $net_sec = 0;
@@ -2063,17 +2061,21 @@ if (!function_exists('sa_render_pager')) {
                                 echo "<span style='color:#b45309; font-style:italic; font-weight:bold;'>Transit Segment</span>";
                             elseif ($is_split):
                                 echo "<span style='color:#15803d; font-style:italic; font-weight:bold;'>Allocated Log Block</span>";
-                            elseif (empty($all_breaks)):
+                            endif;
+                            if (!$is_transit && !$is_split && empty($all_breaks)):
                                 echo "<span style='color:#94a3b8; font-style:italic;'>No Breaks</span>";
-                            else:
+                            elseif (!empty($all_breaks)):
                                 foreach ($all_breaks as $index => $b):
                                     $b_start = strtotime($b['break_start']);
                                     $b_end   = !empty($b['break_end']) ? strtotime($b['break_end']) : null;
                                     $b_dur   = $b_end ? round(($b_end - $b_start) / 60) . "m" : "Open";
-                                    $hide_style = ($index >= 2) ? 'style="display:none;" class="hidden-break-item"' : '';
+                                    $is_auto = $abHasSource && ab_is_auto_source($b['source'] ?? null);
+                                    $badge_label = $is_auto ? AB_LABEL : ('#' . ($index + 1));
+                                    $hide_class = ($index >= 2) ? ' hidden-break-item' : '';
+                                    $hide_style = ($index >= 2) ? ' style="display:none;"' : '';
                                     ?>
-                                    <div class="break-badge" <?= $hide_style ?>>
-                                        #<?= $index + 1 ?>: <?= date('M j, h:i A', $b_start) ?> тЖТ <?= $b_end ? date('M j, h:i A', $b_end) : 'Open' ?> (<strong><?= $b_dur ?></strong>)
+                                    <div class="break-badge<?= $is_auto ? ' break-badge-auto' : '' ?><?= $hide_class ?>"<?= $hide_style ?>>
+                                        <?= htmlspecialchars($badge_label) ?>: <?= date('M j, h:i A', $b_start) ?> → <?= $b_end ? date('M j, h:i A', $b_end) : 'Open' ?> (<strong><?= $b_dur ?></strong>)
                                     </div>
                                 <?php endforeach; ?>
                                 <?php if (count($all_breaks) > 2): ?>
@@ -2396,7 +2398,7 @@ if (!function_exists('sa_render_pager')) {
 
             if(existingBreaks && existingBreaks.length > 0) {
                 existingBreaks.forEach(function(b) {
-                    appendBreakRowTemplate(b.break_start, b.break_end || '');
+                    appendBreakRowTemplate(b.break_start, b.break_end || '', b.source === 'auto' ? 'auto' : 'manual');
                 });
             } else {
                 addBlankBreakRow(); 
@@ -2404,33 +2406,31 @@ if (!function_exists('sa_render_pager')) {
             document.getElementById('breakModal').style.display = 'flex';
         }
 
-        function appendBreakRowTemplate(startVal, endVal) {
+        function appendBreakRowTemplate(startVal, endVal, source) {
             const container = document.getElementById('modalBreakContainer');
             const div = document.createElement('div');
             div.className = 'break-input-row';
+            const src = source === 'auto' ? 'auto' : 'manual';
             
             let sFormatted = '';
             let eFormatted = '';
             
             if (startVal) {
-                sFormatted = startVal.replace(' ', 'T');
-            } else if (activeShiftDateContext) {
-                sFormatted = activeShiftDateContext + 'T12:00';
+                sFormatted = String(startVal).replace(' ', 'T');
             }
             
             if (endVal) {
-                eFormatted = endVal.replace(' ', 'T');
-            } else if (activeShiftDateContext) {
-                eFormatted = activeShiftDateContext + 'T12:30';
+                eFormatted = String(endVal).replace(' ', 'T');
             }
             
             div.innerHTML = `
+                <input type="hidden" name="break_source[]" value="${src}">
                 <div style="flex:1;">
-                    <label style="font-size:9px; color:#475569; font-weight:bold; display:block; margin-bottom:2px;">Break Start</label>
-                    <input type="datetime-local" name="break_start[]" value="${sFormatted}" class="form-control" style="font-size:11px; height:32px;" required>
+                    <label style="font-size:9px; color:#475569; font-weight:bold; display:block; margin-bottom:2px;">${src === 'auto' ? 'Auto break start' : 'Break Start'}</label>
+                    <input type="datetime-local" name="break_start[]" value="${sFormatted}" class="form-control" style="font-size:11px; height:32px;">
                 </div>
                 <div style="flex:1;">
-                    <label style="font-size:9px; color:#475569; font-weight:bold; display:block; margin-bottom:2px;">Break End</label>
+                    <label style="font-size:9px; color:#475569; font-weight:bold; display:block; margin-bottom:2px;">${src === 'auto' ? 'Auto break end' : 'Break End'}</label>
                     <input type="datetime-local" name="break_end[]" value="${eFormatted}" class="form-control" style="font-size:11px; height:32px;">
                 </div>
                 <button type="button" style="background:#ef4444; border:none; color:white; padding:4px 8px; border-radius:6px; margin-top:14px; cursor:pointer;" onclick="this.parentNode.remove()"><i class="fas fa-trash-alt"></i></button>
