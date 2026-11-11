@@ -400,6 +400,55 @@ function ab_work_shift_sql(string $alias): string
     return "TRIM(IFNULL(" . $alias . ".status, '')) NOT IN ('5', '6', 'travel', 'transfer-out')";
 }
 
+function ab_recent_clockout_sql(bool $hasDeleted): string
+{
+    $parts = [];
+    if ($hasDeleted) {
+        $parts[] = 'a.deleted_at IS NULL';
+    }
+    $parts[] = "a.clock_out IS NOT NULL AND TRIM(a.clock_out) <> '' AND a.clock_out <> '0000-00-00 00:00:00'";
+    $parts[] = 'a.clock_out >= DATE_SUB(NOW(), INTERVAL 3 DAY)';
+    return 'SELECT a.id FROM attendance a WHERE ' . implode(' AND ', $parts) . ' ORDER BY a.id';
+}
+
+/**
+ * Live pages connect through db.php. A checkout that has config/payroll.env
+ * uses that instead. db.php may start a session; a CLI run must not send
+ * session cookies, and anything it prints is kept off the result list.
+ */
+function ab_open_pdo(string $root): PDO
+{
+    $root = rtrim($root, '/');
+    $config = $root . '/engine/payroll_db_config.php';
+    $env = $root . '/config/payroll.env';
+    if (is_file($config) && is_file($env)) {
+        require_once $config;
+        return payroll_pdo(payroll_db_config($env));
+    }
+    $db = $root . '/db.php';
+    if (!is_file($db)) {
+        throw new RuntimeException('Database config is missing. Add config/payroll.env or db.php.');
+    }
+    if (PHP_SAPI === 'cli') {
+        ini_set('session.use_cookies', '0');
+        ini_set('session.use_only_cookies', '1');
+        ini_set('session.cache_limiter', '');
+    }
+    ob_start();
+    require $db;
+    $noise = ob_get_clean();
+    if (is_string($noise) && trim($noise) !== '') {
+        fwrite(STDERR, $noise);
+    }
+    if ((!isset($pdo) || !($pdo instanceof PDO)) && isset($GLOBALS['pdo']) && $GLOBALS['pdo'] instanceof PDO) {
+        $pdo = $GLOBALS['pdo'];
+    }
+    if (!isset($pdo) || !($pdo instanceof PDO)) {
+        throw new RuntimeException('db.php did not set $pdo.');
+    }
+    return $pdo;
+}
+
 function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $orgScoped): string
 {
     $parts = [];
@@ -793,6 +842,7 @@ function ab_backfill(PDO $pdo, ?int $orgId, bool $apply): array
         . ' AND (' . implode(' OR ', $cleanOr) . ') ORDER BY a.id';
 
     $counts = ['add' => 0, 'move' => 0, 'remove' => 0];
+    $byOrg = [];
     $lines = [];
     $seen = [];
     foreach ([$addSql, $cleanSql] as $sql) {
@@ -808,15 +858,30 @@ function ab_backfill(PDO $pdo, ?int $orgId, bool $apply): array
             if (($plan['action'] ?? 'skip') === 'skip') {
                 continue;
             }
-            if ($plan['action'] === 'insert') {
-                $counts['add']++;
-            } elseif ($plan['action'] === 'move') {
-                $counts['move']++;
-            } elseif ($plan['action'] === 'remove_auto') {
-                $counts['remove']++;
+            $bucket = $plan['action'] === 'insert' ? 'add' : ($plan['action'] === 'move' ? 'move' : ($plan['action'] === 'remove_auto' ? 'remove' : ''));
+            if ($bucket !== '') {
+                $counts[$bucket]++;
+                $orgId = (int)($plan['shift']['org_id'] ?? 0);
+                if (!isset($byOrg[$orgId])) {
+                    $byOrg[$orgId] = ['add' => 0, 'move' => 0, 'remove' => 0];
+                }
+                $byOrg[$orgId][$bucket]++;
             }
             $lines[] = ab_format_backfill_line($plan);
         }
     }
-    return ['counts' => $counts, 'lines' => $lines, 'apply' => $apply];
+    ksort($byOrg);
+    return ['counts' => $counts, 'by_org' => $byOrg, 'lines' => $lines, 'apply' => $apply];
+}
+
+/**
+ * @param array<int,array{add:int,move:int,remove:int}> $byOrg
+ */
+function ab_format_org_counts(array $byOrg): string
+{
+    $lines = [];
+    foreach ($byOrg as $orgId => $counts) {
+        $lines[] = 'org ' . (int)$orgId . ': ' . (int)$counts['add'] . ' to add, ' . (int)$counts['move'] . ' to move, ' . (int)$counts['remove'] . ' to remove';
+    }
+    return implode("\n", $lines);
 }

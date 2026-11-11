@@ -190,7 +190,25 @@ check('backfill documents apply and org', strpos($script, '--apply') !== false &
 $migration = file_get_contents($root . '/migrations/20261111_break_source.sql');
 check('migration adds source idempotently', strpos($migration, 'information_schema.COLUMNS') !== false && strpos($migration, 'breaks') !== false && strpos($migration, 'manual') !== false && strpos($migration, 'source') !== false);
 
+check('recent clock-outs are the last 3 days', strpos(ab_recent_clockout_sql(true), 'INTERVAL 3 DAY') !== false && strpos(ab_recent_clockout_sql(true), 'deleted_at IS NULL') !== false);
+check('org summary lists each company', ab_format_org_counts([2 => ['add' => 3, 'move' => 0, 'remove' => 1]]) === 'org 2: 3 to add, 0 to move, 1 to remove');
+
+$cron = file_get_contents($root . '/auto_break_cron.php');
+check('cron refuses the web', strpos($cron, "php_sapi_name() !== 'cli'") !== false);
+check('cron locks and applies the same rules', strpos($cron, 'flock') !== false && strpos($cron, 'ab_apply_to_shift') !== false && strpos($cron, 'ab_recent_clockout_sql') !== false);
+check('cron does not install itself', strpos($cron, 'crontab') === false);
+
+$backfill = file_get_contents($root . '/auto_break_backfill.php');
+check('backfill opens db.php when env config is absent', strpos($backfill, 'ab_open_pdo') !== false && strpos($backfill, "require_once __DIR__ . '/engine/payroll_db_config.php'") === false);
 $lib = file_get_contents($root . '/engine/auto_break_lib.php');
+$open = substr($lib, (int)strpos($lib, 'function ab_open_pdo'));
+$open = substr($open, 0, (int)strpos($open, "\nfunction "));
+check('db.php fallback avoids CLI session cookies', strpos($open, 'db.php') !== false && strpos($open, 'session.use_cookies') !== false && strpos($open, 'payroll.env') !== false);
+
+$live = file_get_contents($root . '/ops/pr8_live/staff_audit.php');
+check('live staff audit keeps the hard delete', strpos($live, 'DELETE FROM attendance') !== false && strpos($live, 'att_soft_delete') === false && strpos($live, 'attendance_integrity_lib') === false);
+check('live staff audit has only the auto-break hooks', strpos($live, 'ab_copy_breaks') !== false && strpos($live, 'ab_apply_to_shift') !== false && strpos($live, 'ab_save_editor_breaks') !== false && strpos($live, 'break_source') !== false && strpos($live, 'AB_LABEL') !== false);
+
 $editorFn = substr($lib, (int)strpos($lib, 'function ab_save_editor_breaks'));
 $editorFn = substr($editorFn, 0, (int)strpos($editorFn, "\nfunction "));
 check('the editor save does not put an auto break back', strpos($editorFn, 'ab_apply_to_shift') === false && strpos($editorFn, 'ab_window_for_shift') === false);

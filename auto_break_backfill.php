@@ -21,7 +21,6 @@ if (php_sapi_name() !== 'cli') {
 }
 
 require_once __DIR__ . '/engine/auto_break_lib.php';
-require_once __DIR__ . '/engine/payroll_db_config.php';
 
 if (!isset($argv[0]) || realpath((string)$argv[0]) !== realpath(__FILE__)) {
     return;
@@ -38,8 +37,7 @@ if ($parsed['error'] !== null) {
 }
 
 try {
-    $cfg = payroll_db_config(__DIR__ . '/config/payroll.env');
-    $pdo = payroll_pdo($cfg);
+    $pdo = ab_open_pdo(__DIR__);
     $result = ab_backfill($pdo, $parsed['org'], $parsed['apply']);
 } catch (Throwable $e) {
     fwrite(STDERR, "Auto break backfill failed: " . $e->getMessage() . "\n");
@@ -58,6 +56,10 @@ if ($result['lines'] === []) {
 }
 $counts = $result['counts'];
 echo $counts['add'] . ' to add, ' . $counts['move'] . ' to move, ' . $counts['remove'] . " to remove.\n";
+$orgSummary = ab_format_org_counts($result['by_org'] ?? []);
+if ($orgSummary !== '') {
+    echo $orgSummary . "\n";
+}
 if ($parsed['apply']) {
     echo "Those rows were written. Finalized shifts were not changed.\n";
 } else {
