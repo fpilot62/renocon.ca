@@ -24,32 +24,42 @@ function inside_shift(array $window, string $in, string $out): bool
     $end = ab_parse_dt($window['break_end']);
     $inTs = ab_parse_dt($in);
     $outTs = ab_parse_dt($out);
-    return $start !== null && $end !== null && $inTs !== null && $outTs !== null
-        && $end - $start === AB_BREAK_SECONDS
+    if ($start === null || $end === null || $inTs === null || $outTs === null) {
+        return false;
+    }
+    return $end - $start === ab_break_minutes($outTs - $inTs) * 60
         && $start >= $inTs && $end <= $outTs;
 }
 
+check('5 hours is 19 minutes', ab_break_minutes(5 * 3600) === 19);
+check('6 hours is 23 minutes', ab_break_minutes(6 * 3600) === 23);
+check('8 hours is 30 minutes', ab_break_minutes(8 * 3600) === 30);
+check('10 hours is 38 minutes', ab_break_minutes(10 * 3600) === 38);
+check('16 hours is 60 minutes', ab_break_minutes(16 * 3600) === 60);
+check('under 5 hours is no break', ab_break_minutes(5 * 3600 - 1) === 0);
+
 $eight = ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 17:00:00');
-check('8 hour shift places 30 minutes on the midpoint', $eight === [
-    'break_start' => '2026-06-01 12:45:00',
-    'break_end' => '2026-06-01 13:15:00',
-]);
+check('8 hour shift places 30 minutes on the midpoint', $eight !== null && $eight['break_start'] === '2026-06-01 12:45:00' && $eight['break_end'] === '2026-06-01 13:15:00' && $eight['minutes'] === 30);
 check('8 hour window stays inside the shift', $eight !== null && inside_shift($eight, '2026-06-01 09:00:00', '2026-06-01 17:00:00'));
 
-check('exactly 5 hours gets no auto break', ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 14:00:00') === null);
-$justOver = ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 14:00:01');
-check('one second over 5 hours gets a window inside the shift', $justOver !== null && inside_shift($justOver, '2026-06-01 09:00:00', '2026-06-01 14:00:01'));
+$five = ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 14:00:00');
+check('exactly 5 hours gets 19 minutes', $five !== null && $five['minutes'] === 19 && $five['break_start'] === '2026-06-01 11:20:30' && $five['break_end'] === '2026-06-01 11:39:30');
+check('one second under 5 hours gets no auto break', ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 13:59:59') === null);
 check('open shift gets no window', ab_window_for_shift('2026-06-01 09:00:00', null) === null);
 check('zero clock-out gets no window', ab_window_for_shift('2026-06-01 09:00:00', '0000-00-00 00:00:00') === null);
 
+$six = ab_window_for_shift('2026-06-01 09:00:00', '2026-06-01 15:00:00');
+check('6 hours is 23 minutes inside the shift', $six !== null && $six['minutes'] === 23 && inside_shift($six, '2026-06-01 09:00:00', '2026-06-01 15:00:00'));
+$ten = ab_window_for_shift('2026-06-01 08:00:00', '2026-06-01 18:00:00');
+check('10 hours is 38 minutes inside the shift', $ten !== null && $ten['minutes'] === 38 && inside_shift($ten, '2026-06-01 08:00:00', '2026-06-01 18:00:00'));
+$sixteen = ab_window_for_shift('2026-06-01 06:00:00', '2026-06-01 22:00:00');
+check('16 hours is 60 minutes inside the shift', $sixteen !== null && $sixteen['minutes'] === 60 && inside_shift($sixteen, '2026-06-01 06:00:00', '2026-06-01 22:00:00'));
+
 $overnight = ab_window_for_shift('2026-06-01 22:00:00', '2026-06-02 06:00:00');
-check('overnight midpoint is 01:45 to 02:15', $overnight === [
-    'break_start' => '2026-06-02 01:45:00',
-    'break_end' => '2026-06-02 02:15:00',
-]);
+check('overnight midpoint is 01:45 to 02:15', $overnight !== null && $overnight['break_start'] === '2026-06-02 01:45:00' && $overnight['break_end'] === '2026-06-02 02:15:00');
 
 $oddOk = true;
-for ($extra = 1; $extra <= 3600; $extra += 30) {
+for ($extra = 0; $extra <= 3600; $extra += 30) {
     $out = ab_format_dt(ab_parse_dt('2026-06-01 09:00:00') + AB_THRESHOLD_SECONDS + $extra);
     $window = ab_window_for_shift('2026-06-01 09:00:00', $out);
     if ($window === null || !inside_shift($window, '2026-06-01 09:00:00', $out)) {
@@ -57,10 +67,10 @@ for ($extra = 1; $extra <= 3600; $extra += 30) {
         break;
     }
 }
-check('windows just over 5 hours stay inside', $oddOk);
+check('windows of at least 5 hours stay inside', $oddOk);
 
 $long = ab_window_for_shift('2026-06-01 06:00:00', '2026-06-01 20:00:00');
-check('a long shift still gets one 30 minute break', $long !== null && inside_shift($long, '2026-06-01 06:00:00', '2026-06-01 20:00:00') && ($long['break_end'] === '2026-06-01 13:15:00'));
+check('a 14 hour shift gets one prorated break', $long !== null && $long['minutes'] === 53 && inside_shift($long, '2026-06-01 06:00:00', '2026-06-01 20:00:00'));
 
 $openFlags = ['is_finalized' => 0, 'payout_status' => 0, 'is_processed' => 0, 'status' => '1', 'clock_in' => '2026-06-01 09:00:00', 'clock_out' => '2026-06-01 17:00:00'];
 $insert = ab_plan($openFlags, [], false);
@@ -96,7 +106,7 @@ check('legacy attendance break columns count as a real break', $legacyPlan['acti
 $short = $openFlags;
 $short['clock_out'] = '2026-06-01 13:00:00';
 $shortPlan = ab_plan($short, [['id' => 9, 'source' => 'auto', 'break_start' => '2026-06-01 11:00:00', 'break_end' => '2026-06-01 11:30:00']], false);
-check('shortening the shift removes the auto break', $shortPlan['action'] === 'remove_auto' && $shortPlan['reason'] === 'not over 5 hours');
+check('shortening the shift removes the auto break', $shortPlan['action'] === 'remove_auto' && $shortPlan['reason'] === 'under 5 hours');
 
 foreach ([
     ['is_finalized' => 1],
@@ -151,7 +161,7 @@ $finSql = ab_finalized_sql('a', true, true, true);
 check('finalized sql covers the four markers', strpos($finSql, 'is_finalized') !== false && strpos($finSql, 'payout_status, 0) <> 0') !== false && strpos($finSql, 'is_processed') !== false && strpos($finSql, 'payroll_finalized') !== false);
 $where = ab_backfill_where(true, true, true, true, true);
 check('backfill skips deleted and finalized rows and can filter org', strpos($where, 'a.deleted_at IS NULL') !== false && strpos($where, 'NOT ' . $finSql) !== false && strpos($where, 'a.org_id = ?') !== false);
-check('backfill length test is strictly over 5 hours', strpos(ab_over_five_hours_sql('a'), '> ' . AB_THRESHOLD_SECONDS) !== false);
+check('backfill length test includes a 5 hour shift', strpos(ab_over_five_hours_sql('a'), '>= ' . AB_THRESHOLD_SECONDS) !== false);
 
 $dry = ab_parse_cli([]);
 check('dry-run is the default', $dry['apply'] === false && $dry['org'] === null && $dry['error'] === null);
@@ -166,9 +176,10 @@ $line = ab_format_backfill_line([
     'reason' => 'no break',
     'window' => $eight,
     'auto_ids' => [],
-    'shift' => ['id' => 12, 'org_id' => 3, 'user_id' => 9, 'clock_in' => '2026-06-01 09:00:00', 'clock_out' => '2026-06-01 17:00:00'],
+    'shift' => ['id' => 12, 'org_id' => 3, 'site_id' => 7, 'user_id' => 9, 'clock_in' => '2026-06-01 09:00:00', 'clock_out' => '2026-06-01 17:00:00'],
 ]);
-check('dry-run line names the shift and the window', strpos($line, 'shift 12 org 3 user 9') !== false && strpos($line, '2026-06-01 12:45:00 -> 2026-06-01 13:15:00') !== false);
+check('dry-run line names the shift, the hours, and the window', strpos($line, 'shift 12 org 3 site 7 user 9 worked 8.00h') !== false && strpos($line, 'add 30m 2026-06-01 12:45:00 -> 2026-06-01 13:15:00') !== false);
+check('site counts are listed for one org', ab_format_site_counts([2 => [14 => ['add' => 4, 'move' => 0, 'remove' => 1]]], 2) === 'org 2 site 14: 4 to add, 0 to move, 1 to remove');
 
 $root = dirname(__DIR__);
 $manual = file_get_contents($root . '/manual_attendance.php');
@@ -176,6 +187,7 @@ check('manual attendance validates breaks', strpos($manual, 'ab_validate_posted_
 check('manual attendance applies the auto break', strpos($manual, 'ab_apply_to_shift') !== false);
 check('manual attendance does not seed a break row on load', strpos($manual, 'appendFreshBreakRow();') === false);
 check('manual attendance does not prefill 12:00', strpos($manual, 'T12:00') === false && strpos($manual, 'T12:30') === false);
+check('manual attendance describes the prorated auto break', strpos($manual, 'rounded to the nearest minute') !== false);
 
 $audit = file_get_contents($root . '/staff_audit.php');
 check('staff audit applies the auto break when duplicating', strpos($audit, 'ab_copy_breaks') !== false && strpos($audit, 'ab_apply_to_shift') !== false);

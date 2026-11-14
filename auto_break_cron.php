@@ -7,8 +7,8 @@
  *
  *   php auto_break_cron.php
  *
- * Intended schedule: every 10 minutes. The deploy script prints that line
- * and does not install it.
+ * Length comes from ab_break_minutes: under 5 hours gets nothing, and 5 hours
+ * or more gets round(30 minutes times worked hours / 8), labelled Auto break.
  *
  * Refuses to run from a web request. A lock file skips a second copy
  * while one is still running.

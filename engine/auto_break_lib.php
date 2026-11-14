@@ -1,18 +1,21 @@
 <?php
 /**
- * Automatic 30-minute meal break for a closed shift longer than 5 hours
- * that has no break recorded.
+ * Prorated meal break for a closed shift of 5 hours or more with no break recorded.
  *
- * Storage: a normal row in `breaks` (shift_id, break_start, break_end) with
+ * Length: round(30 minutes × worked hours / 8) to the nearest minute.
+ * Worked hours are clock-out minus clock-in, because this runs only when no
+ * break is already entered. Under 5 hours gets nothing. Examples: 5h = 19 min,
+ * 6h = 23 min, 8h = 30 min, 10h = 38 min, 16h = 60 min. Half minutes round up.
+ *
+ * Storage: one row in `breaks` (shift_id, break_start, break_end) with
  * source = 'auto'. Staff Audit and any total that sums `breaks` deduct it the
  * same way as a break someone typed. The badge text is "Auto break".
  * Run migrations/20261111_break_source.sql before the first insert. Until that
  * column exists, these functions write nothing.
  *
- * Placement: one 30-minute block centered on the midpoint of [clock_in, clock_out].
+ * Placement: that one block is centered on the midpoint of [clock_in, clock_out].
  * The midpoint is clock_in plus half the elapsed seconds, rounded down.
- * Both ends stay inside the shift. A shift of exactly 5 hours does not qualify.
- * This is one break for the whole shift, not one break per five hours.
+ * Both ends stay inside the shift.
  *
  * Idempotent: a shift keeps at most one source='auto' row. A real break is any
  * other `breaks` row (source manual, blank, or missing) or a legacy pair of
@@ -30,7 +33,7 @@
  *
  * The Staff Audit break editor can delete the Auto break. Saving that form
  * does not put it back. The next create/close of the shift does, if the shift
- * is still over 5 hours and still has no real break. Adding a real break in
+ * is still at least 5 hours and still has no real break. Adding a real break in
  * the editor deletes the Auto break.
  *
  * Call ab_apply_to_shift($pdo, $shiftId) after a shift is inserted or its
@@ -43,8 +46,20 @@
 require_once __DIR__ . '/attendance_integrity_lib.php';
 
 const AB_THRESHOLD_SECONDS = 18000;
-const AB_BREAK_SECONDS = 1800;
 const AB_LABEL = 'Auto break';
+
+/**
+ * Nearest whole minute of round(30 * worked_hours / 8). Half minutes round up.
+ * Zero when the shift is under 5 hours.
+ */
+function ab_break_minutes(int $durationSeconds): int
+{
+    if ($durationSeconds < AB_THRESHOLD_SECONDS) {
+        return 0;
+    }
+    $denom = 8 * 3600;
+    return intdiv((30 * $durationSeconds) + intdiv($denom, 2), $denom);
+}
 
 function ab_is_auto_source($source): bool
 {
@@ -91,10 +106,10 @@ function ab_datetime_local(?string $value): string
 }
 
 /**
- * 30 minutes centered on the floored midpoint, or null when the shift is not
- * a closed span longer than 5 hours.
+ * Prorated break centered on the floored midpoint, or null when the shift is
+ * not a closed span of at least 5 hours.
  *
- * @return array{break_start:string,break_end:string}|null
+ * @return array{break_start:string,break_end:string,minutes:int}|null
  */
 function ab_window_for_shift(?string $clockIn, ?string $clockOut): ?array
 {
@@ -104,19 +119,24 @@ function ab_window_for_shift(?string $clockIn, ?string $clockOut): ?array
         return null;
     }
     $duration = $out - $in;
-    if ($duration <= AB_THRESHOLD_SECONDS) {
+    $minutes = ab_break_minutes($duration);
+    if ($minutes < 1) {
+        return null;
+    }
+    $length = $minutes * 60;
+    if ($length >= $duration) {
         return null;
     }
     $mid = $in + intdiv($duration, 2);
-    $start = $mid - intdiv(AB_BREAK_SECONDS, 2);
-    $end = $start + AB_BREAK_SECONDS;
+    $start = $mid - intdiv($length, 2);
+    $end = $start + $length;
     if ($start < $in) {
         $start = $in;
-        $end = $start + AB_BREAK_SECONDS;
+        $end = $start + $length;
     }
     if ($end > $out) {
         $end = $out;
-        $start = $end - AB_BREAK_SECONDS;
+        $start = $end - $length;
     }
     if ($start < $in || $end > $out || $end <= $start) {
         return null;
@@ -124,6 +144,7 @@ function ab_window_for_shift(?string $clockIn, ?string $clockOut): ?array
     return [
         'break_start' => ab_format_dt($start),
         'break_end' => ab_format_dt($end),
+        'minutes' => $minutes,
     ];
 }
 
@@ -215,9 +236,9 @@ function ab_plan(array $shift, array $breaks, bool $inPayrollFinalized): array
     );
     if ($window === null) {
         if ($autoIds !== []) {
-            return ['action' => 'remove_auto', 'reason' => 'not over 5 hours', 'window' => null, 'auto_ids' => $autoIds];
+            return ['action' => 'remove_auto', 'reason' => 'under 5 hours', 'window' => null, 'auto_ids' => $autoIds];
         }
-        $empty['reason'] = 'not over 5 hours';
+        $empty['reason'] = 'under 5 hours';
         return $empty;
     }
     if ($autoIds === []) {
@@ -372,7 +393,7 @@ function ab_finalized_sql(string $alias, bool $hasFinalized, bool $hasPayout, bo
 function ab_over_five_hours_sql(string $alias): string
 {
     $alias = att_sql_alias($alias);
-    return 'TIMESTAMPDIFF(SECOND, ' . $alias . '.clock_in, ' . $alias . '.clock_out) > ' . AB_THRESHOLD_SECONDS;
+    return 'TIMESTAMPDIFF(SECOND, ' . $alias . '.clock_in, ' . $alias . '.clock_out) >= ' . AB_THRESHOLD_SECONDS;
 }
 
 function ab_real_break_exists_sql(string $alias): string
@@ -502,8 +523,9 @@ function ab_cli_usage(): string
         . "  --dry-run   List unfinalized shifts that would change. This is the default.\n"
         . "  --apply     Insert, move, or remove Auto break rows.\n"
         . "  --org=ID    Limit to one attendance.org_id.\n"
-        . "A shift longer than 5 hours with no real break gets one 30-minute Auto break\n"
-        . "at the midpoint. Finalized shifts are not listed and are not changed.\n";
+        . "A shift of 5 hours or more with no real break gets one Auto break at the midpoint.\n"
+        . "Its length is round(30 minutes x worked hours / 8). Under 5 hours gets nothing.\n"
+        . "Finalized shifts are not listed and are not changed.\n";
 }
 
 /**
@@ -513,15 +535,34 @@ function ab_format_backfill_line(array $plan): string
 {
     $shift = $plan['shift'] ?? [];
     $verb = $plan['action'] === 'insert' ? 'add' : ($plan['action'] === 'move' ? 'move' : 'remove');
+    $in = ab_parse_dt(isset($shift['clock_in']) ? (string)$shift['clock_in'] : null);
+    $out = ab_parse_dt(isset($shift['clock_out']) ? (string)$shift['clock_out'] : null);
+    $worked = ($in !== null && $out !== null && $out > $in) ? (($out - $in) / 3600) : 0.0;
+    $window = $plan['window'] ?? null;
+    $minutes = 0;
+    if (is_array($window) && isset($window['minutes'])) {
+        $minutes = (int)$window['minutes'];
+    } elseif (is_array($window) && isset($window['break_start'], $window['break_end'])) {
+        $bs = ab_parse_dt((string)$window['break_start']);
+        $be = ab_parse_dt((string)$window['break_end']);
+        if ($bs !== null && $be !== null && $be > $bs) {
+            $minutes = (int)round(($be - $bs) / 60);
+        }
+    }
     $line = 'shift ' . (int)($shift['id'] ?? 0)
         . ' org ' . (int)($shift['org_id'] ?? 0)
+        . ' site ' . (int)($shift['site_id'] ?? 0)
         . ' user ' . (int)($shift['user_id'] ?? 0)
+        . ' worked ' . number_format($worked, 2, '.', '') . 'h'
         . ' in ' . trim((string)($shift['clock_in'] ?? ''))
         . ' out ' . trim((string)($shift['clock_out'] ?? ''))
-        . ' ' . $verb;
-    $window = $plan['window'] ?? null;
+        . ' ' . $verb
+        . ' ' . $minutes . 'm';
     if (is_array($window) && isset($window['break_start'], $window['break_end'])) {
         $line .= ' ' . $window['break_start'] . ' -> ' . $window['break_end'];
+    }
+    if (!empty($plan['inserted_id'])) {
+        $line .= ' inserted_id=' . (int)$plan['inserted_id'];
     }
     return $line;
 }
@@ -608,30 +649,30 @@ function ab_delete_auto(PDO $pdo, int $shiftId, array $ids): void
 /**
  * @param array{action:string,reason:string,window:?array,auto_ids:list<int>} $plan
  */
-function ab_execute_plan(PDO $pdo, int $shiftId, array $plan): void
+function ab_execute_plan(PDO $pdo, int $shiftId, array $plan): int
 {
     $action = $plan['action'];
     if ($action === 'skip') {
-        return;
+        return 0;
     }
     if ($action === 'insert') {
         $window = $plan['window'] ?? null;
         if (!is_array($window)) {
-            return;
+            return 0;
         }
         ab_insert_break($pdo, $shiftId, $window['break_start'], $window['break_end'], 'auto');
-        return;
+        return (int)$pdo->lastInsertId();
     }
     if ($action === 'remove_auto') {
         ab_delete_auto($pdo, $shiftId, $plan['auto_ids'] ?? []);
-        return;
+        return 0;
     }
     if ($action !== 'move') {
-        return;
+        return 0;
     }
     $window = $plan['window'] ?? null;
     if (!is_array($window)) {
-        return;
+        return 0;
     }
     $ids = array_values(array_filter(array_map('intval', $plan['auto_ids'] ?? []), static function ($id) {
         return $id > 0;
@@ -639,12 +680,13 @@ function ab_execute_plan(PDO $pdo, int $shiftId, array $plan): void
     if ($ids === []) {
         ab_delete_auto($pdo, $shiftId, []);
         ab_insert_break($pdo, $shiftId, $window['break_start'], $window['break_end'], 'auto');
-        return;
+        return (int)$pdo->lastInsertId();
     }
     $keep = $ids[0];
     $pdo->prepare("UPDATE breaks SET break_start = ?, break_end = ? WHERE id = ? AND shift_id = ? AND source = 'auto'")
         ->execute([$window['break_start'], $window['break_end'], $keep, $shiftId]);
     ab_delete_auto($pdo, $shiftId, array_slice($ids, 1));
+    return 0;
 }
 
 /**
@@ -666,7 +708,7 @@ function ab_describe_shift(PDO $pdo, int $shiftId): array
 
 /**
  * Insert, move, or remove the Auto break for one shift. No-op when the shift
- * is finalized, deleted, not a closed work shift over 5 hours, already has a
+ * is finalized, deleted, not a closed work shift of at least 5 hours, already has a
  * real break, or the source column has not been added yet.
  *
  * @return array{action:string,reason:string,window:?array,auto_ids:list<int>,shift:?array}
@@ -692,7 +734,10 @@ function ab_apply_to_shift(PDO $pdo, int $shiftId): array
             return ['action' => 'skip', 'reason' => 'missing', 'window' => null, 'auto_ids' => [], 'shift' => null];
         }
         $plan = ab_plan($shift, ab_fetch_breaks($pdo, $shiftId, true), ab_in_payroll_finalized($pdo, $shiftId));
-        ab_execute_plan($pdo, $shiftId, $plan);
+        $inserted = ab_execute_plan($pdo, $shiftId, $plan);
+        if ($inserted > 0) {
+            $plan['inserted_id'] = $inserted;
+        }
         if ($own) {
             $pdo->commit();
         }
@@ -843,6 +888,7 @@ function ab_backfill(PDO $pdo, ?int $orgId, bool $apply): array
 
     $counts = ['add' => 0, 'move' => 0, 'remove' => 0];
     $byOrg = [];
+    $bySite = [];
     $lines = [];
     $seen = [];
     foreach ([$addSql, $cleanSql] as $sql) {
@@ -862,16 +908,28 @@ function ab_backfill(PDO $pdo, ?int $orgId, bool $apply): array
             if ($bucket !== '') {
                 $counts[$bucket]++;
                 $orgId = (int)($plan['shift']['org_id'] ?? 0);
+                $siteId = (int)($plan['shift']['site_id'] ?? 0);
                 if (!isset($byOrg[$orgId])) {
                     $byOrg[$orgId] = ['add' => 0, 'move' => 0, 'remove' => 0];
                 }
                 $byOrg[$orgId][$bucket]++;
+                if (!isset($bySite[$orgId])) {
+                    $bySite[$orgId] = [];
+                }
+                if (!isset($bySite[$orgId][$siteId])) {
+                    $bySite[$orgId][$siteId] = ['add' => 0, 'move' => 0, 'remove' => 0];
+                }
+                $bySite[$orgId][$siteId][$bucket]++;
             }
             $lines[] = ab_format_backfill_line($plan);
         }
     }
     ksort($byOrg);
-    return ['counts' => $counts, 'by_org' => $byOrg, 'lines' => $lines, 'apply' => $apply];
+    foreach ($bySite as &$sites) {
+        ksort($sites);
+    }
+    unset($sites);
+    return ['counts' => $counts, 'by_org' => $byOrg, 'by_site' => $bySite, 'lines' => $lines, 'apply' => $apply];
 }
 
 /**
@@ -882,6 +940,18 @@ function ab_format_org_counts(array $byOrg): string
     $lines = [];
     foreach ($byOrg as $orgId => $counts) {
         $lines[] = 'org ' . (int)$orgId . ': ' . (int)$counts['add'] . ' to add, ' . (int)$counts['move'] . ' to move, ' . (int)$counts['remove'] . ' to remove';
+    }
+    return implode("\n", $lines);
+}
+
+/**
+ * @param array<int,array<int,array{add:int,move:int,remove:int}>> $bySite
+ */
+function ab_format_site_counts(array $bySite, int $orgId): string
+{
+    $lines = [];
+    foreach ($bySite[$orgId] ?? [] as $siteId => $counts) {
+        $lines[] = 'org ' . $orgId . ' site ' . (int)$siteId . ': ' . (int)$counts['add'] . ' to add, ' . (int)$counts['move'] . ' to move, ' . (int)$counts['remove'] . ' to remove';
     }
     return implode("\n", $lines);
 }

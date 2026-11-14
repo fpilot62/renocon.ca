@@ -264,7 +264,7 @@ if ($selected_org > 0) {
 
             <div class="breaks-section">
                 <h4><i class="fas fa-mug-hot"></i> Supplemental Shift Rest Breaks</h4>
-                <p class="subtitle">Leave this empty when nobody took a break. A closed shift longer than 5 hours with no break gets one 30-minute Auto break at the midpoint. A break you type must start and end inside the shift.</p>
+                <p class="subtitle">Leave this empty when nobody took a break. A closed shift of 5 hours or more with no break gets one Auto break at the midpoint. Its length is 30 minutes times the hours worked, divided by 8, rounded to the nearest minute. A break you type must start and end inside the shift.</p>
                 <button type="button" class="btn-add-break" onclick="appendFreshBreakRow()"><i class="fas fa-plus"></i> Add Break Row</button>
                 <div id="manualBreaksAppendContainer">
                     <?php foreach ($posted_break_rows as $postedBreak): ?>

@@ -58,7 +58,11 @@ $counts = $result['counts'];
 echo $counts['add'] . ' to add, ' . $counts['move'] . ' to move, ' . $counts['remove'] . " to remove.\n";
 $orgSummary = ab_format_org_counts($result['by_org'] ?? []);
 if ($orgSummary !== '') {
-    echo $orgSummary . "\n";
+    echo "BY ORG:\n" . $orgSummary . "\n";
+}
+$siteSummary = ab_format_site_counts($result['by_site'] ?? [], 2);
+if ($siteSummary !== '') {
+    echo "BY SITE org 2:\n" . $siteSummary . "\n";
 }
 if ($parsed['apply']) {
     echo "Those rows were written. Finalized shifts were not changed.\n";
