@@ -107,7 +107,7 @@ foreach ($candidates as $wage) {
     if ($bounds['start'] && $bounds['end']) {
         $lines = ppr_fetch_lines($pdo, $orgId, (string)$wage['employee_name'], $bounds['start'], $bounds['end']);
     }
-    $views[] = ppr_build_view($wage, $lines, $saved[(int)$wage['id']] ?? null);
+    $views[] = ppr_review_for($pdo, $orgId, $wage, $lines, $saved[(int)$wage['id']] ?? null);
 }
 $csrf = ps_csrf_token();
 ?>
@@ -144,7 +144,7 @@ $csrf = ps_csrf_token();
     <div class="d-flex flex-wrap justify-content-between align-items-start mb-3">
         <div>
             <h4 class="font-weight-bold mb-1">Partial payments review</h4>
-            <p class="text-muted mb-0">Organization 2. Candidates are outstanding-wage rows whose notes or status mention “net 1000 paid” or “half paid”. Finalized lines are matched by first name and pay-period dates. Duplicate means the same person, date, and gross. A zero CPP, a day in the period with no line, or an unpaid net below the son-sheet payment is flagged here and left unchanged in payroll.</p>
+            <p class="text-muted mb-0">Organization 2. The son sheet supplies the gross only. CPP, EI, income tax, and net are calculated from that gross by pe_line, the same function finalization uses, including the pay-period CPP exemption. “net 1000 paid” stays $1,000.00. “half paid” does not guess an amount. Finalized lines below are the stored payroll rows and are not recalculated. Saving does not change them.</p>
         </div>
         <div>
             <button type="button" class="btn btn-sm btn-outline-secondary" id="collapse-all">Collapse all</button>
@@ -165,7 +165,10 @@ $csrf = ps_csrf_token();
                         <th data-sort-key="employee" data-sort="text">Employee<span class="arrow"></span></th>
                         <th data-sort-key="period" data-sort="period">Period<span class="arrow"></span></th>
                         <th class="money" data-sort-key="gross" data-sort="num">Son-sheet gross<span class="arrow"></span></th>
-                        <th class="money" data-sort-key="net" data-sort="num">Son-sheet net<span class="arrow"></span></th>
+                        <th class="money" data-sort-key="cpp" data-sort="num">CPP<span class="arrow"></span></th>
+                        <th class="money" data-sort-key="ei" data-sort="num">EI<span class="arrow"></span></th>
+                        <th class="money" data-sort-key="tax" data-sort="num">Income tax<span class="arrow"></span></th>
+                        <th class="money" data-sort-key="net" data-sort="num">Computed net<span class="arrow"></span></th>
                         <th class="money" data-sort-key="pay" data-sort="num">Payment per sheet<span class="arrow"></span></th>
                         <th class="money" data-sort-key="lines" data-sort="num">Finalized lines<span class="arrow"></span></th>
                         <th data-sort-key="flags" data-sort="text">Flags<span class="arrow"></span></th>
@@ -174,21 +177,28 @@ $csrf = ps_csrf_token();
                     <?php foreach ($views as $view):
                         $wage = $view['wage'];
                         $sheet = $view['sheet'];
+                        $ded = is_array($view['deductions'] ?? null) ? $view['deductions'] : null;
                         ?>
                         <tr data-store="<?= ppr_h($wage['store_name']) ?>"
                             data-employee="<?= ppr_h($wage['employee_name']) ?>"
                             data-period="<?= ppr_h($wage['pay_period']) ?>"
                             data-period-start="<?= ppr_h((string)($view['bounds']['start'] ?? '')) ?>"
-                            data-gross="<?= $wage['gross'] === null ? '' : ppr_h(number_format((float)$wage['gross'], 2, '.', '')) ?>"
-                            data-net="<?= $wage['net'] === null || $wage['net'] === '' ? '' : ppr_h(number_format((float)$wage['net'], 2, '.', '')) ?>"
+                            data-gross="<?= $view['gross'] === null ? '' : ppr_h(number_format((float)$view['gross'], 2, '.', '')) ?>"
+                            data-cpp="<?= $ded ? ppr_h(number_format((float)$ded['cpp'], 2, '.', '')) : '' ?>"
+                            data-ei="<?= $ded ? ppr_h(number_format((float)$ded['ei'], 2, '.', '')) : '' ?>"
+                            data-tax="<?= $ded ? ppr_h(number_format((float)$ded['income_tax'], 2, '.', '')) : '' ?>"
+                            data-net="<?= $ded ? ppr_h(number_format((float)$ded['net'], 2, '.', '')) : '' ?>"
                             data-pay="<?= $sheet['amount'] === null ? '' : ppr_h(number_format((float)$sheet['amount'], 2, '.', '')) ?>"
                             data-lines="<?= (int)$view['totals']['count'] ?>"
                             data-flags="<?= ppr_h(implode(' ', $view['flags'])) ?>">
                             <td><a href="#wage-<?= (int)$wage['id'] ?>"><?= ppr_h($wage['store_name']) ?></a><?php if ($wage['site_id']): ?> <span class="text-muted">#<?= (int)$wage['site_id'] ?></span><?php endif; ?></td>
                             <td><?= ppr_h($wage['employee_name']) ?></td>
                             <td><?= ppr_h($wage['pay_period']) ?><?php if ($view['bounds']['start']): ?><div class="text-muted"><?= ppr_h($view['bounds']['start']) ?> – <?= ppr_h($view['bounds']['end']) ?></div><?php endif; ?></td>
-                            <td class="money"><?= ppr_money($wage['gross']) ?></td>
-                            <td class="money"><?= ppr_money($wage['net']) ?></td>
+                            <td class="money"><?= ppr_money($view['gross']) ?></td>
+                            <td class="money"><?= $ded ? ppr_money($ded['cpp']) : '—' ?></td>
+                            <td class="money"><?= $ded ? ppr_money($ded['ei']) : '—' ?></td>
+                            <td class="money"><?= $ded ? ppr_money($ded['income_tax']) : '—' ?></td>
+                            <td class="money"><?= $ded ? ppr_money($ded['net']) : '—' ?></td>
                             <td class="money"><?= ppr_money($sheet['amount']) ?><?php if ($sheet['basis'] !== ''): ?><div class="text-muted"><?= ppr_h($sheet['basis']) ?></div><?php endif; ?></td>
                             <td class="money"><?= (int)$view['totals']['count'] ?></td>
                             <td><?php if (!$view['flags']): ?><span class="flag ok-flag">None</span><?php else: foreach ($view['flags'] as $flag): ?><span class="flag"><?= ppr_h($flag) ?></span><?php endforeach; endif; ?></td>
@@ -209,7 +219,8 @@ $csrf = ps_csrf_token();
         <div class="sheet store-block" id="wage-<?= $wid ?>" data-store-key="<?= $wid ?>">
             <button type="button" class="store-collapse" aria-expanded="true"><span class="caret">▾</span> <?= ppr_h($wage['store_name']) ?> · <?= ppr_h($wage['employee_name']) ?> · <?= ppr_h($wage['pay_period']) ?></button>
             <div class="store-body mt-3">
-                <p class="mb-2">Son-sheet gross <strong><?= ppr_money($wage['gross']) ?></strong> · net <strong><?= ppr_money($wage['net']) ?></strong> · payment per sheet <strong><?= ppr_money($view['sheet']['amount']) ?></strong> <span class="text-muted"><?= ppr_h($view['sheet']['basis']) ?></span> · status <?= ppr_h($wage['status']) ?></p>
+                <?php $ded = is_array($view['deductions'] ?? null) ? $view['deductions'] : null; ?>
+                <p class="mb-2">Payment per sheet <strong><?= ppr_money($view['sheet']['amount']) ?></strong> <span class="text-muted"><?= ppr_h($view['sheet']['basis']) ?></span> · status <?= ppr_h($wage['status']) ?><?php if ($ded): ?> · CPP exemption <?= ppr_money($ded['cpp_exempt']) ?><?php endif; ?></p>
                 <?php if (trim((string)($wage['notes'] ?? '')) !== ''): ?><p class="mb-2 text-muted">Notes: <?= ppr_h($wage['notes']) ?></p><?php endif; ?>
                 <?php foreach ($view['flags'] as $flag): ?><span class="flag"><?= ppr_h($flag) ?></span><?php endforeach; ?>
                 <?php if ($view['missing_dates']): ?>
@@ -226,6 +237,29 @@ $csrf = ps_csrf_token();
                     <input type="hidden" name="wage_id" value="<?= $wid ?>">
                     <div class="form-row">
                         <div class="form-group col-md-2">
+                            <label class="small font-weight-bold text-uppercase text-muted">Son-sheet gross</label>
+                            <input class="form-control form-control-sm" name="son_sheet_gross" inputmode="decimal" required value="<?= $form['son_sheet_gross'] === null ? '' : ppr_h(number_format((float)$form['son_sheet_gross'], 2, '.', '')) ?>">
+                        </div>
+                        <div class="form-group col-md-2">
+                            <label class="small font-weight-bold text-uppercase text-muted">CPP</label>
+                            <div class="form-control form-control-sm bg-light"><?= $ded ? ppr_money($ded['cpp']) : '—' ?></div>
+                        </div>
+                        <div class="form-group col-md-2">
+                            <label class="small font-weight-bold text-uppercase text-muted">EI</label>
+                            <div class="form-control form-control-sm bg-light"><?= $ded ? ppr_money($ded['ei']) : '—' ?></div>
+                        </div>
+                        <div class="form-group col-md-2">
+                            <label class="small font-weight-bold text-uppercase text-muted">Income tax</label>
+                            <div class="form-control form-control-sm bg-light"><?= $ded ? ppr_money($ded['income_tax']) : '—' ?></div>
+                        </div>
+                        <div class="form-group col-md-2">
+                            <label class="small font-weight-bold text-uppercase text-muted">Computed net</label>
+                            <div class="form-control form-control-sm bg-light font-weight-bold"><?= $ded ? ppr_money($ded['net']) : '—' ?></div>
+                        </div>
+                    </div>
+                    <p class="text-muted">These four amounts are calculated from the saved gross. Change the gross and save to recalculate. Payroll is not updated.</p>
+                    <div class="form-row">
+                        <div class="form-group col-md-2">
                             <label class="small font-weight-bold text-uppercase text-muted">Payment date</label>
                             <input type="date" class="form-control form-control-sm" name="payment_date" value="<?= ppr_h($form['payment_date']) ?>">
                         </div>
@@ -234,7 +268,7 @@ $csrf = ps_csrf_token();
                             <input class="form-control form-control-sm" name="site_paid_from" maxlength="160" value="<?= ppr_h($form['site_paid_from']) ?>">
                         </div>
                         <div class="form-group col-md-2">
-                            <label class="small font-weight-bold text-uppercase text-muted">Amount</label>
+                            <label class="small font-weight-bold text-uppercase text-muted">Amount paid</label>
                             <input class="form-control form-control-sm" name="amount" inputmode="decimal" value="<?= $form['amount'] === null ? '' : ppr_h(number_format((float)$form['amount'], 2, '.', '')) ?>">
                         </div>
                         <div class="form-group col-md-2">
@@ -255,6 +289,8 @@ $csrf = ps_csrf_token();
                         <textarea class="form-control form-control-sm" name="notes" rows="2" maxlength="4000"><?= htmlspecialchars((string)$form['notes'], ENT_QUOTES, 'UTF-8') ?></textarea>
                     </div>
 
+                    <h6 class="mt-2">Finalized payroll lines</h6>
+                    <p class="text-muted">Stored gross, CPP, EI, tax, and paid amounts. These are not recalculated from the son-sheet gross.</p>
                     <div class="table-responsive">
                         <table class="table table-sm table-bordered ledger mb-2 sortable">
                             <thead><tr>

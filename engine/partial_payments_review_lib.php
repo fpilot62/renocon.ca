@@ -62,7 +62,34 @@ function ppr_ensure(PDO $pdo): void
         $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
     }
     ppr_exec_sql_file($pdo, dirname(__DIR__) . '/migrations/20261116_admin_partial_payment_reviews.sql');
+    ppr_ensure_column(
+        $pdo,
+        'admin_partial_payment_reviews',
+        'son_sheet_gross',
+        'ALTER TABLE admin_partial_payment_reviews ADD COLUMN son_sheet_gross DECIMAL(12,2) NULL DEFAULT NULL AFTER period'
+    );
     $ready = true;
+}
+
+/** Add one column on the review table when it is missing. The check is read to the end. */
+function ppr_ensure_column(PDO $pdo, string $table, string $column, string $alter): void
+{
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+        throw new RuntimeException('Bad table or column name.');
+    }
+    if (!preg_match('/^ALTER\\s+TABLE\\s+`?' . $table . '`?\\s+ADD\\s+COLUMN\\s+`?' . $column . '`?\\b/i', $alter)) {
+        throw new RuntimeException('The column change is not an ADD COLUMN on the review table.');
+    }
+    $st = $pdo->prepare(
+        'SELECT COUNT(*) FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?'
+    );
+    $st->execute([$table, $column]);
+    $have = (int)$st->fetchColumn();
+    $st->closeCursor();
+    if ($have === 0) {
+        $pdo->exec($alter);
+    }
 }
 
 function ppr_text(string $value): string
@@ -85,23 +112,144 @@ function ppr_is_candidate(array $row): bool
     return (bool)preg_match('/net\s*\$?\s*(?<![0-9])1000(?:\.00)?(?![0-9])\s+paid/', $text);
 }
 
-/** Payment written on the son sheet. Half paid uses net, then gross. */
+/**
+ * Payment written on the son sheet.
+ * "net 1000 paid" is 1000. "half paid" is not guessed.
+ *
+ * @return array{amount:?float,basis:string,unknown:bool}
+ */
 function ppr_sheet_payment(array $row): array
 {
     $text = ppr_candidate_text($row);
     if (preg_match('/net\s*\$?\s*((?<![0-9])1000(?:\.00)?)(?![0-9])\s+paid/', $text, $m)) {
-        return ['amount' => round((float)$m[1], 2), 'basis' => 'net 1000 paid'];
+        return ['amount' => round((float)$m[1], 2), 'basis' => 'net 1000 paid', 'unknown' => false];
     }
     if (preg_match('/half\s+paid/', $text)) {
-        if ($row['net'] !== null && $row['net'] !== '' && is_numeric($row['net'])) {
-            return ['amount' => round(((float)$row['net']) / 2, 2), 'basis' => 'half of net'];
-        }
-        if (isset($row['gross']) && $row['gross'] !== '' && is_numeric($row['gross'])) {
-            return ['amount' => round(((float)$row['gross']) / 2, 2), 'basis' => 'half of gross'];
-        }
-        return ['amount' => null, 'basis' => 'half paid'];
+        return ['amount' => null, 'basis' => 'amount unknown, enter it', 'unknown' => true];
     }
-    return ['amount' => null, 'basis' => ''];
+    return ['amount' => null, 'basis' => '', 'unknown' => false];
+}
+
+function ppr_load_payroll_engine(): void
+{
+    if (function_exists('pe_line') && function_exists('pe_rates')) {
+        return;
+    }
+    $path = dirname(__DIR__) . '/payroll_engine/payroll_engine.php';
+    if (!is_file($path)) {
+        throw new RuntimeException('payroll_engine/payroll_engine.php is not available.');
+    }
+    require_once $path;
+    if (!function_exists('pe_line') || !function_exists('pe_rates')) {
+        throw new RuntimeException('pe_line is not available.');
+    }
+}
+
+/**
+ * CPP, EI, income tax, and net for one period gross.
+ * Uses pe_line, the same function finalization uses, with the period CPP
+ * exemption from pe_cpp_period_exempt. Does not write payroll rows.
+ *
+ * @return array{cpp:float,ei:float,income_tax:float,net:float,cpp_exempt:float,engine:string}
+ */
+function ppr_period_line(float $gross, float $vacRate, array $rates, float $exempt, int $userId, int $siteId, string $asOf, int $orgId, ?PDO $pdo = null): array
+{
+    $ctx = [
+        'user_id' => $userId,
+        'site_id' => $siteId,
+        'org_id' => $orgId,
+        'work_date' => $asOf,
+        'cpp_exempt_amount' => $exempt,
+    ];
+    if ($pdo instanceof PDO) {
+        $ctx['pdo'] = $pdo;
+    }
+    $line = pe_line($gross, $vacRate, $rates, $ctx);
+    return [
+        'cpp' => round((float)$line['cpp'], 2),
+        'ei' => round((float)$line['ei'], 2),
+        'income_tax' => round((float)$line['income_tax'], 2),
+        'net' => round((float)$line['net'], 2),
+        'cpp_exempt' => round($exempt, 2),
+        'engine' => 'pe_line',
+    ];
+}
+
+function ppr_compute_period_deductions(PDO $pdo, float $gross, int $userId, int $siteId, string $asOf, int $orgId): array
+{
+    ppr_load_payroll_engine();
+    if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY') && $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
+        $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
+    }
+    $asOf = ppr_valid_date($asOf) ? $asOf : date('Y-m-d');
+    $rates = pe_rates($pdo);
+    $vacRate = function_exists('pe_vacation_rate') ? pe_vacation_rate($pdo, $userId, $siteId, $asOf) : 0.0;
+    $exempt = function_exists('pe_cpp_period_exempt') ? pe_cpp_period_exempt($pdo, $siteId, $orgId) : 0.0;
+    return ppr_period_line($gross, $vacRate, $rates, $exempt, $userId, $siteId, $asOf, $orgId, $pdo);
+}
+
+function ppr_review_gross(array $wage, ?array $saved): ?float
+{
+    if ($saved && array_key_exists('son_sheet_gross', $saved) && $saved['son_sheet_gross'] !== null && $saved['son_sheet_gross'] !== '') {
+        return round((float)$saved['son_sheet_gross'], 2);
+    }
+    if (isset($wage['gross']) && $wage['gross'] !== '' && is_numeric((string)$wage['gross'])) {
+        return round((float)$wage['gross'], 2);
+    }
+    return null;
+}
+
+/** @return array{0:int,1:int} user id, site id */
+function ppr_calc_identity(array $wage, array $lines): array
+{
+    $userId = (int)($wage['user_id'] ?? 0);
+    $siteId = (int)($wage['site_id'] ?? 0);
+    $users = [];
+    $sites = [];
+    foreach ($lines as $line) {
+        if (ppr_name_matches((string)($line['employee_name'] ?? ''), (string)($wage['employee_name'] ?? ''))) {
+            $uid = (int)($line['user_id'] ?? 0);
+            $sid = (int)($line['site_id'] ?? 0);
+            if ($uid > 0) {
+                $users[$uid] = true;
+            }
+            if ($sid > 0) {
+                $sites[$sid] = true;
+            }
+        }
+    }
+    if ($userId <= 0 && count($users) === 1) {
+        $userId = (int)array_key_first($users);
+    }
+    if ($siteId <= 0 && count($sites) === 1) {
+        $siteId = (int)array_key_first($sites);
+    }
+    return [$userId, $siteId];
+}
+
+function ppr_review_for(PDO $pdo, int $orgId, array $wage, array $lines, ?array $saved): array
+{
+    $gross = ppr_review_gross($wage, $saved);
+    [$userId, $siteId] = ppr_calc_identity($wage, $lines);
+    $bounds = ppr_period_bounds($wage);
+    $asOf = $bounds['end'] ?: ($bounds['start'] ?: date('Y-m-d'));
+    $deductions = null;
+    $calcError = '';
+    if ($gross !== null) {
+        try {
+            $deductions = ppr_compute_period_deductions($pdo, $gross, $userId, $siteId, $asOf, $orgId);
+        } catch (Throwable $e) {
+            $calcError = $e->getMessage();
+        }
+    }
+    $view = ppr_build_view($wage, $lines, $saved, $deductions);
+    if ($calcError !== '') {
+        $view['flags'][] = 'Net was not calculated. ' . $calcError;
+    }
+    if ($userId <= 0 && $gross !== null && $calcError === '') {
+        $view['flags'][] = 'No single employee match, so contract and EI-exempt rules were not applied.';
+    }
+    return $view;
 }
 
 function ppr_first_name(string $name): string
@@ -237,7 +385,7 @@ function ppr_missing_dates(?string $start, ?string $end, array $lines): array
     return ['known' => true, 'dates' => $missing];
 }
 
-function ppr_build_view(array $wage, array $lines, ?array $saved): array
+function ppr_build_view(array $wage, array $lines, ?array $saved, ?array $deductions = null): array
 {
     $sheet = ppr_sheet_payment($wage);
     $bounds = ppr_period_bounds($wage);
@@ -283,7 +431,10 @@ function ppr_build_view(array $wage, array $lines, ?array $saved): array
         $totals[$key] = round($value, 2);
     }
     $proposed = $sheet['amount'];
-    $short = $proposed !== null && ($totals['unpaid'] + 0.009 < $proposed);
+    $computedNet = null;
+    if (is_array($deductions) && isset($deductions['net']) && is_numeric((string)$deductions['net'])) {
+        $computedNet = round((float)$deductions['net'], 2);
+    }
     $shiftNotes = ppr_shift_notes($saved['shift_notes'] ?? null);
     $amount = $proposed;
     $method = 'Cash';
@@ -308,6 +459,9 @@ function ppr_build_view(array $wage, array $lines, ?array $saved): array
         $verified = (int)($saved['verified'] ?? 0) === 1 ? 1 : 0;
         $notes = (string)($saved['notes'] ?? '');
     }
+    $payAmount = $amount;
+    $short = $payAmount !== null && $computedNet !== null && ($computedNet + 0.009 < $payAmount);
+    $gross = ppr_review_gross($wage, $saved);
     $flags = [];
     if ($dup) {
         $flags[] = 'Duplicate lines share a person, date, and gross.';
@@ -320,8 +474,11 @@ function ppr_build_view(array $wage, array $lines, ?array $saved): array
     if ($zeroIds) {
         $flags[] = 'CPP is zero on ' . count($zeroIds) . ' line(s).';
     }
+    if (!empty($sheet['unknown']) && $payAmount === null) {
+        $flags[] = 'amount unknown, enter it';
+    }
     if ($short) {
-        $flags[] = 'Unpaid net is less than the payment on the son sheet.';
+        $flags[] = 'Computed net is less than the payment.';
     }
     if (count($users) > 1) {
         $flags[] = 'More than one employee matches this first name.';
@@ -338,6 +495,8 @@ function ppr_build_view(array $wage, array $lines, ?array $saved): array
         'missing_dates' => $missing['dates'],
         'period_known' => $missing['known'],
         'short' => $short,
+        'deductions' => $deductions,
+        'gross' => $gross,
         'flags' => $flags,
         'shift_notes' => $shiftNotes,
         'form' => [
@@ -347,6 +506,7 @@ function ppr_build_view(array $wage, array $lines, ?array $saved): array
             'method' => $method,
             'verified' => $verified,
             'notes' => $notes,
+            'son_sheet_gross' => $gross,
         ],
     ];
 }
@@ -405,12 +565,24 @@ function ppr_parse_save(array $post, array $allowedLineIds): array
     $site = ppr_clip((string)($post['site_paid_from'] ?? ''), 160);
     $amountRaw = str_replace(['$', ',', ' '], '', trim((string)($post['amount'] ?? '')));
     $amount = null;
-    if ($amountRaw === '' || !is_numeric($amountRaw)) {
+    if ($amountRaw === '') {
+        $amount = null;
+    } elseif (!is_numeric($amountRaw)) {
         $errors[] = 'Amount must be a number.';
     } else {
         $amount = round((float)$amountRaw, 2);
         if ($amount < 0 || $amount > 1000000) {
             $errors[] = 'Amount is out of range.';
+        }
+    }
+    $grossRaw = str_replace(['$', ',', ' '], '', trim((string)($post['son_sheet_gross'] ?? '')));
+    $sonGross = null;
+    if ($grossRaw === '' || !is_numeric($grossRaw)) {
+        $errors[] = 'Son-sheet gross must be a number.';
+    } else {
+        $sonGross = round((float)$grossRaw, 2);
+        if ($sonGross < 0 || $sonGross > 1000000) {
+            $errors[] = 'Son-sheet gross is out of range.';
         }
     }
     $method = trim((string)($post['method'] ?? ''));
@@ -448,6 +620,7 @@ function ppr_parse_save(array $post, array $allowedLineIds): array
             'verified' => ((string)($post['verified'] ?? '') === '1') ? 1 : 0,
             'notes' => $notes,
             'shift_notes' => $shifts,
+            'son_sheet_gross' => $sonGross,
         ],
     ];
 }
@@ -519,11 +692,12 @@ function ppr_save_review(PDO $pdo, int $orgId, array $wage, array $fields, int $
         throw new RuntimeException('Shift notes could not be stored.');
     }
     $sql = 'INSERT INTO admin_partial_payment_reviews
-        (org_id, wage_id, employee_name, period, payment_date, site_paid_from, amount, method, verified, notes, shift_notes, updated_by, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+        (org_id, wage_id, employee_name, period, son_sheet_gross, payment_date, site_paid_from, amount, method, verified, notes, shift_notes, updated_by, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
         ON DUPLICATE KEY UPDATE
             employee_name = VALUES(employee_name),
             period = VALUES(period),
+            son_sheet_gross = VALUES(son_sheet_gross),
             payment_date = VALUES(payment_date),
             site_paid_from = VALUES(site_paid_from),
             amount = VALUES(amount),
@@ -538,6 +712,7 @@ function ppr_save_review(PDO $pdo, int $orgId, array $wage, array $fields, int $
         (int)$wage['id'],
         ppr_clip((string)($wage['employee_name'] ?? ''), 160),
         ppr_clip((string)($wage['pay_period'] ?? ''), 160),
+        $fields['son_sheet_gross'],
         $fields['payment_date'],
         $fields['site_paid_from'],
         $fields['amount'],
