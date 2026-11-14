@@ -229,11 +229,15 @@ $from_date       = $_GET['from_date'] ?? '';
 $to_date         = $_GET['to_date'] ?? '';
 $group_by        = $_GET['group_by'] ?? 'none'; 
 $status_type     = isset($_GET['status_type']) ? trim((string)$_GET['status_type']) : 'pending';
+$sa_period_allowed = ['semi_monthly', 'bi_weekly', 'monthly'];
+$sa_req_period = isset($_GET['period_mode']) ? trim((string)$_GET['period_mode']) : '';
 $period_mode     = 'semi_monthly';
 if (!function_exists('sip_org_pay_period_mode')) {
     require_once __DIR__ . '/engine/org_modules_lib.php';
 }
-if (function_exists('sip_org_pay_period_mode')) {
+if (in_array($sa_req_period, $sa_period_allowed, true)) {
+    $period_mode = $sa_req_period;
+} elseif (function_exists('sip_org_pay_period_mode')) {
     $period_mode = sip_org_pay_period_mode($pdo, (int)$org_id);
 }
 $period_anchor = function_exists('sip_org_pay_period_anchor') ? sip_org_pay_period_anchor($pdo, (int)$org_id) : '2024-01-01';
@@ -465,7 +469,9 @@ if ($sess_user_level <= 10 && $req_org > 0) {
 } elseif (!empty($site_ids) && function_exists('sip_org_id_from_site_ids')) {
     $period_org_id = sip_org_id_from_site_ids($pdo, $site_ids, $period_org_id);
 }
-if (function_exists('sip_org_pay_period_mode')) {
+if (in_array($sa_req_period, $sa_period_allowed, true)) {
+    $period_mode = $sa_req_period;
+} elseif (function_exists('sip_org_pay_period_mode')) {
     $period_mode = sip_org_pay_period_mode($pdo, $period_org_id);
 }
 $period_anchor = function_exists('sip_org_pay_period_anchor') ? sip_org_pay_period_anchor($pdo, $period_org_id) : '2024-01-01';
@@ -2128,10 +2134,7 @@ if (!function_exists('sa_render_pager')) {
             });
         }
         function saChangePageSize(sel) {
-            var u = new URL(window.location.href);
-            u.searchParams.set('page_size', sel.value);
-            u.searchParams.set('page', '1');
-            window.location.href = u.pathname + '?' + u.searchParams.toString();
+            saGo({ page_size: sel.value });
         }
         function saSyncSelfiesBtn() {
             var btn = document.getElementById('toggleSelfiesBtn');
@@ -2293,18 +2296,7 @@ if (!function_exists('sa_render_pager')) {
                 toDate = sunday.toISOString().split('T')[0];
             }
 
-            window.location.href = window.location.pathname + 
-                                  "?audit_mode=" + mode + 
-                                  "&from_date=" + fromDate + 
-                                  "&to_date=" + toDate + 
-                                  "&org_id=<?= urlencode(($sa_is_super && $selected_org > 0) ? (string)$selected_org : 'all') ?>" +
-                                  "&user_id=<?= urlencode($employee_filter) ?>" + 
-                                  "&site_id=<?= urlencode($site_filter) ?>" + 
-                                  "&status_type=<?= urlencode($status_type) ?>" + 
-                                  "&group_by=<?= urlencode($group_by) ?>" +
-                                  "&period_mode=<?= urlencode($period_mode) ?>" +
-                                  "&sort=<?= urlencode($sort_filter) ?>" +
-                                  "&page_size=<?= (int)$page_size ?>";
+            saGo({ audit_mode: mode, from_date: fromDate, to_date: toDate });
         }
 
         function duplicateShiftRow(shiftId) {
@@ -2565,23 +2557,50 @@ if (!function_exists('sa_render_pager')) {
         }
         // === DAY & PAY-PERIOD NAVIGATION (semi_monthly | bi_weekly | monthly) ===
         var pgPeriodMode = <?= json_encode($period_mode) ?>;
+        var SA_FILTER_KEY = 'staff_audit_filters_v1';
+        var SA_FILTER_NAMES = ['org_id','site_id','user_id','status_type','group_by','period_mode','page_size','sort','from_date','to_date'];
+        function saCurrentFilters() {
+            var q = new URLSearchParams(window.location.search);
+            var form = document.querySelector('.filter-form');
+            if (form) {
+                SA_FILTER_NAMES.forEach(function (name) {
+                    var el = form.elements[name];
+                    if (!el) return;
+                    var val = el.value == null ? '' : String(el.value);
+                    if (val === '') q.delete(name);
+                    else q.set(name, val);
+                });
+            }
+            return q;
+        }
+        function saRememberFilters(q) {
+            var raw = q.toString();
+            try { sessionStorage.setItem(SA_FILTER_KEY, raw); } catch (e) {}
+            try { localStorage.setItem(SA_FILTER_KEY, raw); } catch (e) {}
+        }
+        function saStoredFilters() {
+            try {
+                return localStorage.getItem(SA_FILTER_KEY) || sessionStorage.getItem(SA_FILTER_KEY) || '';
+            } catch (e) {
+                return '';
+            }
+        }
+        function saGo(overrides) {
+            var q = saCurrentFilters();
+            var extra = overrides || {};
+            Object.keys(extra).forEach(function (key) {
+                if (extra[key] === null || extra[key] === '') q.delete(key);
+                else q.set(key, String(extra[key]));
+            });
+            q.delete('page');
+            saRememberFilters(q);
+            window.location.href = window.location.pathname + '?' + q.toString();
+        }
         function pgToYMD(d){
             return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
         }
         function pgGoToRange(fromDate, toDate){
-            var pmEl = document.getElementsByName('period_mode')[0];
-            var pm = (pmEl && pmEl.value) ? pmEl.value : pgPeriodMode;
-            window.location.href = window.location.pathname +
-                "?from_date=" + fromDate +
-                "&to_date=" + toDate +
-                "&org_id=<?= urlencode(($sa_is_super && $selected_org > 0) ? (string)$selected_org : 'all') ?>" +
-                "&user_id=<?= urlencode($employee_filter) ?>" +
-                "&site_id=<?= urlencode($site_filter) ?>" +
-                "&status_type=<?= urlencode($status_type) ?>" +
-                "&group_by=<?= urlencode($group_by) ?>" +
-                "&period_mode=" + encodeURIComponent(pm) +
-                "&sort=<?= urlencode($sort_filter) ?>" +
-                "&page_size=<?= (int)$page_size ?>";
+            saGo({ from_date: fromDate, to_date: toDate });
         }
         function pgPayPeriodFor(d){
             var mode = pgPeriodMode;
@@ -2628,6 +2647,30 @@ if (!function_exists('sa_render_pager')) {
             pgGoToRange(pgToYMD(period.start), pgToYMD(period.end));
         }
         document.addEventListener("DOMContentLoaded", function(){
+            if (!window.location.search || window.location.search.length < 2) {
+                var saved = saStoredFilters();
+                if (saved) {
+                    window.location.replace(window.location.pathname + '?' + saved.replace(/^\?/, ''));
+                    return;
+                }
+            } else {
+                saRememberFilters(new URLSearchParams(window.location.search));
+            }
+            var filterForm = document.querySelector('.filter-form');
+            if (filterForm) {
+                filterForm.addEventListener('submit', function () { saRememberFilters(saCurrentFilters()); });
+            }
+            document.querySelectorAll('.sa-pager a.sa-page-btn').forEach(function (a) {
+                a.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    var dest = new URL(a.getAttribute('href'), window.location.href);
+                    var q = saCurrentFilters();
+                    var page = dest.searchParams.get('page');
+                    if (page) q.set('page', page); else q.delete('page');
+                    saRememberFilters(q);
+                    window.location.href = window.location.pathname + '?' + q.toString();
+                });
+            });
             var fromVal = document.getElementsByName('from_date')[0].value;
             var dayLbl = document.getElementById('pgDayLabel');
             var perLbl = document.getElementById('pgPeriodLabel');
