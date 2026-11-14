@@ -49,6 +49,20 @@ const AB_THRESHOLD_SECONDS = 18000;
 const AB_LABEL = 'Auto break';
 const AB_ONLOAD_ORG = 2;
 const AB_ONLOAD_EXCLUDE_SITES = '0,99,999';
+const AB_SANDBOX_NAME = 'sandbox kitchen';
+
+function ab_onload_includes_site(int $orgId, int $siteId, array $sandboxIds): bool
+{
+    foreach ($sandboxIds as $id) {
+        if ((int)$id === $siteId) {
+            return true;
+        }
+    }
+    if ($orgId !== AB_ONLOAD_ORG) {
+        return false;
+    }
+    return !in_array($siteId, array_map('intval', explode(',', AB_ONLOAD_EXCLUDE_SITES)), true);
+}
 
 function ab_insert_log_line(int $breakId, int $shiftId, int $siteId): string
 {
@@ -522,10 +536,18 @@ function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout
  * Shifts in org 2 that still need an Auto break. A shift that already has any
  * break row, or a finalized shift, is not selected.
  */
-function ab_visible_candidate_sql(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $hasLegacy, bool $dateScoped, int $siteCount): string
+function ab_visible_candidate_sql(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $hasLegacy, bool $dateScoped, int $siteCount, int $sandboxCount): string
 {
-    $parts = ['a.org_id = ' . AB_ONLOAD_ORG];
-    $parts[] = 'a.site_id NOT IN (' . AB_ONLOAD_EXCLUDE_SITES . ')';
+    $org = '(a.org_id = ' . AB_ONLOAD_ORG . ' AND a.site_id NOT IN (' . AB_ONLOAD_EXCLUDE_SITES . ')';
+    if ($siteCount > 0) {
+        $org .= ' AND a.site_id IN (' . implode(',', array_fill(0, $siteCount, '?')) . ')';
+    }
+    $org .= ')';
+    if ($sandboxCount > 0) {
+        $parts = ['(' . $org . ' OR a.site_id IN (' . implode(',', array_fill(0, $sandboxCount, '?')) . '))'];
+    } else {
+        $parts = [$org];
+    }
     if ($hasDeleted) {
         $parts[] = 'a.deleted_at IS NULL';
     }
@@ -540,10 +562,77 @@ function ab_visible_candidate_sql(bool $hasDeleted, bool $hasFinalized, bool $ha
     if ($dateScoped) {
         $parts[] = 'a.clock_in >= ? AND a.clock_in < DATE_ADD(?, INTERVAL 1 DAY)';
     }
-    if ($siteCount > 0) {
-        $parts[] = 'a.site_id IN (' . implode(',', array_fill(0, $siteCount, '?')) . ')';
-    }
     return 'SELECT a.id, a.site_id FROM attendance a WHERE ' . implode(' AND ', $parts) . ' ORDER BY a.id LIMIT 400';
+}
+
+/**
+ * Sites whose displayed name is exactly Sandbox Kitchen. Empty when none match.
+ *
+ * @return list<array{site_id:int,org_id:int}>
+ */
+function ab_sandbox_kitchen_sites(PDO $pdo): array
+{
+    $idCol = '';
+    foreach (['SId', 'Sid', 'id'] as $col) {
+        if (att_has_column($pdo, 'sites', $col)) {
+            $idCol = $col;
+            break;
+        }
+    }
+    $nameCols = [];
+    foreach (['nick_name', 'name', 'site_name'] as $col) {
+        if (att_has_column($pdo, 'sites', $col)) {
+            $nameCols[] = $col;
+        }
+    }
+    if ($idCol === '' || $nameCols === []) {
+        return [];
+    }
+    $orgSql = att_has_column($pdo, 'sites', 'org_id') ? '`org_id`' : '0';
+    $where = [];
+    foreach ($nameCols as $col) {
+        $where[] = 'LOWER(TRIM(`' . $col . "`)) = '" . AB_SANDBOX_NAME . "'";
+    }
+    $sql = 'SELECT `' . $idCol . '` AS site_id, ' . $orgSql . ' AS org_id FROM sites WHERE ' . implode(' OR ', $where);
+    $rows = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
+    $out = [];
+    foreach ($rows as $row) {
+        $out[] = ['site_id' => (int)$row['site_id'], 'org_id' => (int)$row['org_id']];
+    }
+    return $out;
+}
+
+function ab_sandbox_eligible_count(PDO $pdo, array $siteIds): int
+{
+    $ids = [];
+    foreach ($siteIds as $id) {
+        $id = (int)$id;
+        $ids[$id] = $id;
+    }
+    if ($ids === []) {
+        return 0;
+    }
+    $parts = ['a.site_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ')'];
+    if (att_has_column($pdo, 'attendance', 'deleted_at')) {
+        $parts[] = 'a.deleted_at IS NULL';
+    }
+    $parts[] = "a.clock_out IS NOT NULL AND TRIM(a.clock_out) <> '' AND a.clock_out <> '0000-00-00 00:00:00'";
+    $parts[] = 'NOT ' . ab_finalized_sql(
+        'a',
+        att_has_column($pdo, 'attendance', 'is_finalized'),
+        att_has_column($pdo, 'attendance', 'payout_status'),
+        att_has_column($pdo, 'attendance', 'is_processed')
+    );
+    $parts[] = ab_work_shift_sql('a');
+    $parts[] = ab_over_five_hours_sql('a');
+    $parts[] = 'NOT EXISTS (SELECT 1 FROM breaks b_any WHERE b_any.shift_id = a.id)';
+    if (att_has_column($pdo, 'attendance', 'break_start') && att_has_column($pdo, 'attendance', 'break_end')) {
+        $parts[] = 'NOT ' . ab_legacy_break_sql('a');
+    }
+    $sql = 'SELECT COUNT(*) FROM attendance a WHERE ' . implode(' AND ', $parts);
+    $st = $pdo->prepare($sql);
+    $st->execute(array_values($ids));
+    return (int)$st->fetchColumn();
 }
 
 /**
@@ -577,16 +666,17 @@ function ab_ensure_shift_ids(PDO $pdo, array $ids): array
                 $clean[$id] = $id;
             }
         }
+        $sandbox = [];
+        foreach (ab_sandbox_kitchen_sites($pdo) as $site) {
+            $sandbox[] = (int)$site['site_id'];
+        }
         $inserted = [];
         foreach ($clean as $id) {
             $shift = ab_fetch_shift($pdo, $id, false);
-            if (!$shift || (int)($shift['org_id'] ?? 0) !== AB_ONLOAD_ORG) {
+            if (!$shift || !ab_onload_includes_site((int)($shift['org_id'] ?? 0), (int)($shift['site_id'] ?? 0), $sandbox)) {
                 continue;
             }
             $siteId = (int)($shift['site_id'] ?? 0);
-            if (in_array($siteId, array_map('intval', explode(',', AB_ONLOAD_EXCLUDE_SITES)), true)) {
-                continue;
-            }
             $described = ab_describe_shift($pdo, $id);
             if (($described['action'] ?? '') !== 'insert') {
                 continue;
@@ -622,6 +712,10 @@ function ab_ensure_visible_write(PDO $pdo, ?string $from, ?string $to, array $si
             $sites[$siteId] = $siteId;
         }
     }
+    $sandboxIds = [];
+    foreach (ab_sandbox_kitchen_sites($pdo) as $site) {
+        $sandboxIds[] = (int)$site['site_id'];
+    }
     $sql = ab_visible_candidate_sql(
         att_has_column($pdo, 'attendance', 'deleted_at'),
         att_has_column($pdo, 'attendance', 'is_finalized'),
@@ -629,15 +723,19 @@ function ab_ensure_visible_write(PDO $pdo, ?string $from, ?string $to, array $si
         att_has_column($pdo, 'attendance', 'is_processed'),
         att_has_column($pdo, 'attendance', 'break_start') && att_has_column($pdo, 'attendance', 'break_end'),
         $fromOk && $toOk,
-        count($sites)
+        count($sites),
+        count($sandboxIds)
     );
     $params = [];
+    foreach ($sites as $siteId) {
+        $params[] = $siteId;
+    }
+    foreach ($sandboxIds as $siteId) {
+        $params[] = $siteId;
+    }
     if ($fromOk && $toOk) {
         $params[] = $from . ' 00:00:00';
         $params[] = $to;
-    }
-    foreach ($sites as $siteId) {
-        $params[] = $siteId;
     }
     $st = $pdo->prepare($sql);
     $st->execute($params);
