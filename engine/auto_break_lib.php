@@ -470,7 +470,7 @@ function ab_open_pdo(string $root): PDO
     return $pdo;
 }
 
-function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $orgScoped): string
+function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $orgScoped, array $excludeSites = []): string
 {
     $parts = [];
     if ($hasDeleted) {
@@ -482,16 +482,28 @@ function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout
     if ($orgScoped) {
         $parts[] = 'a.org_id = ?';
     }
+    $exclude = [];
+    foreach ($excludeSites as $siteId) {
+        $exclude[(int)$siteId] = (int)$siteId;
+    }
+    if ($exclude !== []) {
+        $parts[] = 'a.site_id NOT IN (' . implode(',', $exclude) . ')';
+    }
     return implode(' AND ', $parts);
 }
 
 /**
- * @return array{help:bool,apply:bool,org:?int,error:?string}
+ * @return array{help:bool,apply:bool,org:?int,exclude_sites:list<int>,root:?string,error:?string}
  */
 function ab_parse_cli(array $args): array
 {
     $apply = false;
     $org = null;
+    $exclude = [];
+    $root = null;
+    $fail = static function (string $error) use (&$apply, &$org, &$exclude, &$root): array {
+        return ['help' => false, 'apply' => $apply, 'org' => $org, 'exclude_sites' => $exclude, 'root' => $root, 'error' => $error];
+    };
     foreach ($args as $arg) {
         if ($arg === '--apply') {
             $apply = true;
@@ -502,27 +514,44 @@ function ab_parse_cli(array $args): array
             continue;
         }
         if ($arg === '--help' || $arg === '-h') {
-            return ['help' => true, 'apply' => false, 'org' => null, 'error' => null];
+            return ['help' => true, 'apply' => false, 'org' => null, 'exclude_sites' => [], 'root' => null, 'error' => null];
         }
         if (str_starts_with($arg, '--org=')) {
             $raw = substr($arg, 6);
             if (!preg_match('/^[1-9][0-9]*$/', $raw)) {
-                return ['help' => false, 'apply' => false, 'org' => null, 'error' => '--org needs a positive organization id.'];
+                return $fail('--org needs a positive organization id.');
             }
             $org = (int)$raw;
             continue;
         }
-        return ['help' => false, 'apply' => false, 'org' => null, 'error' => 'Unknown option ' . $arg . '.'];
+        if (str_starts_with($arg, '--exclude-sites=')) {
+            $raw = substr($arg, 16);
+            if ($raw === '' || !preg_match('/^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$/', $raw)) {
+                return $fail('--exclude-sites needs a comma-separated list of site ids.');
+            }
+            $exclude = array_map('intval', explode(',', $raw));
+            continue;
+        }
+        if (str_starts_with($arg, '--root=')) {
+            $root = substr($arg, 7);
+            if ($root === '' || str_contains($root, "\0")) {
+                return $fail('--root needs a directory.');
+            }
+            continue;
+        }
+        return $fail('Unknown option ' . $arg . '.');
     }
-    return ['help' => false, 'apply' => $apply, 'org' => $org, 'error' => null];
+    return ['help' => false, 'apply' => $apply, 'org' => $org, 'exclude_sites' => $exclude, 'root' => $root, 'error' => null];
 }
 
 function ab_cli_usage(): string
 {
-    return "Usage: php auto_break_backfill.php [--dry-run] [--apply] [--org=ID]\n"
-        . "  --dry-run   List unfinalized shifts that would change. This is the default.\n"
-        . "  --apply     Insert, move, or remove Auto break rows.\n"
-        . "  --org=ID    Limit to one attendance.org_id.\n"
+    return "Usage: php auto_break_backfill.php [--dry-run] [--apply] [--org=ID] [--exclude-sites=0,99,999] [--root=DIR]\n"
+        . "  --dry-run         List unfinalized shifts that would change. This is the default.\n"
+        . "  --apply           Insert, move, or remove Auto break rows.\n"
+        . "  --org=ID          Limit to one attendance.org_id. Other orgs are not read for changes.\n"
+        . "  --exclude-sites   Skip these attendance.site_id values.\n"
+        . "  --root=DIR        Directory that contains db.php when this script is not there.\n"
         . "A shift of 5 hours or more with no real break gets one Auto break at the midpoint.\n"
         . "Its length is round(30 minutes x worked hours / 8). Under 5 hours gets nothing.\n"
         . "Finalized shifts are not listed and are not changed.\n";
@@ -563,6 +592,12 @@ function ab_format_backfill_line(array $plan): string
     }
     if (!empty($plan['inserted_id'])) {
         $line .= ' inserted_id=' . (int)$plan['inserted_id'];
+    }
+    if (!empty($plan['move_from']['id'])) {
+        $from = $plan['move_from'];
+        $line .= ' moved_id=' . (int)$from['id']
+            . ' old_start=' . trim((string)($from['break_start'] ?? ''))
+            . ' old_end=' . trim((string)($from['break_end'] ?? ''));
     }
     return $line;
 }
@@ -692,6 +727,28 @@ function ab_execute_plan(PDO $pdo, int $shiftId, array $plan): int
 /**
  * @return array{action:string,reason:string,window:?array,auto_ids:list<int>,shift:?array}
  */
+function ab_note_move(array $plan, array $breaks): array
+{
+    if (($plan['action'] ?? '') !== 'move') {
+        return $plan;
+    }
+    $keep = (int)($plan['auto_ids'][0] ?? 0);
+    foreach ($breaks as $break) {
+        if ((int)($break['id'] ?? 0) !== $keep || !ab_is_auto_source($break['source'] ?? null)) {
+            continue;
+        }
+        $plan['move_from'] = [
+            'id' => $keep,
+            'break_start' => (string)($break['break_start'] ?? ''),
+            'break_end' => (string)($break['break_end'] ?? ''),
+        ];
+        return $plan;
+    }
+    $plan['action'] = 'skip';
+    $plan['reason'] = 'not an auto break';
+    return $plan;
+}
+
 function ab_describe_shift(PDO $pdo, int $shiftId): array
 {
     $shift = ab_fetch_shift($pdo, $shiftId, false);
@@ -701,7 +758,8 @@ function ab_describe_shift(PDO $pdo, int $shiftId): array
     if (!ab_has_source($pdo)) {
         return ['action' => 'skip', 'reason' => 'source column missing', 'window' => null, 'auto_ids' => [], 'shift' => $shift];
     }
-    $plan = ab_plan($shift, ab_fetch_breaks($pdo, $shiftId, false), ab_in_payroll_finalized($pdo, $shiftId));
+    $breaks = ab_fetch_breaks($pdo, $shiftId, false);
+    $plan = ab_note_move(ab_plan($shift, $breaks, ab_in_payroll_finalized($pdo, $shiftId)), $breaks);
     $plan['shift'] = $shift;
     return $plan;
 }
@@ -733,7 +791,8 @@ function ab_apply_to_shift(PDO $pdo, int $shiftId): array
             }
             return ['action' => 'skip', 'reason' => 'missing', 'window' => null, 'auto_ids' => [], 'shift' => null];
         }
-        $plan = ab_plan($shift, ab_fetch_breaks($pdo, $shiftId, true), ab_in_payroll_finalized($pdo, $shiftId));
+        $breaks = ab_fetch_breaks($pdo, $shiftId, true);
+        $plan = ab_note_move(ab_plan($shift, $breaks, ab_in_payroll_finalized($pdo, $shiftId)), $breaks);
         $inserted = ab_execute_plan($pdo, $shiftId, $plan);
         if ($inserted > 0) {
             $plan['inserted_id'] = $inserted;
@@ -849,17 +908,20 @@ function ab_save_editor_breaks(PDO $pdo, int $shiftId, array $starts, array $end
 /**
  * @return array{counts:array{add:int,move:int,remove:int},lines:list<string>,apply:bool}
  */
-function ab_backfill(PDO $pdo, ?int $orgId, bool $apply): array
+function ab_backfill(PDO $pdo, ?int $orgId, bool $apply, array $excludeSites = []): array
 {
     if (!ab_has_source($pdo)) {
         throw new RuntimeException('Run migrations/20261111_break_source.sql before auto breaks can be written.');
+    }
+    if ($excludeSites !== [] && !att_has_column($pdo, 'attendance', 'site_id')) {
+        throw new RuntimeException('Cannot exclude sites because attendance.site_id is missing.');
     }
     $hasDeleted = att_has_column($pdo, 'attendance', 'deleted_at');
     $hasFinalized = att_has_column($pdo, 'attendance', 'is_finalized');
     $hasPayout = att_has_column($pdo, 'attendance', 'payout_status');
     $hasProcessed = att_has_column($pdo, 'attendance', 'is_processed');
     $hasLegacy = att_has_column($pdo, 'attendance', 'break_start') && att_has_column($pdo, 'attendance', 'break_end');
-    $where = ab_backfill_where($hasDeleted, $hasFinalized, $hasPayout, $hasProcessed, $orgId !== null);
+    $where = ab_backfill_where($hasDeleted, $hasFinalized, $hasPayout, $hasProcessed, $orgId !== null, $excludeSites);
     $params = [];
     if ($orgId !== null) {
         $params[] = $orgId;

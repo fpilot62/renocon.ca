@@ -37,16 +37,18 @@ if ($parsed['error'] !== null) {
 }
 
 try {
-    $pdo = ab_open_pdo(__DIR__);
-    $result = ab_backfill($pdo, $parsed['org'], $parsed['apply']);
+    $root = $parsed['root'] !== null ? $parsed['root'] : __DIR__;
+    $pdo = ab_open_pdo($root);
+    $result = ab_backfill($pdo, $parsed['org'], $parsed['apply'], $parsed['exclude_sites']);
 } catch (Throwable $e) {
     fwrite(STDERR, "Auto break backfill failed: " . $e->getMessage() . "\n");
     exit(1);
 }
 
 $orgLabel = $parsed['org'] === null ? 'all orgs' : ('org ' . $parsed['org']);
+$excludeLabel = $parsed['exclude_sites'] === [] ? '' : (' excluding sites ' . implode(',', $parsed['exclude_sites']));
 $mode = $parsed['apply'] ? 'apply' : 'dry-run';
-echo 'Auto break backfill (' . $mode . ', ' . $orgLabel . ").\n";
+echo 'Auto break backfill (' . $mode . ', ' . $orgLabel . $excludeLabel . ").\n";
 if ($result['lines'] === []) {
     echo "No unfinalized shift needs an Auto break change.\n";
 } else {

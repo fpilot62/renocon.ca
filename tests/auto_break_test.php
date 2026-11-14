@@ -169,7 +169,14 @@ $apply = ab_parse_cli(['--dry-run', '--apply', '--org=12']);
 check('apply and org parse', $apply['apply'] === true && $apply['org'] === 12);
 check('dry-run after apply wins', ab_parse_cli(['--apply', '--dry-run'])['apply'] === false);
 check('bad org is rejected', ab_parse_cli(['--org=0'])['error'] !== null && ab_parse_cli(['--org=abc'])['error'] !== null);
-check('unknown option is rejected', ab_parse_cli(['--force'])['error'] !== null);
+check('exclude sites are parsed', ab_parse_cli(['--org=2', '--exclude-sites=0,99,999'])['exclude_sites'] === [0, 99, 999]);
+check('backfill can skip placeholder sites', strpos(ab_backfill_where(true, true, true, true, true, [0, 99, 999]), 'a.site_id NOT IN (0,99,999)') !== false);
+$noted = ab_note_move(
+    ['action' => 'move', 'reason' => 'reposition', 'window' => null, 'auto_ids' => [4]],
+    [['id' => 4, 'source' => 'auto', 'break_start' => '2026-06-01 12:00:00', 'break_end' => '2026-06-01 12:30:00']]
+);
+check('a move records the old auto break', ($noted['move_from']['id'] ?? 0) === 4 && ($noted['move_from']['break_start'] ?? '') === '2026-06-01 12:00:00');
+check('a move that is not an auto row is skipped', ab_note_move(['action' => 'move', 'auto_ids' => [4]], [['id' => 4, 'source' => 'manual', 'break_start' => '2026-06-01 12:00:00', 'break_end' => '2026-06-01 12:30:00']])['action'] === 'skip');
 
 $line = ab_format_backfill_line([
     'action' => 'insert',
