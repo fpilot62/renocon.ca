@@ -161,6 +161,8 @@ check('deploy15 sets ATTR_ERRMODE and prints migration stderr', strpos($deploy15
 check('deploy16 keeps the pinned files, creates the table, and adds the menu', strpos($deploy16, '300be82ed9a0d0d3eca9a238ef8ae77e80a855dc') !== false && strpos($deploy16, 'PDO::ATTR_ERRMODE') !== false && strpos($deploy16, 'ppr_ensure_menu') !== false && strpos($deploy16, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy16));
 $deploy17 = file_get_contents(__DIR__ . '/../ops/deploy17_review_gross.sh');
 check('deploy17 replaces the 300be82 files and adds son_sheet_gross', strpos($deploy17, '300be82ed9a0d0d3eca9a238ef8ae77e80a855dc') !== false && strpos($deploy17, '61dcb542c9f7fafba065c6f890491f97ccc2f4c1') !== false && strpos($deploy17, 'ppr_ensure($pdo)') !== false && strpos($deploy17, 'son_sheet_gross') !== false && strpos($deploy17, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy17) && strpos($deploy17, 'payroll_finalized') === false);
+$deploy19 = file_get_contents(__DIR__ . '/../ops/deploy19_review_no_tax.sh');
+check('deploy19 starts from the gross pin and adds the no-tax column', strpos($deploy19, '61dcb542c9f7fafba065c6f890491f97ccc2f4c1') !== false && strpos($deploy19, 'be645f29cc60e843f505a190be8985c9b89af70a') !== false && strpos($deploy19, 'skip_income_tax') !== false && strpos($deploy19, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy19));
 
 echo $fail === 0 ? "ALL PASSED\n" : "$fail FAILED\n";
 exit($fail === 0 ? 0 : 1);
