@@ -110,8 +110,10 @@ check('schema setup reads every result', strpos($lib, 'function ppr_run_statemen
 check('the only write is the review table', !preg_match('/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+`?(payroll_finalized|payroll_payments|payroll_masters|payroll_balance|admin_outstanding_wages)/i', $lib) && strpos($lib, 'INSERT INTO admin_partial_payment_reviews') !== false);
 check('the page is superadmin only and says payroll is not written', strpos($page, 'ps_is_superadmin') !== false && strpos($page, 'ps_require_csrf') !== false && strpos($page, 'does not write payroll_finalized or payroll_payments') !== false && strpos($page, 'ppr_ensure_menu') !== false);
 check('the page does not record a payroll payment', !preg_match('/\b(pcr_apply_payment|execute_single_payout|INSERT\s+INTO\s+payroll_payments|UPDATE\s+payroll_finalized)\b/', $page));
+check('the page labels a skipped tax', strpos($page, 'No income tax') !== false && strpos($page, 'skip_income_tax') !== false);
 check('deductions reuse pe_line and do not refresh payroll', strpos($lib, 'function ppr_compute_period_deductions') !== false && strpos($lib, 'cpp_exempt_amount') !== false && strpos($lib, 'pe_line(') !== false && strpos($lib, 'pe_refresh_period_stat') === false);
 check('the gross column is added only on the review table', strpos($lib, 'son_sheet_gross') !== false && strpos($lib, 'function ppr_ensure_column') !== false && strpos($lib, 'ADD COLUMN son_sheet_gross') !== false);
+check('the no-tax choice is a column on the review table', strpos($lib, 'ADD COLUMN skip_income_tax') !== false && strpos($lib, 'force_income_tax') !== false);
 $grossSql = file_get_contents(__DIR__ . '/../migrations/20261117_partial_payment_review_gross.sql');
 $grossBody = preg_replace('/^--.*$/m', '', $grossSql);
 check('gross migration alters only the review table', preg_match('/ALTER\\s+TABLE\\s+admin_partial_payment_reviews\\s+ADD\\s+COLUMN\\s+son_sheet_gross\\b/i', $grossBody) === 1 && !preg_match('/\\b(payroll_finalized|payroll_payments|payroll_balance)\\b/', $grossBody));
@@ -134,7 +136,9 @@ if (!function_exists('pe_line')) {
         $exempt = (float)($ctx['cpp_exempt_amount'] ?? 0);
         $cpp = round(max(0, $gross - $exempt) * $rates['cpp'], 2);
         $ei = round($gross * $rates['ei'], 2);
-        $tax = round($gross * $rates['fed'], 2);
+        $tax = array_key_exists('force_income_tax', $ctx)
+            ? round((float)$ctx['force_income_tax'], 2)
+            : round($gross * $rates['fed'], 2);
         return [
             'cpp' => $cpp,
             'ei' => $ei,
@@ -145,6 +149,11 @@ if (!function_exists('pe_line')) {
 }
 $calc = ppr_period_line(1000, 0.0, pe_rates(null), pe_cpp_period_exempt(null, 20, 2), 9, 20, '2026-09-15', 2, null);
 check('pe_line is called with the period exemption', $calc['engine'] === 'pe_line' && $calc['cpp_exempt'] === 100.0 && $calc['cpp'] === 45.0 && $calc['ei'] === 20.0 && $calc['income_tax'] === 100.0 && $calc['net'] === 835.0);
+$noTax = ppr_period_line(1000, 0.0, pe_rates(null), 100.0, 9, 20, '2026-09-15', 2, null, true);
+check('skipping income tax keeps pe_line CPP and EI', $noTax['income_tax'] === 0.0 && $noTax['cpp'] === 45.0 && $noTax['ei'] === 20.0 && $noTax['net'] === 935.0);
+check('income tax is off for every unsaved review', ppr_skip_income_tax(null) === true && ppr_skip_income_tax(['skip_income_tax' => null]) === true);
+check('a saved untick turns income tax back on', ppr_skip_income_tax(['skip_income_tax' => 0]) === false && ppr_skip_income_tax(['skip_income_tax' => 1]) === true);
+check('the review form starts with no income tax', $halfView['form']['skip_income_tax'] === 1);
 check('the page and library do not use a bare PDO::ERRMODE attribute', !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $page . $lib));
 $deploy15 = file_get_contents(__DIR__ . '/../ops/deploy15_review.sh');
 $deploy16 = file_get_contents(__DIR__ . '/../ops/deploy16_review_fix.sh');

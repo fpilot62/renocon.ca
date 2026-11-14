@@ -144,7 +144,7 @@ $csrf = ps_csrf_token();
     <div class="d-flex flex-wrap justify-content-between align-items-start mb-3">
         <div>
             <h4 class="font-weight-bold mb-1">Partial payments review</h4>
-            <p class="text-muted mb-0">Organization 2. The son sheet supplies the gross only. CPP, EI, income tax, and net are calculated from that gross by pe_line, the same function finalization uses, including the pay-period CPP exemption. “net 1000 paid” stays $1,000.00. “half paid” does not guess an amount. Finalized lines below are the stored payroll rows and are not recalculated. Saving does not change them.</p>
+            <p class="text-muted mb-0">Organization 2. The son sheet supplies the gross only. CPP and EI are calculated from that gross by pe_line, including the pay-period CPP exemption. Income tax on this page starts at zero for every person, so net is gross minus CPP minus EI. Untick “No income tax” on a row to use pe_line’s tax as well. “net 1000 paid” stays $1,000.00. “half paid” does not guess an amount. Finalized payroll rows are not changed.</p>
         </div>
         <div>
             <button type="button" class="btn btn-sm btn-outline-secondary" id="collapse-all">Collapse all</button>
@@ -250,14 +250,18 @@ $csrf = ps_csrf_token();
                         </div>
                         <div class="form-group col-md-2">
                             <label class="small font-weight-bold text-uppercase text-muted">Income tax</label>
-                            <div class="form-control form-control-sm bg-light"><?= $ded ? ppr_money($ded['income_tax']) : '—' ?></div>
+                            <div class="form-control form-control-sm bg-light"><?= $ded ? ppr_money($ded['income_tax']) : '—' ?><?php if ((int)$form['skip_income_tax'] === 1): ?><div class="text-muted">No income tax</div><?php endif; ?></div>
                         </div>
                         <div class="form-group col-md-2">
                             <label class="small font-weight-bold text-uppercase text-muted">Computed net</label>
                             <div class="form-control form-control-sm bg-light font-weight-bold"><?= $ded ? ppr_money($ded['net']) : '—' ?></div>
                         </div>
                     </div>
-                    <p class="text-muted">These four amounts are calculated from the saved gross. Change the gross and save to recalculate. Payroll is not updated.</p>
+                    <p class="text-muted">CPP and EI come from pe_line. With “No income tax” ticked, tax is 0 and net is gross minus CPP minus EI. Change the gross or the tick and save to recalculate. Payroll is not updated.</p>
+                    <div class="form-group">
+                        <input type="hidden" name="skip_income_tax" value="0">
+                        <label class="mb-0 font-weight-bold"><input type="checkbox" name="skip_income_tax" value="1" <?= (int)$form['skip_income_tax'] === 1 ? 'checked' : '' ?>> No income tax (CPP + EI only)</label>
+                    </div>
                     <div class="form-row">
                         <div class="form-group col-md-2">
                             <label class="small font-weight-bold text-uppercase text-muted">Payment date</label>

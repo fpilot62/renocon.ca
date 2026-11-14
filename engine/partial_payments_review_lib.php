@@ -68,6 +68,12 @@ function ppr_ensure(PDO $pdo): void
         'son_sheet_gross',
         'ALTER TABLE admin_partial_payment_reviews ADD COLUMN son_sheet_gross DECIMAL(12,2) NULL DEFAULT NULL AFTER period'
     );
+    ppr_ensure_column(
+        $pdo,
+        'admin_partial_payment_reviews',
+        'skip_income_tax',
+        'ALTER TABLE admin_partial_payment_reviews ADD COLUMN skip_income_tax TINYINT(1) NULL DEFAULT NULL AFTER son_sheet_gross'
+    );
     $ready = true;
 }
 
@@ -152,7 +158,16 @@ function ppr_load_payroll_engine(): void
  *
  * @return array{cpp:float,ei:float,income_tax:float,net:float,cpp_exempt:float,engine:string}
  */
-function ppr_period_line(float $gross, float $vacRate, array $rates, float $exempt, int $userId, int $siteId, string $asOf, int $orgId, ?PDO $pdo = null): array
+/** Saved choice wins. A review that has not been saved yet skips income tax. */
+function ppr_skip_income_tax(?array $saved): bool
+{
+    if ($saved && array_key_exists('skip_income_tax', $saved) && $saved['skip_income_tax'] !== null && $saved['skip_income_tax'] !== '') {
+        return (int)$saved['skip_income_tax'] === 1;
+    }
+    return true;
+}
+
+function ppr_period_line(float $gross, float $vacRate, array $rates, float $exempt, int $userId, int $siteId, string $asOf, int $orgId, ?PDO $pdo = null, bool $skipIncomeTax = false): array
 {
     $ctx = [
         'user_id' => $userId,
@@ -164,18 +179,26 @@ function ppr_period_line(float $gross, float $vacRate, array $rates, float $exem
     if ($pdo instanceof PDO) {
         $ctx['pdo'] = $pdo;
     }
+    if ($skipIncomeTax) {
+        $ctx['force_income_tax'] = 0.0;
+    }
     $line = pe_line($gross, $vacRate, $rates, $ctx);
+    $cpp = round((float)$line['cpp'], 2);
+    $ei = round((float)$line['ei'], 2);
+    $tax = $skipIncomeTax ? 0.0 : round((float)$line['income_tax'], 2);
+    $net = $skipIncomeTax ? round($gross - $cpp - $ei, 2) : round((float)$line['net'], 2);
     return [
-        'cpp' => round((float)$line['cpp'], 2),
-        'ei' => round((float)$line['ei'], 2),
-        'income_tax' => round((float)$line['income_tax'], 2),
-        'net' => round((float)$line['net'], 2),
+        'cpp' => $cpp,
+        'ei' => $ei,
+        'income_tax' => $tax,
+        'net' => $net,
         'cpp_exempt' => round($exempt, 2),
+        'skip_income_tax' => $skipIncomeTax ? 1 : 0,
         'engine' => 'pe_line',
     ];
 }
 
-function ppr_compute_period_deductions(PDO $pdo, float $gross, int $userId, int $siteId, string $asOf, int $orgId): array
+function ppr_compute_period_deductions(PDO $pdo, float $gross, int $userId, int $siteId, string $asOf, int $orgId, bool $skipIncomeTax = true): array
 {
     ppr_load_payroll_engine();
     if (defined('PDO::MYSQL_ATTR_USE_BUFFERED_QUERY') && $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql') {
@@ -185,7 +208,7 @@ function ppr_compute_period_deductions(PDO $pdo, float $gross, int $userId, int 
     $rates = pe_rates($pdo);
     $vacRate = function_exists('pe_vacation_rate') ? pe_vacation_rate($pdo, $userId, $siteId, $asOf) : 0.0;
     $exempt = function_exists('pe_cpp_period_exempt') ? pe_cpp_period_exempt($pdo, $siteId, $orgId) : 0.0;
-    return ppr_period_line($gross, $vacRate, $rates, $exempt, $userId, $siteId, $asOf, $orgId, $pdo);
+    return ppr_period_line($gross, $vacRate, $rates, $exempt, $userId, $siteId, $asOf, $orgId, $pdo, $skipIncomeTax);
 }
 
 function ppr_review_gross(array $wage, ?array $saved): ?float
@@ -235,9 +258,10 @@ function ppr_review_for(PDO $pdo, int $orgId, array $wage, array $lines, ?array 
     $asOf = $bounds['end'] ?: ($bounds['start'] ?: date('Y-m-d'));
     $deductions = null;
     $calcError = '';
+    $skipTax = ppr_skip_income_tax($saved);
     if ($gross !== null) {
         try {
-            $deductions = ppr_compute_period_deductions($pdo, $gross, $userId, $siteId, $asOf, $orgId);
+            $deductions = ppr_compute_period_deductions($pdo, $gross, $userId, $siteId, $asOf, $orgId, $skipTax);
         } catch (Throwable $e) {
             $calcError = $e->getMessage();
         }
@@ -507,6 +531,7 @@ function ppr_build_view(array $wage, array $lines, ?array $saved, ?array $deduct
             'verified' => $verified,
             'notes' => $notes,
             'son_sheet_gross' => $gross,
+            'skip_income_tax' => ppr_skip_income_tax($saved) ? 1 : 0,
         ],
     ];
 }
@@ -621,6 +646,7 @@ function ppr_parse_save(array $post, array $allowedLineIds): array
             'notes' => $notes,
             'shift_notes' => $shifts,
             'son_sheet_gross' => $sonGross,
+            'skip_income_tax' => ((string)($post['skip_income_tax'] ?? '') === '1') ? 1 : 0,
         ],
     ];
 }
@@ -692,12 +718,13 @@ function ppr_save_review(PDO $pdo, int $orgId, array $wage, array $fields, int $
         throw new RuntimeException('Shift notes could not be stored.');
     }
     $sql = 'INSERT INTO admin_partial_payment_reviews
-        (org_id, wage_id, employee_name, period, son_sheet_gross, payment_date, site_paid_from, amount, method, verified, notes, shift_notes, updated_by, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+        (org_id, wage_id, employee_name, period, son_sheet_gross, skip_income_tax, payment_date, site_paid_from, amount, method, verified, notes, shift_notes, updated_by, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
         ON DUPLICATE KEY UPDATE
             employee_name = VALUES(employee_name),
             period = VALUES(period),
             son_sheet_gross = VALUES(son_sheet_gross),
+            skip_income_tax = VALUES(skip_income_tax),
             payment_date = VALUES(payment_date),
             site_paid_from = VALUES(site_paid_from),
             amount = VALUES(amount),
@@ -713,6 +740,7 @@ function ppr_save_review(PDO $pdo, int $orgId, array $wage, array $fields, int $
         ppr_clip((string)($wage['employee_name'] ?? ''), 160),
         ppr_clip((string)($wage['pay_period'] ?? ''), 160),
         $fields['son_sheet_gross'],
+        (int)$fields['skip_income_tax'],
         $fields['payment_date'],
         $fields['site_paid_from'],
         $fields['amount'],
