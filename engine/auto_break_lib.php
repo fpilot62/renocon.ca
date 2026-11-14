@@ -47,6 +47,32 @@ require_once __DIR__ . '/attendance_integrity_lib.php';
 
 const AB_THRESHOLD_SECONDS = 18000;
 const AB_LABEL = 'Auto break';
+const AB_ONLOAD_ORG = 2;
+const AB_ONLOAD_EXCLUDE_SITES = '0,99,999';
+
+function ab_insert_log_line(int $breakId, int $shiftId, int $siteId): string
+{
+    return gmdate('c') . ' inserted_id=' . $breakId . ' shift_id=' . $shiftId . ' org=' . AB_ONLOAD_ORG . ' site=' . $siteId;
+}
+
+function ab_log_inserts(array $rows): void
+{
+    if ($rows === []) {
+        return;
+    }
+    $lines = '';
+    foreach ($rows as $row) {
+        $lines .= ab_insert_log_line((int)$row['inserted_id'], (int)$row['shift_id'], (int)($row['site_id'] ?? 0)) . "\n";
+    }
+    $dir = dirname(__DIR__) . '/logs';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $path = $dir . '/auto_break_inserts.log';
+    if (@file_put_contents($path, $lines, FILE_APPEND | LOCK_EX) === false) {
+        error_log('auto-break insert log failed: ' . trim(str_replace("\n", ' | ', $lines)));
+    }
+}
 
 /**
  * Nearest whole minute of round(30 * worked_hours / 8). Half minutes round up.
@@ -490,6 +516,150 @@ function ab_backfill_where(bool $hasDeleted, bool $hasFinalized, bool $hasPayout
         $parts[] = 'a.site_id NOT IN (' . implode(',', $exclude) . ')';
     }
     return implode(' AND ', $parts);
+}
+
+/**
+ * Shifts in org 2 that still need an Auto break. A shift that already has any
+ * break row, or a finalized shift, is not selected.
+ */
+function ab_visible_candidate_sql(bool $hasDeleted, bool $hasFinalized, bool $hasPayout, bool $hasProcessed, bool $hasLegacy, bool $dateScoped, int $siteCount): string
+{
+    $parts = ['a.org_id = ' . AB_ONLOAD_ORG];
+    $parts[] = 'a.site_id NOT IN (' . AB_ONLOAD_EXCLUDE_SITES . ')';
+    if ($hasDeleted) {
+        $parts[] = 'a.deleted_at IS NULL';
+    }
+    $parts[] = "a.clock_out IS NOT NULL AND TRIM(a.clock_out) <> '' AND a.clock_out <> '0000-00-00 00:00:00'";
+    $parts[] = 'NOT ' . ab_finalized_sql('a', $hasFinalized, $hasPayout, $hasProcessed);
+    $parts[] = ab_work_shift_sql('a');
+    $parts[] = ab_over_five_hours_sql('a');
+    $parts[] = 'NOT EXISTS (SELECT 1 FROM breaks b_any WHERE b_any.shift_id = a.id)';
+    if ($hasLegacy) {
+        $parts[] = 'NOT ' . ab_legacy_break_sql('a');
+    }
+    if ($dateScoped) {
+        $parts[] = 'a.clock_in >= ? AND a.clock_in < DATE_ADD(?, INTERVAL 1 DAY)';
+    }
+    if ($siteCount > 0) {
+        $parts[] = 'a.site_id IN (' . implode(',', array_fill(0, $siteCount, '?')) . ')';
+    }
+    return 'SELECT a.id, a.site_id FROM attendance a WHERE ' . implode(' AND ', $parts) . ' ORDER BY a.id LIMIT 400';
+}
+
+/**
+ * Insert missing Auto breaks for org 2. Errors are logged and do not escape.
+ * A shift that already has an auto break or a punched break is not selected.
+ *
+ * @param list<int> $siteIds
+ * @return array{inserted:list<array{inserted_id:int,shift_id:int,site_id:int}>,error:string}
+ */
+function ab_ensure_visible(PDO $pdo, ?string $from, ?string $to, array $siteIds = []): array
+{
+    try {
+        return ab_ensure_visible_write($pdo, $from, $to, $siteIds);
+    } catch (Throwable $e) {
+        error_log('auto-break onload: ' . $e->getMessage());
+        return ['inserted' => [], 'error' => $e->getMessage()];
+    }
+}
+
+/**
+ * @param list<int> $ids
+ * @return array{inserted:list<array{inserted_id:int,shift_id:int,site_id:int}>,error:string}
+ */
+function ab_ensure_shift_ids(PDO $pdo, array $ids): array
+{
+    try {
+        $clean = [];
+        foreach ($ids as $id) {
+            $id = (int)$id;
+            if ($id > 0) {
+                $clean[$id] = $id;
+            }
+        }
+        $inserted = [];
+        foreach ($clean as $id) {
+            $shift = ab_fetch_shift($pdo, $id, false);
+            if (!$shift || (int)($shift['org_id'] ?? 0) !== AB_ONLOAD_ORG) {
+                continue;
+            }
+            $siteId = (int)($shift['site_id'] ?? 0);
+            if (in_array($siteId, array_map('intval', explode(',', AB_ONLOAD_EXCLUDE_SITES)), true)) {
+                continue;
+            }
+            $described = ab_describe_shift($pdo, $id);
+            if (($described['action'] ?? '') !== 'insert') {
+                continue;
+            }
+            $applied = ab_apply_to_shift($pdo, $id);
+            if (($applied['action'] ?? '') === 'insert' && !empty($applied['inserted_id'])) {
+                $inserted[] = ['inserted_id' => (int)$applied['inserted_id'], 'shift_id' => $id, 'site_id' => $siteId];
+            }
+        }
+        ab_log_inserts($inserted);
+        return ['inserted' => $inserted, 'error' => ''];
+    } catch (Throwable $e) {
+        error_log('auto-break before finalize: ' . $e->getMessage());
+        return ['inserted' => [], 'error' => $e->getMessage()];
+    }
+}
+
+/**
+ * @param list<int> $siteIds
+ * @return array{inserted:list<array{inserted_id:int,shift_id:int,site_id:int}>,error:string}
+ */
+function ab_ensure_visible_write(PDO $pdo, ?string $from, ?string $to, array $siteIds): array
+{
+    if (!ab_has_source($pdo)) {
+        return ['inserted' => [], 'error' => 'source column missing'];
+    }
+    $fromOk = is_string($from) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $from);
+    $toOk = is_string($to) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $to);
+    $sites = [];
+    foreach ($siteIds as $siteId) {
+        $siteId = (int)$siteId;
+        if ($siteId > 0 && !in_array($siteId, array_map('intval', explode(',', AB_ONLOAD_EXCLUDE_SITES)), true)) {
+            $sites[$siteId] = $siteId;
+        }
+    }
+    $sql = ab_visible_candidate_sql(
+        att_has_column($pdo, 'attendance', 'deleted_at'),
+        att_has_column($pdo, 'attendance', 'is_finalized'),
+        att_has_column($pdo, 'attendance', 'payout_status'),
+        att_has_column($pdo, 'attendance', 'is_processed'),
+        att_has_column($pdo, 'attendance', 'break_start') && att_has_column($pdo, 'attendance', 'break_end'),
+        $fromOk && $toOk,
+        count($sites)
+    );
+    $params = [];
+    if ($fromOk && $toOk) {
+        $params[] = $from . ' 00:00:00';
+        $params[] = $to;
+    }
+    foreach ($sites as $siteId) {
+        $params[] = $siteId;
+    }
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    $inserted = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $id = (int)$row['id'];
+        $described = ab_describe_shift($pdo, $id);
+        if (($described['action'] ?? '') !== 'insert') {
+            continue;
+        }
+        $applied = ab_apply_to_shift($pdo, $id);
+        if (($applied['action'] ?? '') !== 'insert' || empty($applied['inserted_id'])) {
+            continue;
+        }
+        $inserted[] = [
+            'inserted_id' => (int)$applied['inserted_id'],
+            'shift_id' => $id,
+            'site_id' => (int)($row['site_id'] ?? 0),
+        ];
+    }
+    ab_log_inserts($inserted);
+    return ['inserted' => $inserted, 'error' => ''];
 }
 
 /**

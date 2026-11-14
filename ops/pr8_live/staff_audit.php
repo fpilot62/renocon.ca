@@ -454,6 +454,11 @@ if ($site_raw === null && !empty($default_pair_ids)) {
 }
 $site_filter = empty($site_ids) ? 'all' : implode(',', $site_ids);
 
+$abFrom = (preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$from_date)) ? $from_date : $pickFrom;
+$abTo = (preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)$to_date)) ? $to_date : $pickTo;
+$abSites = ((int)$selected_org === AB_ONLOAD_ORG) ? $site_ids : [];
+ab_ensure_visible($pdo, $abFrom, $abTo, $abSites);
+
 $staff_org = $selected_org > 0 ? $selected_org : ($sa_is_super ? 0 : (int)($_SESSION['org_id'] ?? 0));
 $staff = sa_load_staff_options($pdo, $staff_org, $site_ids);
 
@@ -1585,7 +1590,7 @@ if (!function_exists('sa_render_pager')) {
             </div>
             <p style="color:#64748b; font-size:11px; margin-bottom:20px; margin-top:0;">Configure split parameters, issue lump-sum bonuses, and securely process batch records formulas.</p>
             
-            <form method="POST" action="bulk_allocation_desk.php">
+            <form method="POST" action="auto_break_before_finalize.php">
                 <div class="input-group" style="margin-bottom: 15px;">
                     <label style="display:block; font-weight:800; font-size:10px; text-transform:uppercase; color:#1e40af; margin-bottom:6px;"><i class="fas fa-balance-scale" style="margin-right:3px;"></i> Overtime Policy</label>
                     <select name="ot_mode" id="otModeSelector" onchange="toggleOtModeLayers(this.value)" style="width:100%; padding:8px; border-radius:6px; border:1px solid #93c5fd; background:#eff6ff; font-weight:600; font-size:11px; height:36px;">
@@ -2097,7 +2102,7 @@ if (!function_exists('sa_render_pager')) {
                             <?php endif; ?>
                         </div>
                     </td>
-                    <td class="col-action"><a href="finalize_shift.php?id=<?= $r['id'] ?>&corridor_route=<?= urlencode($is_transit ? (!empty($raw_transfer_status) && $transfer_status !== 'travel' ? $raw_transfer_status : $r['site_name']) : '') ?>" class="btn-green btn-finalize">Finalize</a></td>
+                    <td class="col-action"><a href="auto_break_before_finalize.php?id=<?= $r['id'] ?>&corridor_route=<?= urlencode($is_transit ? (!empty($raw_transfer_status) && $transfer_status !== 'travel' ? $raw_transfer_status : $r['site_name']) : '') ?>" class="btn-green btn-finalize">Finalize</a></td>
                 </tr>
                 <?php endforeach; 
             else:

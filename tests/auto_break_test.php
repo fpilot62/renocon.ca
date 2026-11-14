@@ -226,7 +226,11 @@ check('db.php fallback avoids CLI session cookies', strpos($open, 'db.php') !== 
 
 $live = file_get_contents($root . '/ops/pr8_live/staff_audit.php');
 check('live staff audit keeps the hard delete', strpos($live, 'DELETE FROM attendance') !== false && strpos($live, 'att_soft_delete') === false && strpos($live, 'attendance_integrity_lib') === false);
-check('live staff audit has only the auto-break hooks', strpos($live, 'ab_copy_breaks') !== false && strpos($live, 'ab_apply_to_shift') !== false && strpos($live, 'ab_save_editor_breaks') !== false && strpos($live, 'break_source') !== false && strpos($live, 'AB_LABEL') !== false);
+check('page load looks only at org 2 shifts with no break', strpos(ab_visible_candidate_sql(true, true, true, true, true, true, 1), 'a.org_id = 2') !== false && strpos(ab_visible_candidate_sql(true, true, true, true, true, true, 1), 'NOT IN (0,99,999)') !== false && strpos(ab_visible_candidate_sql(true, true, true, true, true, true, 1), 'NOT EXISTS (SELECT 1 FROM breaks b_any') !== false);
+check('an insert log line keeps the break id', strpos(ab_insert_log_line(15, 90, 11), 'inserted_id=15') !== false && strpos(ab_insert_log_line(15, 90, 11), 'shift_id=90') !== false);
+$liveAudit = file_get_contents($root . '/ops/pr8_live/staff_audit.php');
+check('staff audit applies auto breaks when the page loads', strpos($liveAudit, 'ab_ensure_visible') !== false);
+check('finalize goes through the auto-break guard', strpos($liveAudit, 'auto_break_before_finalize.php') !== false && strpos(file_get_contents($root . '/auto_break_before_finalize.php'), 'finalize_shift.php') !== false && strpos(file_get_contents($root . '/auto_break_before_finalize.php'), 'bulk_allocation_desk.php') !== false);
 
 $editorFn = substr($lib, (int)strpos($lib, 'function ab_save_editor_breaks'));
 $editorFn = substr($editorFn, 0, (int)strpos($editorFn, "\nfunction "));
