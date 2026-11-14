@@ -150,6 +150,8 @@ $deploy15 = file_get_contents(__DIR__ . '/../ops/deploy15_review.sh');
 $deploy16 = file_get_contents(__DIR__ . '/../ops/deploy16_review_fix.sh');
 check('deploy15 sets ATTR_ERRMODE and prints migration stderr', strpos($deploy15, 'PDO::ATTR_ERRMODE') !== false && strpos($deploy15, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy15));
 check('deploy16 keeps the pinned files, creates the table, and adds the menu', strpos($deploy16, '300be82ed9a0d0d3eca9a238ef8ae77e80a855dc') !== false && strpos($deploy16, 'PDO::ATTR_ERRMODE') !== false && strpos($deploy16, 'ppr_ensure_menu') !== false && strpos($deploy16, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy16));
+$deploy17 = file_get_contents(__DIR__ . '/../ops/deploy17_review_gross.sh');
+check('deploy17 replaces the 300be82 files and adds son_sheet_gross', strpos($deploy17, '300be82ed9a0d0d3eca9a238ef8ae77e80a855dc') !== false && strpos($deploy17, '61dcb542c9f7fafba065c6f890491f97ccc2f4c1') !== false && strpos($deploy17, 'ppr_ensure($pdo)') !== false && strpos($deploy17, 'son_sheet_gross') !== false && strpos($deploy17, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy17) && strpos($deploy17, 'payroll_finalized') === false);
 
 echo $fail === 0 ? "ALL PASSED\n" : "$fail FAILED\n";
 exit($fail === 0 ? 0 : 1);
