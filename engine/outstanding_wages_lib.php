@@ -847,7 +847,7 @@ function ow_totals(array $rows): array
         }
         if ((string)($row['status'] ?? '') === 'Pending') {
             $pendingN++;
-            $pendingGross += $g;
+            $pendingGross += $g + ($cost['vacation'] ?? 0);
         }
     }
     return [

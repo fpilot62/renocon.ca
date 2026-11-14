@@ -697,7 +697,7 @@ $csrf = ps_csrf_token();
             addPart(t, row, 'data-wcb', 'wcb', 'wcbRows');
             if (row.getAttribute('data-status') === 'Pending') {
                 t.pendingN++;
-                t.pendingGross += f.gross;
+                t.pendingGross += f.gross + f.vacation;
             }
         });
         return t;
