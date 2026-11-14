@@ -40,6 +40,35 @@ function ow_text(string $value): string
     return trim(preg_replace('/\s+/u', ' ', $value));
 }
 
+function ow_sql_returns_rows(string $stmt): bool
+{
+    $head = strtoupper((string)strtok(ltrim($stmt), " \t\r\n"));
+    return in_array($head, ['SELECT', 'SHOW', 'EXECUTE', 'EXPLAIN', 'DESCRIBE', 'WITH'], true);
+}
+
+function ow_finish_result($result): void
+{
+    if (!$result instanceof PDOStatement) {
+        return;
+    }
+    $result->fetchAll();
+    $result->closeCursor();
+}
+
+/** One statement. SELECT, SHOW, and EXECUTE have their rows read before the next statement. */
+function ow_run_statement(PDO $pdo, string $stmt): void
+{
+    $stmt = trim($stmt);
+    if ($stmt === '') {
+        return;
+    }
+    if (ow_sql_returns_rows($stmt)) {
+        ow_finish_result($pdo->query($stmt));
+        return;
+    }
+    $pdo->exec($stmt);
+}
+
 function ow_exec_sql_file(PDO $pdo, string $path): void
 {
     $sql = file_get_contents($path);
@@ -48,10 +77,7 @@ function ow_exec_sql_file(PDO $pdo, string $path): void
     }
     $sql = preg_replace('/^--.*$/m', '', $sql);
     foreach (preg_split('/;/', (string)$sql) as $stmt) {
-        $stmt = trim($stmt);
-        if ($stmt !== '') {
-            $pdo->exec($stmt);
-        }
+        ow_run_statement($pdo, $stmt);
     }
 }
 

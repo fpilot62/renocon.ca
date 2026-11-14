@@ -136,6 +136,9 @@ check('chosen total mixes invoice and payroll', abs($mixed['employer'] - 5) < 0.
 $newSql = file_get_contents(__DIR__ . '/../migrations/20261115_outstanding_wages_vacation_invoice.sql');
 check('vacation and invoice columns are added only when missing', strpos($newSql, 'information_schema.COLUMNS') !== false && strpos($newSql, 'vacation_pay') !== false && strpos($newSql, 'pay_as_invoice') !== false && !preg_match($forbidden, $newSql));
 check('page edits vacation and invoice and can sort and collapse', strpos($page, 'vacation_pay') !== false && strpos($page, 'pay_as_invoice') !== false && strpos($page, 'set_store_invoice') !== false && strpos($page, 'localStorage') !== false && strpos($page, 'data-sort-key') !== false && strpos($page, 'Collapse all') !== false);
+check('a select or execute is read to the end', ow_sql_returns_rows('SELECT 1') && ow_sql_returns_rows('  SHOW COLUMNS FROM admin_outstanding_wages') && ow_sql_returns_rows('EXECUTE ow_mig_vacation_pay'));
+check('ddl is not treated as a row-returning query', !ow_sql_returns_rows('ALTER TABLE admin_outstanding_wages ADD COLUMN vacation_pay DECIMAL(12,2) NULL') && !ow_sql_returns_rows('CREATE TABLE IF NOT EXISTS admin_outstanding_wages (id INT)') && !ow_sql_returns_rows('SET @sql := (SELECT 1)') && !ow_sql_returns_rows('PREPARE ow_mig FROM @sql') && !ow_sql_returns_rows('DEALLOCATE PREPARE ow_mig'));
+check('schema setup reads every result', strpos($lib, 'fetchAll') !== false && strpos($lib, 'closeCursor') !== false && strpos($lib, 'function ow_run_statement') !== false);
 
 if ($fail > 0) {
     echo "$fail failed\n";
