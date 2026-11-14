@@ -931,6 +931,7 @@ function psr_system_line(array $r, int $orgId): array
         'net_known' => $netKnown,
         'paid' => array_key_exists('paid_amount', $r) ? psr_db_amount($r['paid_amount']) : null,
         'status' => psr_normalize_status($r['payment_status'] ?? ''),
+        'active' => array_key_exists('employee_active', $r) && $r['employee_active'] !== null ? (int)$r['employee_active'] : null,
     ];
 }
 
@@ -1007,7 +1008,7 @@ function psr_fetch_system_lines(PDO $pdo, int $orgId, ?int $userId = null): arra
 {
     $sql = "SELECT f.id, f.user_id, f.site_id, f.work_date, f.pay_period, f.pay_period_end,
                    f.total_gross, f.cpp, f.ei, f.income_tax, f.paid_amount, f.payment_status,
-                   u.Name AS employee_name, s.nick_name AS store_name
+                   u.Name AS employee_name, u.active AS employee_active, s.nick_name AS store_name
             FROM payroll_finalized f
             INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
             INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id";
