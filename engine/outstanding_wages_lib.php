@@ -14,8 +14,10 @@ function ow_fields(): array
 {
     return [
         'gross' => 'gross',
+        'vacation_pay' => 'vacation_pay',
         'net' => 'net',
         'employer_deductions' => 'employer_deductions',
+        'pay_as_invoice' => 'pay_as_invoice',
         'status' => 'status',
         'notes' => 'notes',
         'portal_record' => 'portal_record',
@@ -38,23 +40,56 @@ function ow_text(string $value): string
     return trim(preg_replace('/\s+/u', ' ', $value));
 }
 
+function ow_sql_returns_rows(string $stmt): bool
+{
+    $head = strtoupper((string)strtok(ltrim($stmt), " \t\r\n"));
+    return in_array($head, ['SELECT', 'SHOW', 'EXECUTE', 'EXPLAIN', 'DESCRIBE', 'WITH'], true);
+}
+
+function ow_finish_result($result): void
+{
+    if (!$result instanceof PDOStatement) {
+        return;
+    }
+    $result->fetchAll();
+    $result->closeCursor();
+}
+
+/** One statement. SELECT, SHOW, and EXECUTE have their rows read before the next statement. */
+function ow_run_statement(PDO $pdo, string $stmt): void
+{
+    $stmt = trim($stmt);
+    if ($stmt === '') {
+        return;
+    }
+    if (ow_sql_returns_rows($stmt)) {
+        ow_finish_result($pdo->query($stmt));
+        return;
+    }
+    $pdo->exec($stmt);
+}
+
+function ow_exec_sql_file(PDO $pdo, string $path): void
+{
+    $sql = file_get_contents($path);
+    if ($sql === false) {
+        throw new RuntimeException('The outstanding wages migration file is missing.');
+    }
+    $sql = preg_replace('/^--.*$/m', '', $sql);
+    foreach (preg_split('/;/', (string)$sql) as $stmt) {
+        ow_run_statement($pdo, $stmt);
+    }
+}
+
 function ow_ensure(PDO $pdo): void
 {
     static $ready = false;
     if ($ready) {
         return;
     }
-    $sql = file_get_contents(dirname(__DIR__) . '/migrations/20261114_admin_outstanding_wages.sql');
-    if ($sql === false) {
-        throw new RuntimeException('The outstanding wages migration file is missing.');
-    }
-    $sql = preg_replace('/^--.*$/m', '', $sql);
-    foreach (preg_split('/;/', (string)$sql) as $stmt) {
-        $stmt = trim($stmt);
-        if ($stmt !== '') {
-            $pdo->exec($stmt);
-        }
-    }
+    $dir = dirname(__DIR__) . '/migrations/';
+    ow_exec_sql_file($pdo, $dir . '20261114_admin_outstanding_wages.sql');
+    ow_exec_sql_file($pdo, $dir . '20261115_outstanding_wages_vacation_invoice.sql');
     $ready = true;
 }
 
@@ -185,6 +220,9 @@ function ow_dup_key(array $row): string
         ow_text((string)($row['portal_record'] ?? '')),
         ow_text((string)($row['notes'] ?? '')),
     ];
+    if (array_key_exists('vacation_pay', $row) && $row['vacation_pay'] !== null && $row['vacation_pay'] !== '') {
+        $payload[] = ow_money_key($row['vacation_pay']);
+    }
     return hash('sha256', json_encode($payload));
 }
 
@@ -217,6 +255,8 @@ function ow_header_map(array $header): array
         'pay period' => 'pay_period',
         'period' => 'pay_period',
         'gross' => 'gross',
+        'vacation pay' => 'vacation_pay',
+        'vacation' => 'vacation_pay',
         'net' => 'net',
         'employer deductions' => 'employer_deductions',
         'employer deduction' => 'employer_deductions',
@@ -306,6 +346,9 @@ function ow_map_csv_record(array $rec, array $map, int $line): array
     $employee = ow_text(ow_cell($rec, $map, 'employee'));
     $periodText = ow_text(ow_cell($rec, $map, 'pay_period'));
     $gross = ow_parse_money(ow_cell($rec, $map, 'gross'), true);
+    $vacation = isset($map['vacation_pay'])
+        ? ow_parse_money(ow_cell($rec, $map, 'vacation_pay'), false)
+        : ['ok' => true, 'value' => null, 'error' => ''];
     $net = ow_parse_money(ow_cell($rec, $map, 'net'), false);
     $er = ow_parse_money(ow_cell($rec, $map, 'employer_deductions'), false);
     $portal = ow_text(ow_cell($rec, $map, 'portal_record'));
@@ -320,6 +363,9 @@ function ow_map_csv_record(array $rec, array $map, int $line): array
     }
     if (!$gross['ok']) {
         $errors[] = $gross['error'];
+    }
+    if (!$vacation['ok']) {
+        $errors[] = 'Vacation pay: ' . $vacation['error'];
     }
     if (!$net['ok']) {
         $errors[] = 'Net: ' . $net['error'];
@@ -338,6 +384,7 @@ function ow_map_csv_record(array $rec, array $map, int $line): array
         'period_start' => $period['start'],
         'period_end' => $period['end'],
         'gross' => $gross['ok'] ? $gross['value'] : null,
+        'vacation_pay' => $vacation['ok'] ? $vacation['value'] : null,
         'net' => $net['ok'] ? $net['value'] : null,
         'employer_deductions' => $er['ok'] ? $er['value'] : null,
         'portal_record' => $portal,
@@ -422,9 +469,9 @@ function ow_insert_new(PDO $pdo, int $orgId, int $actorId, array $rows, array $s
     $ins = $pdo->prepare(
         'INSERT INTO admin_outstanding_wages
             (org_id, site_id, store_name, employee_name, user_id, pay_period, period_start, period_end,
-             gross, net, employer_deductions, status, portal_record, checked_vs_son, notes, flagged,
+             gross, vacation_pay, net, employer_deductions, pay_as_invoice, status, portal_record, checked_vs_son, notes, flagged,
              dup_key, created_at, updated_at, updated_by)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,\'Pending\',?,0,?,0,?,NOW(),NOW(),?)'
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,\'Pending\',?,0,?,0,?,NOW(),NOW(),?)'
     );
     $inserted = 0;
     $skipped = count($part['skipped']);
@@ -440,6 +487,7 @@ function ow_insert_new(PDO $pdo, int $orgId, int $actorId, array $rows, array $s
                 $row['period_start'],
                 $row['period_end'],
                 $row['gross'],
+                $row['vacation_pay'],
                 $row['net'],
                 $row['employer_deductions'],
                 $row['portal_record'],
@@ -467,7 +515,7 @@ function ow_parse_edit(string $field, string $raw): array
     if ($field === 'gross') {
         return ow_parse_money($raw, true);
     }
-    if ($field === 'net' || $field === 'employer_deductions') {
+    if ($field === 'vacation_pay' || $field === 'net' || $field === 'employer_deductions') {
         return ow_parse_money($raw, false);
     }
     if ($field === 'status') {
@@ -477,7 +525,7 @@ function ow_parse_edit(string $field, string $raw): array
         }
         return ['ok' => true, 'value' => $raw, 'error' => ''];
     }
-    if ($field === 'checked_vs_son' || $field === 'flagged') {
+    if ($field === 'checked_vs_son' || $field === 'flagged' || $field === 'pay_as_invoice') {
         $on = in_array(strtolower(trim($raw)), ['1', 'true', 'yes', 'on'], true);
         return ['ok' => true, 'value' => $on ? 1 : 0, 'error' => ''];
     }
@@ -493,13 +541,13 @@ function ow_field_current(array $row, string $field)
 {
     $column = ow_fields()[$field];
     $value = $row[$column] ?? null;
-    if ($field === 'gross' || $field === 'net' || $field === 'employer_deductions') {
+    if ($field === 'gross' || $field === 'vacation_pay' || $field === 'net' || $field === 'employer_deductions') {
         if ($value === null || $value === '') {
             return null;
         }
         return round((float)$value, 2);
     }
-    if ($field === 'checked_vs_son' || $field === 'flagged') {
+    if ($field === 'checked_vs_son' || $field === 'flagged' || $field === 'pay_as_invoice') {
         return (int)$value === 1 ? 1 : 0;
     }
     return $value === null ? '' : (string)$value;
@@ -507,7 +555,7 @@ function ow_field_current(array $row, string $field)
 
 function ow_same_value(string $field, $before, $after): bool
 {
-    if ($field === 'gross' || $field === 'net' || $field === 'employer_deductions') {
+    if ($field === 'gross' || $field === 'vacation_pay' || $field === 'net' || $field === 'employer_deductions') {
         if ($before === null || $after === null) {
             return $before === null && $after === null;
         }
@@ -521,10 +569,10 @@ function ow_audit_text(string $field, $value): string
     if ($value === null) {
         return '';
     }
-    if ($field === 'checked_vs_son' || $field === 'flagged') {
+    if ($field === 'checked_vs_son' || $field === 'flagged' || $field === 'pay_as_invoice') {
         return ((int)$value === 1) ? 'yes' : 'no';
     }
-    if ($field === 'gross' || $field === 'net' || $field === 'employer_deductions') {
+    if ($field === 'gross' || $field === 'vacation_pay' || $field === 'net' || $field === 'employer_deductions') {
         return number_format((float)$value, 2, '.', '');
     }
     return (string)$value;
@@ -535,7 +583,7 @@ function ow_db_value(string $field, $value)
     if ($field === 'notes' && $value === '') {
         return null;
     }
-    if (($field === 'net' || $field === 'employer_deductions') && $value === null) {
+    if (($field === 'vacation_pay' || $field === 'net' || $field === 'employer_deductions') && $value === null) {
         return null;
     }
     return $value;
@@ -647,6 +695,81 @@ function ow_group_stores(array $rows): array
     return $list;
 }
 
+/**
+ * Read "ER CPP 12.50 / ER EI 8.10 / WCB 3.00" out of notes.
+ * Missing pieces stay null. This does not write a column.
+ *
+ * @return array{er_cpp:?float,er_ei:?float,wcb:?float}
+ */
+function ow_er_breakdown(?string $notes): array
+{
+    $notes = (string)$notes;
+    $out = ['er_cpp' => null, 'er_ei' => null, 'wcb' => null];
+    $patterns = [
+        'er_cpp' => '/\bER\s*CPP\b\s*:?\s*(\(?-?\$?[\d,]+(?:\.\d+)?\)?)/i',
+        'er_ei' => '/\bER\s*EI\b\s*:?\s*(\(?-?\$?[\d,]+(?:\.\d+)?\)?)/i',
+        'wcb' => '/\bWCB\b\s*:?\s*(\(?-?\$?[\d,]+(?:\.\d+)?\)?)/i',
+    ];
+    foreach ($patterns as $key => $pattern) {
+        if (!preg_match($pattern, $notes, $match)) {
+            continue;
+        }
+        $parsed = ow_parse_money($match[1], false);
+        if ($parsed['ok'] && $parsed['value'] !== null) {
+            $out[$key] = $parsed['value'];
+        }
+    }
+    return $out;
+}
+
+function ow_amount($value): ?float
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+    return round((float)$value, 2);
+}
+
+function ow_gst_on(?float $net): ?float
+{
+    if ($net === null) {
+        return null;
+    }
+    return round($net * 0.05, 2);
+}
+
+/**
+ * Chosen cost: invoice rows are Net + GST and their employer burden counts as 0.
+ * Payroll rows are Gross + Vacation pay + Employer burden. A blank vacation or
+ * employer amount counts as zero in that sum. A blank net leaves GST blank.
+ *
+ * @return array<string,mixed>
+ */
+function ow_row_cost(array $row): array
+{
+    $gross = round((float)($row['gross'] ?? 0), 2);
+    $vacation = ow_amount($row['vacation_pay'] ?? null);
+    $net = ow_amount($row['net'] ?? null);
+    $employer = ow_amount($row['employer_deductions'] ?? null);
+    $invoice = (int)($row['pay_as_invoice'] ?? 0) === 1;
+    $gst = $invoice ? ow_gst_on($net) : null;
+    $invoiceTotal = ($invoice && $net !== null && $gst !== null) ? round($net + $gst, 2) : null;
+    $payroll = round($gross + ($vacation ?? 0) + ($employer ?? 0), 2);
+    $allInvoiced = $net === null ? null : round($net + (float)ow_gst_on($net), 2);
+    return [
+        'vacation' => $vacation,
+        'net' => $net,
+        'employer_stored' => $employer,
+        'employer_chosen' => $invoice ? 0.0 : ($employer ?? 0.0),
+        'invoice' => $invoice,
+        'gst' => $gst,
+        'invoice_total' => $invoiceTotal,
+        'total_cost' => $invoice ? $invoiceTotal : $payroll,
+        'all_payroll' => $payroll,
+        'all_invoiced' => $allInvoiced,
+    ];
+}
+
 function ow_totals(array $rows): array
 {
     $gross = 0.0;
@@ -656,18 +779,71 @@ function ow_totals(array $rows): array
     $netMissing = 0;
     $pendingN = 0;
     $pendingGross = 0.0;
+    $erCpp = 0.0;
+    $erEi = 0.0;
+    $wcb = 0.0;
+    $erCppRows = 0;
+    $erEiRows = 0;
+    $wcbRows = 0;
+    $vacation = 0.0;
+    $vacationRows = 0;
+    $gst = 0.0;
+    $gstRows = 0;
+    $invoiceTotal = 0.0;
+    $invoiceTotalRows = 0;
+    $totalCost = 0.0;
+    $totalUnknown = 0;
+    $allPayroll = 0.0;
+    $allInvoiced = 0.0;
+    $allInvoicedMissing = 0;
     foreach ($rows as $row) {
+        $cost = ow_row_cost($row);
         $g = round((float)($row['gross'] ?? 0), 2);
         $gross += $g;
-        if ($row['net'] === null || $row['net'] === '') {
+        if ($cost['net'] === null) {
             $netMissing++;
         } else {
-            $net += (float)$row['net'];
+            $net += $cost['net'];
         }
-        if (!array_key_exists('employer_deductions', $row) || $row['employer_deductions'] === null || $row['employer_deductions'] === '') {
+        if ($cost['vacation'] !== null) {
+            $vacation += $cost['vacation'];
+            $vacationRows++;
+        }
+        if ($cost['employer_stored'] === null) {
             $employerMissing++;
+        }
+        $employer += $cost['employer_chosen'];
+        if ($cost['gst'] !== null) {
+            $gst += $cost['gst'];
+            $gstRows++;
+        }
+        if ($cost['invoice_total'] !== null) {
+            $invoiceTotal += $cost['invoice_total'];
+            $invoiceTotalRows++;
+        }
+        if ($cost['total_cost'] === null) {
+            $totalUnknown++;
         } else {
-            $employer += (float)$row['employer_deductions'];
+            $totalCost += $cost['total_cost'];
+        }
+        $allPayroll += $cost['all_payroll'];
+        if ($cost['all_invoiced'] === null) {
+            $allInvoicedMissing++;
+        } else {
+            $allInvoiced += $cost['all_invoiced'];
+        }
+        $parts = ow_er_breakdown((string)($row['notes'] ?? ''));
+        if ($parts['er_cpp'] !== null) {
+            $erCpp += $parts['er_cpp'];
+            $erCppRows++;
+        }
+        if ($parts['er_ei'] !== null) {
+            $erEi += $parts['er_ei'];
+            $erEiRows++;
+        }
+        if ($parts['wcb'] !== null) {
+            $wcb += $parts['wcb'];
+            $wcbRows++;
         }
         if ((string)($row['status'] ?? '') === 'Pending') {
             $pendingN++;
@@ -681,6 +857,23 @@ function ow_totals(array $rows): array
         'net_missing' => $netMissing,
         'employer' => round($employer, 2),
         'employer_missing' => $employerMissing,
+        'vacation' => round($vacation, 2),
+        'vacation_rows' => $vacationRows,
+        'gst' => round($gst, 2),
+        'gst_rows' => $gstRows,
+        'invoice_total' => round($invoiceTotal, 2),
+        'invoice_total_rows' => $invoiceTotalRows,
+        'total_cost' => round($totalCost, 2),
+        'total_unknown' => $totalUnknown,
+        'all_payroll' => round($allPayroll, 2),
+        'all_invoiced' => round($allInvoiced, 2),
+        'all_invoiced_missing' => $allInvoicedMissing,
+        'er_cpp' => round($erCpp, 2),
+        'er_ei' => round($erEi, 2),
+        'wcb' => round($wcb, 2),
+        'er_cpp_rows' => $erCppRows,
+        'er_ei_rows' => $erEiRows,
+        'wcb_rows' => $wcbRows,
         'pending_count' => $pendingN,
         'pending_gross' => round($pendingGross, 2),
     ];
@@ -766,20 +959,73 @@ function ow_history(PDO $pdo, int $orgId, int $id): array
     return $st->fetchAll(PDO::FETCH_ASSOC);
 }
 
+function ow_set_store_invoice(PDO $pdo, int $orgId, string $storeKey, int $on, int $actorId): int
+{
+    if (!preg_match('/^[a-z0-9-]+$/', $storeKey)) {
+        throw new RuntimeException('That store is not in this list.');
+    }
+    $changed = 0;
+    foreach (ow_fetch($pdo, $orgId) as $row) {
+        if (ow_store_key($row) !== $storeKey) {
+            continue;
+        }
+        $saved = ow_save_field($pdo, $orgId, (int)$row['id'], $actorId, 'pay_as_invoice', $on ? '1' : '0');
+        if ($saved['changed']) {
+            $changed++;
+        }
+    }
+    return $changed;
+}
+
 function ow_row_public(array $row): array
 {
+    $parts = ow_er_breakdown((string)($row['notes'] ?? ''));
+    $cost = ow_row_cost($row);
     return [
         'id' => (int)$row['id'],
         'store_key' => ow_store_key($row),
         'gross' => ow_field_current($row, 'gross'),
+        'vacation_pay' => ow_field_current($row, 'vacation_pay'),
         'net' => ow_field_current($row, 'net'),
         'employer_deductions' => ow_field_current($row, 'employer_deductions'),
+        'pay_as_invoice' => (int)($row['pay_as_invoice'] ?? 0) === 1 ? 1 : 0,
+        'gst' => $cost['gst'],
+        'invoice_total' => $cost['invoice_total'],
+        'total_cost' => $cost['total_cost'],
         'status' => (string)$row['status'],
         'notes' => (string)($row['notes'] ?? ''),
         'portal_record' => (string)$row['portal_record'],
         'checked_vs_son' => (int)$row['checked_vs_son'] === 1 ? 1 : 0,
         'flagged' => (int)$row['flagged'] === 1 ? 1 : 0,
+        'er_cpp' => $parts['er_cpp'],
+        'er_ei' => $parts['er_ei'],
+        'wcb' => $parts['wcb'],
+        'period_start' => (string)($row['period_start'] ?? ''),
     ];
+}
+
+function ow_part_text(array $tot, string $key): string
+{
+    $rowsKey = $key . '_rows';
+    if ((int)($tot[$rowsKey] ?? 0) === 0) {
+        return '—';
+    }
+    return number_format((float)($tot[$key] ?? 0), 2);
+}
+
+function ow_burden_title(array $parts): string
+{
+    $bits = [];
+    if ($parts['er_cpp'] !== null) {
+        $bits[] = 'ER CPP ' . number_format((float)$parts['er_cpp'], 2);
+    }
+    if ($parts['er_ei'] !== null) {
+        $bits[] = 'ER EI ' . number_format((float)$parts['er_ei'], 2);
+    }
+    if ($parts['wcb'] !== null) {
+        $bits[] = 'WCB ' . number_format((float)$parts['wcb'], 2);
+    }
+    return implode(' / ', $bits);
 }
 
 function ow_money_input($value): string

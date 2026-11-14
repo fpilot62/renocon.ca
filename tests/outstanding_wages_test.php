@@ -84,7 +84,16 @@ check('rows sort by employee then period', $sorted[0]['id'] === 1 && $sorted[1][
 $groups = ow_group_stores($sorted);
 check('one section per store', count($groups) === 2 && $groups[0]['store_name'] === 'Penticton' && count($groups[0]['rows']) === 2);
 $tot = ow_totals($groups[0]['rows']);
-check('blank net is not counted as zero and pending is separate from paid', abs($tot['gross'] - 90) < 0.001 && abs($tot['net'] - 30) < 0.001 && $tot['net_missing'] === 1 && $tot['pending_count'] === 1 && abs($tot['pending_gross'] - 50) < 0.001);
+check('blank net is not counted as zero and pending is separate from paid', abs($tot['gross'] - 90) < 0.001 && abs($tot['net'] - 30) < 0.001 && $tot['net_missing'] === 1 && $tot['pending_count'] === 1 && abs($tot['pending_gross'] - 50) < 0.001 && abs($tot['employer'] - 5) < 0.001);
+$parts = ow_er_breakdown('cash. ER CPP 12.50 / ER EI 8.10 / WCB 3.00 and a note');
+check('notes split ER CPP, ER EI, and WCB', $parts['er_cpp'] === 12.5 && $parts['er_ei'] === 8.1 && $parts['wcb'] === 3.0);
+$emptyParts = ow_er_breakdown('no employer split here');
+check('notes without the phrase leave the parts blank', $emptyParts['er_cpp'] === null && $emptyParts['er_ei'] === null && $emptyParts['wcb'] === null);
+$withNote = $groups[0]['rows'];
+$withNote[0]['notes'] = 'ER CPP 10 / ER EI 4 / WCB 1';
+$withNote[1]['notes'] = 'ER CPP 2.25 / ER EI 1 / WCB 0.50';
+$burden = ow_totals($withNote);
+check('store employer burden sums the column and the note parts', abs($burden['employer'] - 5) < 0.001 && abs($burden['er_cpp'] - 12.25) < 0.001 && abs($burden['er_ei'] - 5) < 0.001 && abs($burden['wcb'] - 1.5) < 0.001 && $burden['er_cpp_rows'] === 2);
 $found = ow_filter_rows($sorted, 'hold', true, 'Bea');
 check('search and flagged and employee filters combine', count($found) === 1 && (int)$found[0]['id'] === 1);
 $export = ow_export_csv($found);
@@ -101,6 +110,35 @@ check('page is superadmin gated for the screen and for ajax', strpos($page, 'ps_
 check('import confirms before insert', strpos($page, 'confirm_import') !== false && strpos($page, 'Nothing is saved until you confirm') !== false);
 check('page registers under the admin menu', strpos($page, "admin_super_ensure_menu(\$pdo, 'Outstanding Wages', 'outstanding_wages.php')") !== false);
 check('save is limited to ledger fields', strpos($lib, 'function ow_save_field') !== false && strpos($lib, 'admin_outstanding_wage_edits') !== false);
+check('page shows employer burden beside gross and net', strpos($page, 'Employer burden') !== false && strpos($page, 'data-sum="employer"') !== false && strpos($page, 'ER CPP') !== false && strpos($page, 'ps_require_csrf') !== false);
+$bare = ['store' => 'A', 'employee' => 'B', 'pay_period' => 'C', 'gross' => 1, 'net' => null, 'employer_deductions' => null, 'portal_record' => '', 'notes' => ''];
+$withBlankVacation = $bare;
+$withBlankVacation['vacation_pay'] = null;
+check('a blank vacation pay keeps the old duplicate key', ow_dup_key($bare) === ow_dup_key($withBlankVacation));
+$withVacation = $bare;
+$withVacation['vacation_pay'] = 15.5;
+check('a vacation amount is not the same duplicate', ow_dup_key($bare) !== ow_dup_key($withVacation));
+$vacCsv = "Store,Employee,Pay period,Gross,Vacation pay,Net,Employer deductions,Payroll record in our portal,Notes\n"
+    . "Penticton,Pat Example,period,100,15.50,80,1,portal,note\n";
+$vacRows = ow_parse_csv($vacCsv);
+check('vacation pay imports after gross', abs($vacRows[0]['vacation_pay'] - 15.5) < 0.001 && abs($vacRows[0]['gross'] - 100) < 0.001);
+$oldFile = ow_parse_csv("Store,Employee,Pay period,Gross,Net,Employer deductions,Payroll record in our portal,Notes\nPenticton,Pat Example,period,100,,1,portal,note\n");
+check('the older eight-column file still imports', $oldFile[0]['vacation_pay'] === null && $oldFile[0]['error'] === '' && abs($oldFile[0]['gross'] - 100) < 0.001);
+$payrollCost = ow_row_cost(['gross' => 100, 'vacation_pay' => 10, 'net' => 80, 'employer_deductions' => 8, 'pay_as_invoice' => 0]);
+check('payroll cost is gross plus vacation plus burden', abs($payrollCost['total_cost'] - 118) < 0.001 && $payrollCost['gst'] === null);
+$invoiceCost = ow_row_cost(['gross' => 100, 'vacation_pay' => 10, 'net' => 80, 'employer_deductions' => 8, 'pay_as_invoice' => 1]);
+check('invoice gst is five percent of net and burden is left out', abs($invoiceCost['gst'] - 4) < 0.001 && abs($invoiceCost['invoice_total'] - 84) < 0.001 && abs($invoiceCost['total_cost'] - 84) < 0.001 && abs($invoiceCost['employer_chosen']) < 0.001);
+$mixed = ow_totals([
+    ['gross' => 100, 'vacation_pay' => 10, 'net' => 80, 'employer_deductions' => 8, 'pay_as_invoice' => 1, 'notes' => '', 'status' => 'Pending'],
+    ['gross' => 50, 'vacation_pay' => null, 'net' => 40, 'employer_deductions' => 5, 'pay_as_invoice' => 0, 'notes' => '', 'status' => 'Pending'],
+]);
+check('chosen total mixes invoice and payroll', abs($mixed['employer'] - 5) < 0.001 && abs($mixed['gst'] - 4) < 0.001 && abs($mixed['total_cost'] - 139) < 0.001 && abs($mixed['all_payroll'] - 173) < 0.001 && abs($mixed['all_invoiced'] - 126) < 0.001);
+$newSql = file_get_contents(__DIR__ . '/../migrations/20261115_outstanding_wages_vacation_invoice.sql');
+check('vacation and invoice columns are added only when missing', strpos($newSql, 'information_schema.COLUMNS') !== false && strpos($newSql, 'vacation_pay') !== false && strpos($newSql, 'pay_as_invoice') !== false && !preg_match($forbidden, $newSql));
+check('page edits vacation and invoice and can sort and collapse', strpos($page, 'vacation_pay') !== false && strpos($page, 'pay_as_invoice') !== false && strpos($page, 'set_store_invoice') !== false && strpos($page, 'localStorage') !== false && strpos($page, 'data-sort-key') !== false && strpos($page, 'Collapse all') !== false);
+check('a select or execute is read to the end', ow_sql_returns_rows('SELECT 1') && ow_sql_returns_rows('  SHOW COLUMNS FROM admin_outstanding_wages') && ow_sql_returns_rows('EXECUTE ow_mig_vacation_pay'));
+check('ddl is not treated as a row-returning query', !ow_sql_returns_rows('ALTER TABLE admin_outstanding_wages ADD COLUMN vacation_pay DECIMAL(12,2) NULL') && !ow_sql_returns_rows('CREATE TABLE IF NOT EXISTS admin_outstanding_wages (id INT)') && !ow_sql_returns_rows('SET @sql := (SELECT 1)') && !ow_sql_returns_rows('PREPARE ow_mig FROM @sql') && !ow_sql_returns_rows('DEALLOCATE PREPARE ow_mig'));
+check('schema setup reads every result', strpos($lib, 'fetchAll') !== false && strpos($lib, 'closeCursor') !== false && strpos($lib, 'function ow_run_statement') !== false);
 
 if ($fail > 0) {
     echo "$fail failed\n";
