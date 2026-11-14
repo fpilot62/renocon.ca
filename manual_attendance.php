@@ -6,6 +6,7 @@
  * Org: attendance.org_id is sites.org_id for the chosen site (sites.SId), not the admin session org.
  */
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+require_once __DIR__ . '/engine/auto_break_lib.php';
 payroll_require_admin(false, 'Manual attendance is for admins only.');
 
 ini_set('display_errors', 1);
@@ -58,44 +59,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             if (!$decision['ok']) {
                 $form_error = $decision['error'];
             } else {
-                $pdo->beginTransaction();
+                $clockInSql = str_replace('T', ' ', $clock_in);
+                $clockOutSql = $clock_out !== '' ? str_replace('T', ' ', $clock_out) : '';
+                $breakStarts = (isset($_POST['break_start']) && is_array($_POST['break_start'])) ? $_POST['break_start'] : [];
+                $breakEnds = (isset($_POST['break_end']) && is_array($_POST['break_end'])) ? $_POST['break_end'] : [];
+                $breakError = ab_validate_posted_breaks($clockInSql, $clockOutSql !== '' ? $clockOutSql : null, $breakStarts, $breakEnds);
+                if ($breakError !== null) {
+                    $form_error = $breakError;
+                } else {
+                    $pdo->beginTransaction();
 
-                $insQuery = "INSERT INTO attendance
-                    (org_id, site_id, user_id, status, clock_in, clock_out, manager_notes, payout_status, is_processed, selfie_in, selfie_out, remarks)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'nophoto.jpg', 'nophoto.jpg', ?)";
+                    $insQuery = "INSERT INTO attendance
+                        (org_id, site_id, user_id, status, clock_in, clock_out, manager_notes, payout_status, is_processed, selfie_in, selfie_out, remarks)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'nophoto.jpg', 'nophoto.jpg', ?)";
 
-                $stmt = $pdo->prepare($insQuery);
-                $stmt->execute([
-                    (int)$decision['org_id'],
-                    $target_site,
-                    $target_user,
-                    $shift_status,
-                    str_replace('T', ' ', $clock_in),
-                    $clock_out !== '' ? str_replace('T', ' ', $clock_out) : null,
-                    $manager_notes,
-                    att_manual_remark(),
-                ]);
+                    $stmt = $pdo->prepare($insQuery);
+                    $stmt->execute([
+                        (int)$decision['org_id'],
+                        $target_site,
+                        $target_user,
+                        $shift_status,
+                        $clockInSql,
+                        $clockOutSql !== '' ? $clockOutSql : null,
+                        $manager_notes,
+                        att_manual_remark(),
+                    ]);
 
-                $new_shift_id = $pdo->lastInsertId();
+                    $new_shift_id = (int)$pdo->lastInsertId();
 
-                if (!empty($_POST['break_start']) && is_array($_POST['break_start'])) {
-                    $insBreak = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, break_end) VALUES (?, ?, ?)");
-                    foreach ($_POST['break_start'] as $idx => $bStart) {
-                        $bEnd = $_POST['break_end'][$idx] ?? '';
-                        if (!empty(trim((string)$bStart))) {
-                            $insBreak->execute([
-                                $new_shift_id,
-                                str_replace('T', ' ', trim((string)$bStart)),
-                                trim((string)$bEnd) !== '' ? str_replace('T', ' ', trim((string)$bEnd)) : null
-                            ]);
-                        }
+                    foreach (ab_collect_breaks($breakStarts, $breakEnds, [], false) as $breakRow) {
+                        ab_insert_break($pdo, $new_shift_id, $breakRow['break_start'], $breakRow['break_end'], 'manual');
                     }
-                }
+                    ab_apply_to_shift($pdo, $new_shift_id);
 
-                $pdo->commit();
-                $success_message = true;
-                $posted_user = 0;
-                $posted_site = 0;
+                    $pdo->commit();
+                    $success_message = true;
+                    $posted_user = 0;
+                    $posted_site = 0;
+                }
             }
         } catch (Exception $e) {
             if ($pdo->inTransaction()) {
@@ -113,6 +114,17 @@ if ($is_super) {
         $orgs = $orgStmt->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
         $orgs = [];
+    }
+}
+
+$posted_break_rows = [];
+if ($form_error !== '' && isset($_POST['break_start']) && is_array($_POST['break_start'])) {
+    foreach ($_POST['break_start'] as $idx => $bStart) {
+        $bEnd = $_POST['break_end'][$idx] ?? '';
+        if (trim((string)$bStart) === '' && trim((string)$bEnd) === '') {
+            continue;
+        }
+        $posted_break_rows[] = ['start' => (string)$bStart, 'end' => (string)$bEnd];
     }
 }
 
@@ -252,8 +264,23 @@ if ($selected_org > 0) {
 
             <div class="breaks-section">
                 <h4><i class="fas fa-mug-hot"></i> Supplemental Shift Rest Breaks</h4>
+                <p class="subtitle">Leave this empty when nobody took a break. A closed shift of 5 hours or more with no break gets one Auto break at the midpoint. Its length is 30 minutes times the hours worked, divided by 8, rounded to the nearest minute. A break you type must start and end inside the shift.</p>
                 <button type="button" class="btn-add-break" onclick="appendFreshBreakRow()"><i class="fas fa-plus"></i> Add Break Row</button>
-                <div id="manualBreaksAppendContainer"></div>
+                <div id="manualBreaksAppendContainer">
+                    <?php foreach ($posted_break_rows as $postedBreak): ?>
+                        <div class="break-input-row">
+                            <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
+                                <label style="font-size:9px; font-weight:800; color:#64748b; text-transform:uppercase;">Break Start</label>
+                                <input type="datetime-local" name="break_start[]" value="<?= htmlspecialchars(ab_datetime_local($postedBreak['start'])) ?>" required style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
+                            </div>
+                            <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
+                                <label style="font-size:9px; font-weight:800; color:#64748b; text-transform:uppercase;">Break End</label>
+                                <input type="datetime-local" name="break_end[]" value="<?= htmlspecialchars(ab_datetime_local($postedBreak['end'])) ?>" required style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
+                            </div>
+                            <button type="button" style="background:#ef4444; border:none; color:white; padding:8px 12px; border-radius:6px; margin-top:14px; cursor:pointer;" onclick="this.parentNode.remove()"><i class="fas fa-trash-alt"></i></button>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
             </div>
 
             <div style="text-align:right; margin-top:30px; border-top:1px solid #e2e8f0; padding-top:20px;">
@@ -269,28 +296,11 @@ let activelySelectedClockInDate = '';
 
 function synchronizeLiveBreakDates(clockInDateTimeValue) {
     if (!clockInDateTimeValue) return;
-    
     activelySelectedClockInDate = clockInDateTimeValue.split('T')[0];
-    
-    const visibleStartInputs = document.querySelectorAll("input[name='break_start[]']");
-    const visibleEndInputs = document.querySelectorAll("input[name='break_end[]']");
-    
-    visibleStartInputs.forEach((input) => {
-        if (!input.value) {
-            input.value = activelySelectedClockInDate + "T12:00";
-        } else {
-            let currentHoursMinutes = input.value.split('T')[1] || "12:00";
-            input.value = activelySelectedClockInDate + "T" + currentHoursMinutes;
-        }
-    });
-
-    visibleEndInputs.forEach((input) => {
-        if (!input.value) {
-            input.value = activelySelectedClockInDate + "T12:30";
-        } else {
-            let currentHoursMinutes = input.value.split('T')[1] || "12:30";
-            input.value = activelySelectedClockInDate + "T" + currentHoursMinutes;
-        }
+    document.querySelectorAll("input[name='break_start[]'], input[name='break_end[]']").forEach(function (input) {
+        if (!input.value || input.value.indexOf('T') === -1) return;
+        var hm = input.value.split('T')[1];
+        input.value = activelySelectedClockInDate + 'T' + hm;
     });
 }
 
@@ -298,20 +308,14 @@ function appendFreshBreakRow() {
     const container = document.getElementById('manualBreaksAppendContainer');
     const rowDiv = document.createElement('div');
     rowDiv.className = 'break-input-row';
-    
-    let targetDayPrefix = activelySelectedClockInDate ? activelySelectedClockInDate : new Date().toISOString().slice(0, 10);
-    
-    let defaultStartVal = targetDayPrefix + "T12:00";
-    let defaultEndVal   = targetDayPrefix + "T12:30";
-    
     rowDiv.innerHTML = `
         <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
             <label style="font-size:9px; font-weight:800; color:#64748b; text-transform:uppercase;">Break Start</label>
-            <input type="datetime-local" name="break_start[]" value="${defaultStartVal}" required style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
+            <input type="datetime-local" name="break_start[]" value="" required style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
         </div>
         <div style="flex:1; display:flex; flex-direction:column; gap:4px;">
             <label style="font-size:9px; font-weight:800; color:#64748b; text-transform:uppercase;">Break End</label>
-            <input type="datetime-local" name="break_end[]" value="${defaultEndVal}" style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
+            <input type="datetime-local" name="break_end[]" value="" required style="height:34px; padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:11px; font-weight:600;">
         </div>
         <button type="button" style="background:#ef4444; border:none; color:white; padding:8px 12px; border-radius:6px; margin-top:14px; cursor:pointer;" onclick="this.parentNode.remove()"><i class="fas fa-trash-alt"></i></button>
     `;
@@ -339,9 +343,6 @@ document.addEventListener("DOMContentLoaded", function() {
     if (userSel) {
         userSel.addEventListener('change', function () { applyEmployeePrimarySite(true); });
         applyEmployeePrimarySite(false);
-    }
-    if (document.getElementById('manualBreaksAppendContainer')) {
-        appendFreshBreakRow();
     }
 });
 </script>
