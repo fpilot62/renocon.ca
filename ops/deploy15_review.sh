@@ -241,7 +241,7 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     fwrite(STDERR, "db.php did not create \$pdo\n");
     exit(1);
 }
-$pdo->setAttribute(PDO::ERRMODE, PDO::ERRMODE_EXCEPTION);
+$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 ppr_ensure($pdo);
 $st = $pdo->prepare(
     'SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?'
@@ -330,6 +330,7 @@ chdir(\$app);
 \$_SERVER['DOCUMENT_ROOT'] = \$app;
 \$_SERVER['HTTP_HOST'] = 'payroll.renocon.ca';
 require \$app . '/db.php';
+\$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 \$pdo->exec('DROP TABLE IF EXISTS admin_partial_payment_reviews');
 echo "Dropped admin_partial_payment_reviews\\n";
 PHP
@@ -405,8 +406,21 @@ php -l "$APP/partial_payments_review.php"
 php -l "$APP/engine/partial_payments_review_lib.php"
 
 say "running the review-table migration"
-if ! migrate; then
-  die "Migration failed. Restore with: bash ${ROLLBACK}"
+mig_err="$STAGE/migrate.err"
+set +e
+migrate >"$STAGE/migrate.out" 2>"$mig_err"
+mig_rc=$?
+set -e
+if [[ -s "$STAGE/migrate.out" ]]; then
+  cat "$STAGE/migrate.out"
+fi
+if [[ -s "$mig_err" ]]; then
+  say "----- migration stderr -----"
+  cat "$mig_err" >&2
+  say "----- end migration stderr -----"
+fi
+if [[ "$mig_rc" -ne 0 ]]; then
+  die "Migration failed (php exit ${mig_rc}). Restore with: bash ${ROLLBACK}"
 fi
 
 code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 25 "${PUBLIC_BASE}/partial_payments_review.php" || echo "000")

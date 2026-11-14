@@ -92,6 +92,11 @@ check('schema setup reads every result', strpos($lib, 'function ppr_run_statemen
 check('the only write is the review table', !preg_match('/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+`?(payroll_finalized|payroll_payments|payroll_masters|payroll_balance|admin_outstanding_wages)/i', $lib) && strpos($lib, 'INSERT INTO admin_partial_payment_reviews') !== false);
 check('the page is superadmin only and says payroll is not written', strpos($page, 'ps_is_superadmin') !== false && strpos($page, 'ps_require_csrf') !== false && strpos($page, 'does not write payroll_finalized or payroll_payments') !== false && strpos($page, 'ppr_ensure_menu') !== false);
 check('the page does not record a payroll payment', !preg_match('/\b(pcr_apply_payment|execute_single_payout|INSERT\s+INTO\s+payroll_payments|UPDATE\s+payroll_finalized)\b/', $page));
+check('the page and library do not use a bare PDO::ERRMODE attribute', !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $page . $lib));
+$deploy15 = file_get_contents(__DIR__ . '/../ops/deploy15_review.sh');
+$deploy16 = file_get_contents(__DIR__ . '/../ops/deploy16_review_fix.sh');
+check('deploy15 sets ATTR_ERRMODE and prints migration stderr', strpos($deploy15, 'PDO::ATTR_ERRMODE') !== false && strpos($deploy15, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy15));
+check('deploy16 keeps the pinned files, creates the table, and adds the menu', strpos($deploy16, '300be82ed9a0d0d3eca9a238ef8ae77e80a855dc') !== false && strpos($deploy16, 'PDO::ATTR_ERRMODE') !== false && strpos($deploy16, 'ppr_ensure_menu') !== false && strpos($deploy16, 'migration stderr') !== false && !preg_match('/setAttribute\(\s*PDO::ERRMODE\s*,/', $deploy16));
 
 echo $fail === 0 ? "ALL PASSED\n" : "$fail FAILED\n";
 exit($fail === 0 ? 0 : 1);
