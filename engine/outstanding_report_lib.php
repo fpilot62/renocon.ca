@@ -860,11 +860,12 @@ function orpt_detail_sheet(array $report): array
     return $rows;
 }
 
-function orpt_send_xlsx(int $orgId, array $report): void
+function orpt_send_xlsx(int $orgId, array $report, array $demandRows = []): void
 {
     $bytes = xlsx_build([
         'Summary' => orpt_summary_sheet($report),
         'Detail' => orpt_detail_sheet($report),
+        'Immediate Demand' => orpt_demand_sheet($demandRows),
     ]);
     $name = 'outstanding-report-org-' . $orgId . '.xlsx';
     header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1018,4 +1019,365 @@ function orpt_menu_parent(PDO $pdo): array
         }
     }
     return ['id' => 0, 'module' => ''];
+}
+
+function orpt_demand_migration_path(): string
+{
+    return dirname(__DIR__) . '/migrations/20261117_admin_immediate_demand.sql';
+}
+
+/** Creates admin_immediate_demand when it is missing. Does not change other tables. */
+function orpt_ensure_demand(PDO $pdo): void
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    ow_exec_sql_file($pdo, orpt_demand_migration_path());
+    $ready = true;
+}
+
+/**
+ * @return array{ok:bool,errors:array<int,string>,row:array<string,mixed>,form:array<string,mixed>}
+ */
+function orpt_demand_input(array $post): array
+{
+    $name = trim(preg_replace('/\s+/u', ' ', (string)($post['employee_name'] ?? '')));
+    $store = trim(preg_replace('/\s+/u', ' ', (string)($post['store_name'] ?? '')));
+    $period = trim(preg_replace('/\s+/u', ' ', (string)($post['pay_period'] ?? '')));
+    $notes = str_replace(["\r\n", "\r"], "\n", (string)($post['notes'] ?? ''));
+    $cash = in_array(strtolower(trim((string)($post['cash_flag'] ?? ''))), ['1', 'true', 'yes', 'on'], true);
+    $gross = ow_parse_money((string)($post['gross'] ?? ''), true);
+    $vacation = ow_parse_money((string)($post['vacation_pay'] ?? ''), false);
+    $employer = ow_parse_money((string)($post['employer_contribution'] ?? ''), false);
+    $net = ow_parse_money((string)($post['net_cash'] ?? ''), false);
+    $wageId = (int)($post['wage_id'] ?? 0);
+    $errors = [];
+    if ($name === '') {
+        $errors[] = 'Name is required.';
+    }
+    if (strlen($name) > 160) {
+        $errors[] = 'Name is too long.';
+    }
+    if (strlen($store) > 160) {
+        $errors[] = 'Store is too long.';
+    }
+    if (strlen($period) > 160) {
+        $errors[] = 'Pay period is too long.';
+    }
+    if (strlen($notes) > 8000) {
+        $errors[] = 'Notes are too long.';
+    }
+    if (!$gross['ok']) {
+        $errors[] = $gross['error'] !== '' ? $gross['error'] : 'Gross is required.';
+    }
+    if (!$vacation['ok']) {
+        $errors[] = 'Vacation pay is not a number.';
+    }
+    if (!$cash && !$employer['ok']) {
+        $errors[] = 'Employer contribution is not a number.';
+    }
+    if (!$net['ok']) {
+        $errors[] = 'Net cash is not a number.';
+    }
+    if ($wageId < 0) {
+        $wageId = 0;
+    }
+    $form = [
+        'id' => (int)($post['demand_id'] ?? 0),
+        'wage_id' => $wageId > 0 ? $wageId : 0,
+        'employee_name' => $name,
+        'store_name' => $store,
+        'pay_period' => $period,
+        'gross' => trim((string)($post['gross'] ?? '')),
+        'vacation_pay' => trim((string)($post['vacation_pay'] ?? '')),
+        'employer_contribution' => $cash ? '' : trim((string)($post['employer_contribution'] ?? '')),
+        'net_cash' => trim((string)($post['net_cash'] ?? '')),
+        'cash_flag' => $cash ? 1 : 0,
+        'notes' => $notes,
+    ];
+    return [
+        'ok' => $errors === [],
+        'errors' => $errors,
+        'row' => [
+            'employee_name' => $name,
+            'store_name' => $store,
+            'pay_period' => $period,
+            'gross' => $gross['ok'] ? $gross['value'] : null,
+            'vacation_pay' => $vacation['ok'] ? $vacation['value'] : null,
+            'employer_contribution' => $cash ? null : ($employer['ok'] ? $employer['value'] : null),
+            'net_cash' => $net['ok'] ? $net['value'] : null,
+            'cash_flag' => $cash ? 1 : 0,
+            'notes' => trim($notes) === '' ? null : $notes,
+            'wage_id' => $wageId > 0 ? $wageId : null,
+        ],
+        'form' => $form,
+    ];
+}
+
+/** Employer contribution is CPP + EI + WCB, and it is blank on a cash or contractor row. */
+function orpt_demand_line(array $row): array
+{
+    $cash = (int)($row['cash_flag'] ?? 0) === 1;
+    $gross = round((float)($row['gross'] ?? 0), 2);
+    $vacation = ow_amount($row['vacation_pay'] ?? null);
+    $employer = $cash ? null : ow_amount($row['employer_contribution'] ?? null);
+    $net = ow_amount($row['net_cash'] ?? null);
+    $burden = round($gross + ($vacation ?? 0) + ($employer ?? 0), 2);
+    return [
+        'gross' => $gross,
+        'vacation' => $vacation,
+        'employer' => $employer,
+        'burden' => $burden,
+        'net' => $net,
+        'cash' => $cash,
+    ];
+}
+
+function orpt_demand_money_text($value, bool $known): string
+{
+    if (!$known) {
+        return '—';
+    }
+    return orpt_money($value);
+}
+
+function orpt_demand_totals(array $rows): array
+{
+    $gross = 0.0;
+    $vacation = 0.0;
+    $vacationRows = 0;
+    $employer = 0.0;
+    $employerRows = 0;
+    $burden = 0.0;
+    $net = 0.0;
+    $netRows = 0;
+    foreach ($rows as $row) {
+        $line = orpt_demand_line($row);
+        $gross += $line['gross'];
+        $burden += $line['burden'];
+        if ($line['vacation'] !== null) {
+            $vacation += $line['vacation'];
+            $vacationRows++;
+        }
+        if ($line['employer'] !== null) {
+            $employer += $line['employer'];
+            $employerRows++;
+        }
+        if ($line['net'] !== null) {
+            $net += $line['net'];
+            $netRows++;
+        }
+    }
+    $count = count($rows);
+    return [
+        'count' => $count,
+        'gross_text' => orpt_money($gross),
+        'vacation_text' => orpt_demand_money_text($vacation, $vacationRows > 0),
+        'employer_text' => orpt_demand_money_text($employer, $employerRows > 0),
+        'burden_text' => orpt_money($burden),
+        'net_text' => orpt_demand_money_text($net, $netRows > 0),
+        'people_text' => $count === 1 ? '1 employee' : ($count . ' employees'),
+    ];
+}
+
+function orpt_demand_present(array $row): array
+{
+    $line = orpt_demand_line($row);
+    $notes = trim((string)($row['notes'] ?? ''));
+    return [
+        'id' => (int)($row['id'] ?? 0),
+        'name' => trim((string)($row['employee_name'] ?? '')),
+        'store' => trim((string)($row['store_name'] ?? '')),
+        'pay_period' => trim((string)($row['pay_period'] ?? '')),
+        'gross_text' => orpt_money($line['gross']),
+        'vacation_text' => $line['vacation'] === null ? '—' : orpt_money($line['vacation']),
+        'employer_text' => $line['employer'] === null ? '—' : orpt_money($line['employer']),
+        'burden_text' => orpt_money($line['burden']),
+        'net_text' => $line['net'] === null ? '—' : orpt_money($line['net']),
+        'cash_text' => $line['cash'] ? 'Cash' : '',
+        'notes' => orpt_clip($notes),
+        'wage_id' => (int)($row['wage_id'] ?? 0),
+    ];
+}
+
+function orpt_demand_form_values(?array $row): array
+{
+    if ($row === null) {
+        return [
+            'id' => 0,
+            'wage_id' => 0,
+            'employee_name' => '',
+            'store_name' => '',
+            'pay_period' => '',
+            'gross' => '',
+            'vacation_pay' => '',
+            'employer_contribution' => '',
+            'net_cash' => '',
+            'cash_flag' => 0,
+            'notes' => '',
+        ];
+    }
+    $cash = (int)($row['cash_flag'] ?? 0) === 1;
+    return [
+        'id' => (int)($row['id'] ?? 0),
+        'wage_id' => (int)($row['wage_id'] ?? 0),
+        'employee_name' => (string)($row['employee_name'] ?? ''),
+        'store_name' => (string)($row['store_name'] ?? ''),
+        'pay_period' => (string)($row['pay_period'] ?? ''),
+        'gross' => array_key_exists('gross', $row) ? ow_money_input($row['gross']) : '',
+        'vacation_pay' => ow_money_input($row['vacation_pay'] ?? null),
+        'employer_contribution' => $cash ? '' : ow_money_input($row['employer_contribution'] ?? null),
+        'net_cash' => ow_money_input($row['net_cash'] ?? null),
+        'cash_flag' => $cash ? 1 : 0,
+        'notes' => (string)($row['notes'] ?? ''),
+    ];
+}
+
+function orpt_demand_headers(): array
+{
+    return ['Name', 'Store', 'Pay period', 'Gross', 'Vacation pay', 'Employer contribution', 'Total burden', 'Net cash', 'Cash', 'Notes', 'Outstanding row'];
+}
+
+function orpt_demand_sheet(array $rows): array
+{
+    $sheet = [orpt_demand_headers()];
+    foreach ($rows as $row) {
+        $shown = orpt_demand_present($row);
+        $sheet[] = [
+            $shown['name'],
+            $shown['store'],
+            $shown['pay_period'],
+            $shown['gross_text'],
+            $shown['vacation_text'],
+            $shown['employer_text'],
+            $shown['burden_text'],
+            $shown['net_text'],
+            $shown['cash_text'],
+            $shown['notes'],
+            $shown['wage_id'] > 0 ? (string)$shown['wage_id'] : '',
+        ];
+    }
+    $totals = orpt_demand_totals($rows);
+    $sheet[] = [
+        'Total',
+        $totals['people_text'],
+        '',
+        $totals['gross_text'],
+        $totals['vacation_text'],
+        $totals['employer_text'],
+        $totals['burden_text'],
+        $totals['net_text'],
+        '',
+        '',
+        '',
+    ];
+    return $sheet;
+}
+
+/** @return array<int,array<string,mixed>> */
+function orpt_demand_wage_options(array $pendingRows): array
+{
+    $out = [];
+    foreach (ow_sort_rows($pendingRows) as $row) {
+        $employer = orpt_employer_of($row);
+        $amount = null;
+        if ($employer['source'] === 'parts') {
+            $amount = $employer['amount'];
+        } elseif (empty($employer['lump_missing'])) {
+            $amount = $employer['lump'];
+        }
+        $name = trim((string)($row['employee_name'] ?? ''));
+        $store = trim((string)($row['store_name'] ?? ''));
+        $period = trim((string)($row['pay_period'] ?? ''));
+        $out[] = [
+            'id' => (int)($row['id'] ?? 0),
+            'label' => trim($name . ' · ' . $store . ' · ' . $period, ' ·'),
+            'employee_name' => $name,
+            'store_name' => $store,
+            'pay_period' => $period,
+            'gross' => ow_money_input($row['gross'] ?? null),
+            'vacation_pay' => ow_money_input($row['vacation_pay'] ?? null),
+            'employer_contribution' => $amount === null ? '' : ow_money_input($amount),
+            'net_cash' => ow_money_input($row['net'] ?? null),
+        ];
+    }
+    return $out;
+}
+
+function orpt_demand_fetch(PDO $pdo, int $orgId): array
+{
+    $st = $pdo->prepare('SELECT * FROM admin_immediate_demand WHERE org_id = ?');
+    $st->execute([$orgId]);
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+    if (!is_array($rows)) {
+        return [];
+    }
+    usort($rows, static function (array $a, array $b): int {
+        $name = strcasecmp((string)($a['employee_name'] ?? ''), (string)($b['employee_name'] ?? ''));
+        if ($name !== 0) {
+            return $name;
+        }
+        return ((int)($a['id'] ?? 0)) <=> ((int)($b['id'] ?? 0));
+    });
+    return $rows;
+}
+
+function orpt_demand_wage_in_org(PDO $pdo, int $orgId, int $wageId): bool
+{
+    if ($wageId <= 0) {
+        return true;
+    }
+    $st = $pdo->prepare('SELECT id FROM admin_outstanding_wages WHERE id = ? AND org_id = ?');
+    $st->execute([$wageId, $orgId]);
+    return (bool)$st->fetchColumn();
+}
+
+function orpt_demand_save(PDO $pdo, int $orgId, int $actorId, int $id, array $row): void
+{
+    $values = [
+        $row['wage_id'],
+        $row['store_name'],
+        $row['employee_name'],
+        $row['pay_period'],
+        $row['gross'],
+        $row['vacation_pay'],
+        $row['employer_contribution'],
+        $row['net_cash'],
+        $row['cash_flag'],
+        $row['notes'],
+        $actorId,
+    ];
+    if ($id > 0) {
+        $own = $pdo->prepare('SELECT id FROM admin_immediate_demand WHERE id = ? AND org_id = ?');
+        $own->execute([$id, $orgId]);
+        if (!$own->fetchColumn()) {
+            throw new RuntimeException('That immediate demand row is not in this organization.');
+        }
+        $sql = 'UPDATE admin_immediate_demand
+            SET wage_id = ?, store_name = ?, employee_name = ?, pay_period = ?, gross = ?, vacation_pay = ?,
+                employer_contribution = ?, net_cash = ?, cash_flag = ?, notes = ?, updated_at = NOW(), updated_by = ?
+            WHERE id = ? AND org_id = ?';
+        $values[] = $id;
+        $values[] = $orgId;
+        $pdo->prepare($sql)->execute($values);
+        return;
+    }
+    $sql = 'INSERT INTO admin_immediate_demand
+        (org_id, wage_id, store_name, employee_name, pay_period, gross, vacation_pay, employer_contribution, net_cash, cash_flag, notes, created_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)';
+    $insert = array_merge([$orgId], $values);
+    $pdo->prepare($sql)->execute($insert);
+}
+
+function orpt_demand_remove(PDO $pdo, int $orgId, int $id): void
+{
+    if ($id <= 0) {
+        throw new RuntimeException('That immediate demand row is not in this organization.');
+    }
+    $st = $pdo->prepare('DELETE FROM admin_immediate_demand WHERE id = ? AND org_id = ?');
+    $st->execute([$id, $orgId]);
+    if ($st->rowCount() < 1) {
+        throw new RuntimeException('That immediate demand row is not in this organization.');
+    }
 }

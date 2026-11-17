@@ -170,12 +170,61 @@ check('employee names and notes are escaped', strpos($safe, '<script>') === fals
 $sql = orpt_pending_sql();
 check('the wage read is filtered by org and pending status', strpos($sql, 'admin_outstanding_wages') !== false && substr_count($sql, '?') === 2 && stripos($sql, 'insert') === false && stripos($sql, 'update') === false);
 
+$cash = [
+    'id' => 1, 'employee_name' => 'Cash Pat', 'store_name' => 'Penticton', 'pay_period' => 'Sep 1-15, 2026',
+    'gross' => 100, 'vacation_pay' => 10, 'employer_contribution' => 50, 'net_cash' => 110,
+    'cash_flag' => 1, 'notes' => '<b>now</b>', 'wage_id' => 4,
+];
+$paidNow = [
+    'id' => 2, 'employee_name' => 'Ada Other', 'store_name' => 'Westbank', 'pay_period' => 'Sep 1-15, 2026',
+    'gross' => 80, 'vacation_pay' => null, 'employer_contribution' => 12.5, 'net_cash' => 70,
+    'cash_flag' => 0, 'notes' => '', 'wage_id' => 0,
+];
+$cashLine = orpt_demand_line($cash);
+$payLine = orpt_demand_line($paidNow);
+check('cash or contractor rows leave employer contribution blank', $cashLine['employer'] === null && abs($cashLine['burden'] - 110) < 0.001 && $cashLine['cash']);
+check('a payroll immediate demand adds CPP EI and WCB into the burden', $payLine['employer'] !== null && abs($payLine['employer'] - 12.5) < 0.001 && abs($payLine['burden'] - 92.5) < 0.001);
+$demandSheet = orpt_demand_sheet([$cash, $paidNow]);
+check('the immediate demand sheet has the requested columns and a total', $demandSheet[0] === orpt_demand_headers() && $demandSheet[1][5] === '—' && $demandSheet[1][6] === '110.00' && $demandSheet[3][0] === 'Total' && $demandSheet[3][6] === '202.50' && $demandSheet[1][10] === '4');
+$blankName = orpt_demand_input(['employee_name' => '', 'gross' => '10']);
+$cashInput = orpt_demand_input([
+    'employee_name' => 'Pat', 'store_name' => 'Penticton', 'pay_period' => 'Sep 1-15',
+    'gross' => '$100.00', 'vacation_pay' => '10', 'employer_contribution' => '50',
+    'net_cash' => '110', 'cash_flag' => '1', 'notes' => '=1+1', 'wage_id' => '0',
+]);
+check('a demand row needs a name and cash clears the employer amount', !$blankName['ok'] && $cashInput['ok'] && $cashInput['row']['employer_contribution'] === null && $cashInput['row']['cash_flag'] === 1 && $cashInput['row']['wage_id'] === null);
+$demandHtml = orpt_report_html('', 2, 'PK BC Food INC', $report, [
+    'ready' => true,
+    'rows' => [orpt_demand_present($cash)],
+    'totals' => orpt_demand_totals([$cash]),
+    'wages' => [],
+    'edit' => orpt_demand_form_values(null),
+    'error' => '',
+    'flash' => '',
+    'csrf' => 'tok',
+]);
+check('the page lists immediate demand and escapes its notes', strpos($demandHtml, 'Immediate demand') !== false && strpos($demandHtml, 'Cash / contractor') !== false && strpos($demandHtml, '&lt;b&gt;now&lt;/b&gt;') !== false && strpos($demandHtml, 'name="csrf_token" value="tok"') !== false && strpos($demandHtml, 'demand_action') !== false);
+$demandBook = xlsx_build(['Summary' => [['Name']], 'Detail' => [['Employee']], 'Immediate Demand' => $demandSheet]);
+$dz = new ZipArchive();
+$dt = tempnam(sys_get_temp_dir(), 'orptd');
+file_put_contents($dt, $demandBook);
+$dz->open($dt);
+$demandBookXml = $dz->getFromName('xl/workbook.xml');
+$demandSheetXml = $dz->getFromName('xl/worksheets/sheet3.xml');
+$dz->close();
+@unlink($dt);
+check('the workbook adds an Immediate Demand tab', strpos($demandBookXml, 'name="Immediate Demand"') !== false && strpos($demandSheetXml, 'Cash Pat') !== false && strpos($demandSheetXml, 'Paid Person') === false);
+
+$demandSql = file_get_contents(__DIR__ . '/../migrations/20261117_admin_immediate_demand.sql');
+check('the immediate demand migration only creates its table', strpos($demandSql, 'CREATE TABLE IF NOT EXISTS admin_immediate_demand') !== false && !preg_match('/\b(ALTER|INSERT|UPDATE|DELETE|DROP)\b/i', $demandSql) && !preg_match('/payroll_finalized|payroll_payments|payroll_masters/', $demandSql));
+
 $lib = file_get_contents(__DIR__ . '/../engine/outstanding_report_lib.php');
 $page = file_get_contents(__DIR__ . '/../outstanding_report.php');
 $view = file_get_contents(__DIR__ . '/../engine/outstanding_report_view.php');
 $forbidden = '/\b(INSERT INTO|UPDATE|DELETE FROM)\s+`?admin_outstanding_wages\b/i';
 check('the report library does not write the wage ledger', !preg_match($forbidden, $lib) && strpos($lib, 'ow_save_field') === false && strpos($lib, 'ow_ensure') === false);
-check('the page does not write wages or run a migration', !preg_match($forbidden, $page) && strpos($page, 'ow_ensure') === false && strpos($page, 'ow_save_field') === false);
+check('the page does not write the wage ledger or run its migration', !preg_match($forbidden, $page) && strpos($page, 'ow_ensure') === false && strpos($page, 'ow_save_field') === false);
+check('immediate demand changes require the payroll token and stay in the org', strpos($page, 'ps_require_csrf') !== false && strpos($page, 'ps_require_csrf') < strpos($page, 'orpt_demand_save') && strpos($lib, 'DELETE FROM admin_immediate_demand WHERE id = ? AND org_id = ?') !== false && strpos($lib, 'WHERE id = ? AND org_id = ?') !== false);
 check('the page checks access before it reads wages', strpos($page, 'orpt_access_decision') !== false && strpos($page, 'orpt_access_decision') < strpos($page, 'orpt_fetch_pending'));
 check('a visitor with no session is sent to login', strpos($page, 'login_kiosk.php?err=session_expired') !== false && strpos($page, "\$_SESSION['user_id']") !== false);
 check('the menu link is the admin outstanding report', strpos($lib, "'Outstanding report'") !== false && strpos($lib, "'outstanding_report.php'") !== false && strpos($lib, "'UserRole' => 20") !== false);
