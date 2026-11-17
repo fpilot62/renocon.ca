@@ -4,6 +4,8 @@
  * JSON feed of attendance for admins. Requires a logged-in admin.
  * Soft-deleted rows are omitted. An unfiltered request returns open shifts and today's punches.
  */
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 payroll_require_admin(true, 'Staff audit data is for admins only.');
 require_once __DIR__ . '/db.php';
@@ -11,24 +13,14 @@ payroll_require_scope_admin();
 
 header('Content-Type: application/json; charset=UTF-8');
 
-$level = (int)($_SESSION['user_level'] ?? 99);
-$sessionOrg = (int)($_SESSION['org_id'] ?? 0);
+$level = privacy_session_level();
+$sessionOrg = privacy_session_org();
 $requested = (int)($_GET['org_id'] ?? $_POST['org_id'] ?? 0);
-if ($level <= 10) {
+$org = $level <= 10 ? $requested : $sessionOrg;
+if ($level > 10 && $requested > 0 && $requested !== $sessionOrg) {
     $org = $requested;
-} else {
-    $org = $sessionOrg;
-    if ($requested > 0 && $requested !== $org) {
-        http_response_code(403);
-        echo json_encode(['success' => false, 'status' => 'error', 'error' => 'That organization is outside your access.']);
-        exit;
-    }
-    if ($org <= 0) {
-        http_response_code(403);
-        echo json_encode(['success' => false, 'status' => 'error', 'error' => 'That organization is outside your access.']);
-        exit;
-    }
 }
+privacy_require_business($pdo, $org, 'attachment', 'get_staff_audit.php', true, 20, 'view');
 
 $sql = "SELECT a.id, a.site_id, a.clock_in, a.clock_out, a.selfie_in,
                u.Name AS staff_name, COALESCE(s.nick_name, '') AS site_name

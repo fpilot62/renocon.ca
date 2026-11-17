@@ -5,21 +5,23 @@
  * Opening this page does not back up or reset the database.
  * Requires a logged-in admin. A recorded payment is left finalized.
  */
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 payroll_require_admin(false, 'Undo finalization is for admins only.');
 require_once __DIR__ . '/db.php';
 payroll_require_scope_admin();
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    privacy_require_csrf();
+}
 
-$level = (int)($_SESSION['user_level'] ?? 99);
-$sessionOrg = (int)($_SESSION['org_id'] ?? 0);
+$level = privacy_session_level();
+$sessionOrg = privacy_session_org();
 $selected = (int)($_POST['org_id'] ?? $_GET['org_id'] ?? 0);
-if ($level > 10) {
-    if ($selected > 0 && $selected !== $sessionOrg) {
-        http_response_code(403);
-        exit('That organization is outside your access.');
-    }
+if ($level > 10 && !($selected > 0 && $selected !== $sessionOrg)) {
     $selected = $sessionOrg;
 }
+privacy_require_business($pdo, $selected, 'employee', 'undo_finalization.php', false, 20, (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view');
 
 $notice = '';
 $errors = [];
@@ -64,7 +66,9 @@ function undo_h(string $value): string
     <p>Opening this page does not change payroll and does not start a backup. It sends the listed unpaid shifts back to audit. A shift that already has a payment is left finalized.</p>
     <?php if ($notice !== ''): ?><p class="ok"><?= undo_h($notice) ?></p><?php endif; ?>
     <?php foreach ($errors as $err): ?><p class="err"><?= undo_h((string)$err) ?></p><?php endforeach; ?>
+    <?= privacy_banner_html() ?>
     <form method="POST">
+        <?= privacy_csrf_field() ?>
         <?php if ($selected > 0): ?><input type="hidden" name="org_id" value="<?= (int)$selected ?>"><?php endif; ?>
         <label for="ids">Attendance ids</label>
         <textarea id="ids" name="ids" rows="4" placeholder="123, 456"></textarea>

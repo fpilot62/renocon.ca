@@ -6,9 +6,8 @@
  * migrations/20261108_payroll_sheet_review.sql and engine/payroll_sheet_review_lib.php.
  * Uploads are stored outside the web root. Do not commit source workbooks.
  */
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 if (!isset($_SESSION['user_id']) || $_SESSION['user_id'] === '') {
     header('Location: login_kiosk.php?err=session_expired');
     exit;
@@ -18,7 +17,6 @@ if ($sess_level > 20) {
     http_response_code(403);
     exit('Sheet review is for admins only.');
 }
-ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
@@ -67,6 +65,15 @@ $orgId = $requestedOrg > 0 && psr_may_view_org($isSuper, $homeOrg, $requestedOrg
 if ($orgId <= 0) {
     exit('No company is selected.');
 }
+privacy_require_business(
+    $pdo,
+    (int)$orgId,
+    'report',
+    'payroll_sheet_review.php',
+    false,
+    20,
+    (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view'
+);
 try {
     psr_ensure($pdo);
     psr_ensure_menu($pdo);
@@ -383,6 +390,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
 </head>
 <body>
 <?= function_exists('generateMenu') ? generateMenu($pdo) : '' ?>
+<?= privacy_banner_html() ?>
 <div class="container-fluid">
     <div class="d-flex justify-content-between align-items-start mb-3">
         <div>

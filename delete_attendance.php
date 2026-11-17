@@ -4,10 +4,15 @@
  * Soft-deletes attendance rows. Requires an admin session.
  * The previous copy of this file accepted deletes with no login.
  */
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 payroll_require_admin(true, 'Deleting attendance is for admins only.');
 require_once __DIR__ . '/db.php';
 payroll_require_scope_admin();
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    privacy_require_csrf();
+}
 
 header('Content-Type: application/json; charset=UTF-8');
 
@@ -35,26 +40,15 @@ if (!att_soft_delete_ready($pdo)) {
     exit;
 }
 
-$level = (int)($_SESSION['user_level'] ?? 99);
-$sessionOrg = (int)($_SESSION['org_id'] ?? 0);
+$level = privacy_session_level();
+$sessionOrg = privacy_session_org();
 $selected = (int)($_POST['org_id'] ?? 0);
-$restrict = true;
-$scope = $sessionOrg;
-if ($level <= 10) {
-    if ($selected > 0) {
-        $scope = $selected;
-    } else {
-        $restrict = false;
-    }
-} elseif ($selected > 0 && $selected !== $sessionOrg) {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'error' => 'That organization is outside your access.']);
-    exit;
-} elseif ($scope <= 0) {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'error' => 'That organization is outside your access.']);
-    exit;
+$scope = $level <= 10 ? $selected : $sessionOrg;
+if ($level > 10 && $selected > 0 && $selected !== $sessionOrg) {
+    $scope = $selected;
 }
+privacy_require_business($pdo, $scope, 'employee', 'delete_attendance.php', true, 20, 'update');
+$restrict = true;
 
 $sql = att_soft_delete_sql(count($ids), $restrict);
 $params = array_merge([(int)($_SESSION['user_id'] ?? 0)], $ids);

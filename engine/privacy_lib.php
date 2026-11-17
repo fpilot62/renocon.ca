@@ -189,6 +189,10 @@ function privacy_boot_web(): void
     if (session_status() === PHP_SESSION_NONE) {
         session_start();
     }
+    if (privacy_logged_in() && empty($_SESSION['privacy_cookie_refreshed'])) {
+        session_regenerate_id(true);
+        $_SESSION['privacy_cookie_refreshed'] = 1;
+    }
     privacy_enforce_transport();
     privacy_enforce_timeout();
 }
@@ -669,7 +673,12 @@ function privacy_notify_owners(PDO $pdo, int $orgId, array $message, ?callable $
         return ['sent' => 0, 'note' => 'no owner email on file'];
     }
     $sender = $sender ?? static function (string $to, string $subject, string $body): bool {
-        return @mail($to, $subject, $body, "Content-Type: text/plain; charset=UTF-8\r\n");
+        $host = preg_replace('/:\d+$/', '', (string)($_SERVER['HTTP_HOST'] ?? 'payroll.renocon.ca'));
+        if (!is_string($host) || !preg_match('/^[A-Za-z0-9.-]+$/', $host)) {
+            $host = 'payroll.renocon.ca';
+        }
+        $headers = "Content-Type: text/plain; charset=UTF-8\r\nFrom: payroll@" . $host . "\r\n";
+        return @mail($to, $subject, $body, $headers);
     };
     $sent = 0;
     foreach ($emails as $email) {

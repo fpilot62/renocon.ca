@@ -5,9 +5,8 @@
  * Payments go through pcr_apply_payment, so Payroll Center Paid / Net Remaining
  * stay in step. Finalized gross, CPP, EI, and tax are not edited.
  */
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 if (!isset($_SESSION['user_id']) || $_SESSION['user_id'] === '') {
     header('Location: login_kiosk.php?err=session_expired');
     exit;
@@ -18,7 +17,6 @@ if ($sess_level > 20) {
     exit('Payment Status is for admins only.');
 }
 
-ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
@@ -66,6 +64,15 @@ if ($isSuper) {
 if ($orgId <= 0) {
     exit('No organization is selected.');
 }
+privacy_require_business(
+    $pdo,
+    (int)$orgId,
+    'pay',
+    'payroll_payment_status.php',
+    false,
+    20,
+    (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view'
+);
 
 try {
     pstat_ensure_menu($pdo);
@@ -372,6 +379,7 @@ $today = date('Y-m-d');
 </head>
 <body>
 <?= function_exists('generateMenu') ? generateMenu($pdo) : '' ?>
+<?= privacy_banner_html() ?>
 <div class="container-fluid">
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
         <div>

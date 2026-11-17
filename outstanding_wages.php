@@ -7,10 +7,8 @@
  * Deploy with migrations/20261114_admin_outstanding_wages.sql
  * and migrations/20261115_outstanding_wages_vacation_invoice.sql.
  */
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-ini_set('display_errors', 1);
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
@@ -116,6 +114,8 @@ if ($requested > 0 && $requested !== $orgId) {
 if ($orgId <= 0) {
     exit('No organization is available.');
 }
+$privacyAction = (($_GET['export'] ?? '') === 'csv') ? 'export' : 'view';
+privacy_require_business($pdo, $orgId, 'pay', 'outstanding_wages.php', $ajax, 20, $privacyAction);
 
 function ow_indexes(PDO $pdo, int $orgId): array
 {
@@ -319,6 +319,7 @@ $csrf = ps_csrf_token();
 </head>
 <body>
 <?= function_exists('generateMenu') ? generateMenu($pdo) : '' ?>
+<?= privacy_banner_html() ?>
 <div class="container-fluid">
     <div class="d-flex flex-wrap justify-content-between align-items-start mb-3">
         <div>

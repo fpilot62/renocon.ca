@@ -175,6 +175,37 @@ try {
 check('the platform superadmin cannot create a grant', $self);
 
 $root = dirname(__DIR__);
+$pages = [
+    'staff_audit.php' => 'employee',
+    'get_staff_audit.php' => 'attachment',
+    'delete_attendance.php' => 'employee',
+    'undo_finalization.php' => 'employee',
+    'manual_attendance.php' => 'employee',
+    'order_amounts.php' => 'pay',
+    'outstanding_wages.php' => 'pay',
+    'payroll_master_ledger.php' => 'pay',
+    'payroll_payment_status.php' => 'pay',
+    'payroll_sheet_review.php' => 'report',
+    'generate_pay_documents.php' => 'pay',
+    'privacy_support.php' => 'privacy_boot_web',
+];
+foreach ($pages as $page => $marker) {
+    $src = file_get_contents($root . '/' . $page);
+    check($page . ' boots the privacy gate', strpos($src, 'privacy_boot_web') !== false);
+    if ($marker !== 'privacy_boot_web') {
+        check($page . ' enforces business access', strpos($src, 'privacy_require_business') !== false && strpos($src, "'" . $marker . "'") !== false);
+    }
+}
+$auditPage = file_get_contents($root . '/staff_audit.php');
+check('staff audit requires an admin and a csrf token', strpos($auditPage, 'payroll_require_admin') !== false && strpos($auditPage, 'privacy_require_csrf') !== false && strpos($auditPage, 'PRIVACY_CSRF') !== false);
+check('staff audit cookie is httponly', strpos($auditPage, "'httponly' => true") !== false && strpos($auditPage, "'httponly' => false") === false);
+check('staff audit does not query every organization', strpos($auditPage, "\$where[] = '1=0'") !== false);
+$deletePage = file_get_contents($root . '/delete_attendance.php');
+check('delete cannot skip the organization filter', strpos($deletePage, '$restrict = true') !== false && strpos($deletePage, '$restrict = false') === false);
+$paydocs = file_get_contents($root . '/generate_pay_documents.php');
+check('pay documents mask bank numbers and keep MICR separate', strpos($paydocs, 'privacy_mask_account') !== false && strpos($paydocs, 'account_micr') !== false);
+$support = file_get_contents($root . '/privacy_support.php');
+check('support page can grant and revoke', strpos($support, 'privacy_create_grant') !== false && strpos($support, 'privacy_revoke_grant') !== false && strpos($support, 'privacy_org_counts') !== false);
 $script = file_get_contents($root . '/ops/encrypt_sensitive_columns.php');
 check('encrypt script is manual and does not print values', strpos($script, '--apply') !== false && strpos($script, 'dry-run') !== false && strpos($script, 'secret_value') !== false && strpos($script, 'echo $') === false);
 [$apply, $err] = privacy_encrypt_args(['script']);
