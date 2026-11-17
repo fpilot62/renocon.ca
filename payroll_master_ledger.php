@@ -1,5 +1,6 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 
 // GATE 1: SECURITY CLEARANCE
 if (!isset($_SESSION["user_id"]) || empty($_SESSION["user_id"])) {
@@ -49,7 +50,6 @@ if ($sess_user_level >= 30) {
  * TEST ON A COPY FIRST: this writes to payroll_finalized, payroll_balance, payroll_masters
  * and payroll_payments. Verify against a few known rows before using in production.
  */
-ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
@@ -58,6 +58,15 @@ require_once __DIR__ . '/engine/payroll_cheque_lib.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 ps_require_payroll_admin();
 $user_org_id = ps_selected_org($pdo);
+privacy_require_business(
+    $pdo,
+    (int)$user_org_id,
+    'pay',
+    'payroll_master_ledger.php',
+    false,
+    29,
+    (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view'
+);
 
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
 
@@ -681,6 +690,7 @@ unset($_SESSION['ledger_flash']);
 <body>
 
     <?= (function_exists('generateMenu')) ? generateMenu($pdo) : ''; ?>
+    <?= privacy_banner_html() ?>
 
     <div class="container-fluid px-4">
         <?php if (file_exists(__DIR__.'/payroll_help.php')) { require_once __DIR__.'/payroll_help.php'; echo payroll_help_panel('payroll_master_ledger.php'); } ?>

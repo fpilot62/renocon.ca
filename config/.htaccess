@@ -1,0 +1,8 @@
+# The live secret file does not belong in this directory.
+# If a copy was left here, do not serve it.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Deny from all
+</IfModule>

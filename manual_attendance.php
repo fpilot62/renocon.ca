@@ -5,11 +5,11 @@
  * Fix: Synchronizes rest break inputs to automatically mirror the shift's selected clock-in date.
  * Org: attendance.org_id is sites.org_id for the chosen site (sites.SId), not the admin session org.
  */
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 payroll_require_admin(false, 'Manual attendance is for admins only.');
 
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 require_once 'db.php';
@@ -27,6 +27,15 @@ if ($is_super) {
     $selected_org = ($org_raw === '' || $org_raw === 'all') ? 0 : (int)$org_raw;
 } else {
     $selected_org = $session_org;
+}
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    privacy_require_csrf();
+}
+if ($selected_org > 0) {
+    privacy_require_business($pdo, $selected_org, 'employee', 'manual_attendance.php', false, 20, (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view');
+} elseif (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    http_response_code(403);
+    exit('Choose an organization before adding a shift.');
 }
 
 $success_message = false;
@@ -165,6 +174,7 @@ if ($selected_org > 0) {
 <body>
 
 <?php if (function_exists('generateMenu')) echo generateMenu($pdo); ?>
+<?= privacy_banner_html() ?>
 
 <div class="form-wrapper">
     <?php if ($success_message): ?>
@@ -197,6 +207,7 @@ if ($selected_org > 0) {
             <p class="subtitle">Choose an organization before adding a shift.</p>
         <?php else: ?>
         <form method="POST" action="">
+            <?= privacy_csrf_field() ?>
             <input type="hidden" name="action" value="save_manual_shift">
             <input type="hidden" name="org_id" value="<?= (int)$selected_org ?>">
             

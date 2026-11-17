@@ -8,21 +8,21 @@
  * clean route mapping hyperlinks, and automated rest interval date matching.
  * UPDATED LAYOUT INTEGRATION: Added floating allocation overlay matted container desk to keep table data visible behind parameters.
  */
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
-// Pull in the core database layer and session profiles from your db.php
-require_once 'db.php';
-require_once __DIR__ . '/payroll_scope.php'; 
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+payroll_require_admin(false, 'Staff audit is for admins only.');
+require_once 'db.php';
+if (is_file(__DIR__ . '/payroll_scope.php')) {
+    require_once __DIR__ . '/payroll_scope.php';
+}
+payroll_require_scope_admin();
 
 if (file_exists('engine/menu_generator.php')) {
     require_once 'engine/menu_generator.php';
 }
-
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
-if (!isset($_SESSION['user_id'])) { die("Access Denied."); }
 
 /** Placeholder kiosk text is not a real off-schedule explanation. */
 function sa_reason_is_placeholder($text) {
@@ -97,31 +97,14 @@ function sa_audit_reason_parts(array $r) {
 
 // Extract privilege tier levels from your db.php architecture
 $sess_user_level = isset($_SESSION['user_level']) ? (int)$_SESSION['user_level'] : 99;
-$org_id = (int)($_SESSION['org_id'] ?? 1);
-
-// =========================================================================
-// ЁЯФе EMERGENCY BACKGROUND BULK FIXER: RESOLVES OMITTED SITES AUTOMATICALLY
-// =========================================================================
-try {
-    $fixSql = "
-        UPDATE attendance a
-        INNER JOIN users u ON a.user_id = u.id
-        SET a.site_id = u.primary_site_id
-        WHERE (a.site_id = '0' OR a.site_id = 'all' OR a.site_id IS NULL)
-          AND u.primary_site_id > 0 
-          AND a.payout_status = 0
-    ";
-    if (att_has_deleted_at($pdo)) {
-        $fixSql .= " AND a.deleted_at IS NULL";
-    }
-    $pdo->query($fixSql);
-} catch (Exception $e) {}
+$org_id = (int)($_SESSION['org_id'] ?? 0);
 
 // =========================================================================
 // тЪб UNIFIED POST ACTION HANDLER: DELETIONS, BREAKS, AND NEW DUPLICATION INJECTOR
 // =========================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
-    
+    privacy_require_csrf();
+
     // AJAX ACTION CALL: Clones an attendance record cleanly along with its child breaks
     if ($_POST['action'] === 'duplicate_shift' && !empty($_POST['shift_id'])) {
         header('Content-Type: application/json');
@@ -140,7 +123,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 echo json_encode(['success' => false, 'error' => 'Original attendance shift row not found.']);
                 exit;
             }
-            
+            privacy_require_business($pdo, (int)($src['org_id'] ?? 0), 'employee', 'staff_audit.php', true, 20, 'update');
+
             $insQuery = "INSERT INTO attendance 
                 (org_id, site_id, flag_reason, is_flagged, user_id, status, clock_in, clock_out, travel_time_hours, approved_hours, hourly_rate, official_rate, manager_notes, lat_in, lng_in, lat_out, lng_out, is_processed, payout_status, remarks, transfer_status) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)";
@@ -208,16 +192,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
             $restrict = true;
             $scope_org = (int)($_SESSION['org_id'] ?? 0);
+            $org_raw_del = $_POST['org_id'] ?? ($_GET['org_id'] ?? 0);
             if ($sess_user_level <= 10) {
-                $org_raw_del = $_GET['org_id'] ?? ($_POST['org_id'] ?? ($_COOKIE['sip_org_id'] ?? ($_COOKIE['sa_org_id'] ?? 'all')));
-                if ($org_raw_del === '' || $org_raw_del === 'all' || (int)$org_raw_del <= 0) {
-                    $restrict = false;
-                } else {
-                    $scope_org = (int)$org_raw_del;
-                }
-            } elseif ($scope_org <= 0) {
-                die('That organization is outside your access.');
+                $scope_org = (int)$org_raw_del;
+            } elseif ((int)$org_raw_del > 0 && (int)$org_raw_del !== $scope_org) {
+                $scope_org = (int)$org_raw_del;
             }
+            privacy_require_business($pdo, $scope_org, 'employee', 'staff_audit.php', false, 20, 'update');
             $delQuery = att_soft_delete_sql(count($clean_ids), $restrict);
             $delParams = array_merge([(int)($_SESSION['user_id'] ?? 0)], $clean_ids);
             if ($restrict) {
@@ -236,7 +217,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     // Real-time update processor for break configurations
     if ($_POST['action'] === 'update_breaks' && !empty($_POST['shift_id'])) {
         $shift_id = (int)$_POST['shift_id'];
-        
+        privacy_require_business($pdo, privacy_attendance_org($pdo, $shift_id), 'employee', 'staff_audit.php', false, 20, 'update');
+
         // Wipe existing child links to overwrite cleanly
         $pdo->prepare("DELETE FROM breaks WHERE shift_id = ?")->execute([$shift_id]);
         
@@ -351,8 +333,8 @@ if (!function_exists('sa_remember_org_cookie')) {
         setcookie('sa_org_id', $selected_org > 0 ? (string)$selected_org : 'all', [
             'expires' => time() + 86400 * 120,
             'path' => '/',
-            'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
-            'httponly' => false,
+            'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || !privacy_flag_enabled('PAYROLL_ALLOW_HTTP'),
+            'httponly' => true,
             'samesite' => 'Lax',
         ]);
     }
@@ -383,6 +365,31 @@ if (!$sa_is_super) {
     $selected_org = (int)($_SESSION['org_id'] ?? 0);
 } else {
     $selected_org = ($org_raw === '' || $org_raw === 'all') ? 0 : (int)$org_raw;
+}
+$privacy_scope_org = $sa_is_super ? (int)$selected_org : (int)($_SESSION['org_id'] ?? 0);
+if (!$sa_is_super) {
+    $asked_org = (int)($_GET['org_id'] ?? $_POST['org_id'] ?? 0);
+    if ($asked_org > 0 && $asked_org !== $privacy_scope_org) {
+        $privacy_scope_org = $asked_org;
+    }
+}
+privacy_require_business($pdo, $privacy_scope_org, 'employee', 'staff_audit.php', false, 20, 'view');
+if ($privacy_scope_org > 0) {
+    try {
+        $fixSql = "UPDATE attendance a
+            INNER JOIN users u ON a.user_id = u.id
+            SET a.site_id = u.primary_site_id
+            WHERE (a.site_id = '0' OR a.site_id = 'all' OR a.site_id IS NULL)
+              AND u.primary_site_id > 0
+              AND a.payout_status = 0
+              AND a.org_id = ?
+              AND u.org_id = ?";
+        if (att_has_deleted_at($pdo)) {
+            $fixSql .= ' AND a.deleted_at IS NULL';
+        }
+        $pdo->prepare($fixSql)->execute([$privacy_scope_org, $privacy_scope_org]);
+    } catch (Exception $e) {
+    }
 }
 
 $sa_aa_org = 4;
@@ -527,6 +534,8 @@ if ($sess_user_level > 10 && isset($_SESSION['org_id']) && $_SESSION['org_id'] >
 } elseif ($sa_is_super && $selected_org > 0) {
     $where[] = "a.org_id = :org_id";
     $params[':org_id'] = (int)$selected_org;
+} else {
+    $where[] = '1=0';
 }
 
 if (!empty($from_date) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $from_date)) {
@@ -764,6 +773,8 @@ try {
     } elseif (!empty($sa_is_super) && !empty($selected_org) && (int)$selected_org > 0) {
         $batchSQL .= " AND org_id = ?";
         $batchParams[] = (int)$selected_org;
+    } else {
+        $batchSQL .= " AND 1=0";
     }
     $batchSQL .= " GROUP BY user_id";
 
@@ -789,12 +800,14 @@ try {
         $staff = sa_load_staff_options($pdo, $staff_org, is_array($site_ids) ? $site_ids : []);
     }
 
+    $gemOrg = $privacy_scope_org > 0 ? $privacy_scope_org : (int)$org_id;
     $gemSettingsStmt = $pdo->prepare("SELECT setting_key, setting_value FROM Gem_Settings WHERE org_id = ?");
-    $gemSettingsStmt->execute([$org_id]);
+    $gemSettingsStmt->execute([$gemOrg]);
     $globalPolicyCache = $gemSettingsStmt->fetchAll(PDO::FETCH_KEY_PAIR);
 
     $siteOverridesCache = [];
-    $siteSettingsStmt = $pdo->query("SELECT site_id, setting_key, setting_value FROM Site_Settings");
+    $siteSettingsStmt = $pdo->prepare("SELECT site_id, setting_key, setting_value FROM Site_Settings WHERE site_id IN (SELECT SId FROM sites WHERE org_id = ?)");
+    $siteSettingsStmt->execute([$gemOrg]);
     while ($sRow = $siteSettingsStmt->fetch(PDO::FETCH_ASSOC)) {
         $siteOverridesCache[$sRow['site_id']][$sRow['setting_key']] = $sRow['setting_value'];
     }
@@ -1595,8 +1608,10 @@ if (!function_exists('sa_render_pager')) {
 </head>
 <body class="staff-audit-page">
 
-    <?php 
-    if (function_exists('generateMenu')) echo generateMenu($pdo); 
+    <?php
+    $privacyCsrf = privacy_csrf_token();
+    if (function_exists('generateMenu')) echo generateMenu($pdo);
+    echo privacy_banner_html();
     session_write_close();
     ?>
 
@@ -1613,6 +1628,7 @@ if (!function_exists('sa_render_pager')) {
             <h5 style="margin-top:0; font-weight:800; color:#1e293b; font-size:14px; margin-bottom:6px;"><i class="fas fa-clock" style="color:#2563eb;"></i> Adjust Shift Break Windows</h5>
             <p style="color:#64748b; font-size:11px; margin-bottom:15px;">Modify existing timestamps or append supplementary rest intervals below. Leave end-times open if active.</p>
             <form id="breakForm" method="POST" action="staff_audit.php">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($privacyCsrf, ENT_QUOTES, 'UTF-8') ?>">
                 <input type="hidden" name="action" value="update_breaks">
                 <input type="hidden" name="shift_id" id="modalShiftId">
                 <div id="modalBreakContainer"></div>
@@ -1634,6 +1650,7 @@ if (!function_exists('sa_render_pager')) {
             <p style="color:#64748b; font-size:11px; margin-bottom:20px; margin-top:0;">Configure split parameters, issue lump-sum bonuses, and securely process batch records formulas.</p>
             
             <form method="POST" action="bulk_allocation_desk.php">
+                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($privacyCsrf, ENT_QUOTES, 'UTF-8') ?>">
                 <div class="input-group" style="margin-bottom: 15px;">
                     <label style="display:block; font-weight:800; font-size:10px; text-transform:uppercase; color:#1e40af; margin-bottom:6px;"><i class="fas fa-balance-scale" style="margin-right:3px;"></i> Overtime Policy</label>
                     <select name="ot_mode" id="otModeSelector" onchange="toggleOtModeLayers(this.value)" style="width:100%; padding:8px; border-radius:6px; border:1px solid #93c5fd; background:#eff6ff; font-weight:600; font-size:11px; height:36px;">
@@ -2358,6 +2375,7 @@ if (!function_exists('sa_render_pager')) {
                                   "&page_size=<?= (int)$page_size ?>";
         }
 
+        var PRIVACY_CSRF = <?= json_encode($privacyCsrf) ?>;
         function duplicateShiftRow(shiftId) {
             if (confirm("Are you sure you want to duplicate this exact shift record as a fresh Pending entry log?")) {
                 var xhr = new XMLHttpRequest();
@@ -2384,7 +2402,7 @@ if (!function_exists('sa_render_pager')) {
                         }
                     }
                 };
-                xhr.send("action=duplicate_shift&shift_id=" + parseInt(shiftId));
+                xhr.send("action=duplicate_shift&shift_id=" + parseInt(shiftId) + "&csrf_token=" + encodeURIComponent(PRIVACY_CSRF) + "&org_id=<?= (int)$privacy_scope_org ?>");
             }
         }
 
@@ -2502,6 +2520,8 @@ if (!function_exists('sa_render_pager')) {
                 let form = document.createElement('form');
                 form.method = 'POST'; form.action = window.location.pathname + window.location.search; 
                 let actionInput = document.createElement('input'); actionInput.type = 'hidden'; actionInput.name = 'action'; actionInput.value = 'bulk_delete'; form.appendChild(actionInput);
+                let csrfInput = document.createElement('input'); csrfInput.type = 'hidden'; csrfInput.name = 'csrf_token'; csrfInput.value = PRIVACY_CSRF; form.appendChild(csrfInput);
+                let orgInput = document.createElement('input'); orgInput.type = 'hidden'; orgInput.name = 'org_id'; orgInput.value = '<?= (int)$privacy_scope_org ?>'; form.appendChild(orgInput);
                 ids.forEach(id => {
                     let input = document.createElement('input'); input.type = 'hidden'; input.name = 'shift_ids[]'; input.value = id; form.appendChild(input);
                 });
@@ -2576,7 +2596,17 @@ if (!function_exists('sa_render_pager')) {
                 actionInput.name = 'action'; 
                 actionInput.value = 'bulk_delete'; 
                 form.appendChild(actionInput);
-                
+                let csrfInput = document.createElement('input');
+                csrfInput.type = 'hidden';
+                csrfInput.name = 'csrf_token';
+                csrfInput.value = PRIVACY_CSRF;
+                form.appendChild(csrfInput);
+                let orgInput = document.createElement('input');
+                orgInput.type = 'hidden';
+                orgInput.name = 'org_id';
+                orgInput.value = '<?= (int)$privacy_scope_org ?>';
+                form.appendChild(orgInput);
+
                 let idInput = document.createElement('input'); 
                 idInput.type = 'hidden'; 
                 idInput.name = 'shift_ids[]'; 

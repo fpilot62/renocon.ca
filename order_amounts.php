@@ -5,10 +5,8 @@
  * Reads daily sales only. It does not write sales or payroll.
  * Menu: Admin → Order Amounts, Min. Role Superadmin (UserRole 10).
  */
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
-ini_set('display_errors', 1);
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
@@ -19,6 +17,7 @@ if (!ps_is_superadmin()) {
     http_response_code(403);
     exit('Superadmin access required.');
 }
+privacy_require_business($pdo, oa_org_id(), 'pay', 'order_amounts.php', false, 20, 'view');
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
 }
@@ -80,6 +79,7 @@ $weekNames = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => '
 </head>
 <body>
 <?= function_exists('generateMenu') ? generateMenu($pdo) : '' ?>
+<?= privacy_banner_html() ?>
 <div class="container-fluid">
     <div class="d-flex flex-wrap justify-content-between align-items-start mb-3">
         <div>

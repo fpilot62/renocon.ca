@@ -16,11 +16,11 @@
  *
  * CLI (verify only): php generate_pay_documents.php --site=121 --from=2026-07-13 --to=2026-07-26 --name=Avtar --out=/tmp/stub.pdf
  */
-ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 $is_cli = (PHP_SAPI === 'cli');
-if (!$is_cli && session_status() === PHP_SESSION_NONE) { session_start(); }
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 require_once 'db.php';
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 
@@ -36,6 +36,7 @@ if (!$is_cli) {
         $record_cheques = true;
     }
     $paydoc_org_id = (int)ps_selected_org($pdo);
+    privacy_require_business($pdo, $paydoc_org_id, 'pay', 'generate_pay_documents.php', false, 20, 'export');
 }
 
 $FPDF_PATH = __DIR__ . '/fpdf/fpdf.php';
@@ -252,6 +253,20 @@ foreach ($rows as $r) {
     $emp_addr_one = trim($emp_street . ', ' . $emp_cityline, ', ');
     $site_addr_one = trim(($r['site_addr'] ?? '') . ', ' . ($r['site_city'] ?? '') . ' ' . ($r['site_prov'] ?: ($r['site_state'] ?? '')) . ' ' . paydocs_postal($r['site_zip'] ?? ''), ', ');
     if (!isset($groups[$key])) {
+        try {
+            $paydocTransitPlain = privacy_open_sensitive((string)($r['bank_transit'] ?? ''));
+            $paydocInstitutionPlain = privacy_open_sensitive((string)($r['bank_institution'] ?? ''));
+            $paydocAccountPlain = privacy_open_sensitive((string)($r['bank_account'] ?? ''));
+        } catch (Throwable $e) {
+            http_response_code(500);
+            exit('Bank details could not be read. Check PAYROLL_DATA_KEY. No account number is shown.');
+        }
+        $paydocTransitMask = privacy_mask_account($paydocTransitPlain);
+        $paydocInstitutionMask = privacy_mask_account($paydocInstitutionPlain);
+        $paydocAccountMask = privacy_mask_account($paydocAccountPlain);
+        $paydocTransitMicr = preg_replace('/\D+/', '', $paydocTransitPlain) ?? '';
+        $paydocInstitutionMicr = preg_replace('/\D+/', '', $paydocInstitutionPlain) ?? '';
+        $paydocAccountMicr = preg_replace('/\D+/', '', $paydocAccountPlain) ?? '';
         $groups[$key] = [
             'emp_name'   => $r['emp_name'] ?: ('User #' . $r['user_id']),
             'user_id'    => (int)$r['user_id'],
@@ -260,9 +275,12 @@ foreach ($rows as $r) {
             'emp_street' => $emp_street,
             'emp_cityline' => $emp_cityline,
             'emp_addr'   => $emp_addr_one,
-            'transit'    => $r['bank_transit'] ?: '',
-            'institution'=> $r['bank_institution'] ?: '',
-            'account'    => $r['bank_account'] ?: '',
+            'transit'    => $paydocTransitMask,
+            'institution'=> $paydocInstitutionMask,
+            'account'    => $paydocAccountMask,
+            'transit_micr' => $paydocTransitMicr,
+            'institution_micr' => $paydocInstitutionMicr,
+            'account_micr' => $paydocAccountMicr,
             'site_name'  => $r['site_name'] ?: 'Employer',
             'corp_legal' => trim((string)($r['corp_legal_name'] ?? '')),
             'site_street'=> trim((string)($r['site_addr'] ?? '')),
@@ -993,9 +1011,9 @@ foreach ($groups as $g) {
             $pdf->SetXY($L+10, $top+$boxH-9);
             $pdf->SetFont('Courier','',13);
             $micr = "C" . str_pad($chq_no,6,'0',STR_PAD_LEFT) . "C   "
-                  . "A" . preg_replace('/\D/','',$g['transit'] ?: '00000') . "A "
-                  . (preg_replace('/\D/','',$g['institution'] ?: '000')) . " "
-                  . (preg_replace('/\D/','',$g['account'] ?: '0000000'));
+                  . "A" . preg_replace('/\D/','',($g['transit_micr'] ?? '') !== '' ? $g['transit_micr'] : '00000') . "A "
+                  . (preg_replace('/\D/','',($g['institution_micr'] ?? '') !== '' ? $g['institution_micr'] : '000')) . " "
+                  . (preg_replace('/\D/','',($g['account_micr'] ?? '') !== '' ? $g['account_micr'] : '0000000'));
             $pdf->Cell($W-20, 6, $micr, 0, 0, 'L');
 
             $pdf->SetTextColor(0,0,0);

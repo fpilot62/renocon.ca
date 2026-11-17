@@ -6,6 +6,7 @@
  */
 
 const PAYROLL_DB_PASS_PLACEHOLDER = 'replace-with-rotated-password';
+const PAYROLL_DATA_KEY_PLACEHOLDER = 'replace-with-random-key';
 
 function payroll_parse_env(string $text): array
 {
@@ -56,6 +57,56 @@ function payroll_db_config(string $path): array
         $cfg['DB_PORT'] = '3306';
     }
     return $cfg;
+}
+
+function payroll_app_root(): string
+{
+    return dirname(__DIR__);
+}
+
+/**
+ * True when $path is the app directory or a file inside it.
+ * The app directory is the web root for payroll.renocon.ca.
+ */
+function payroll_path_inside_app(string $path, string $appRoot): bool
+{
+    $path = str_replace('\\', '/', $path);
+    $root = rtrim(str_replace('\\', '/', $appRoot), '/');
+    $realPath = realpath($path);
+    $realRoot = realpath($appRoot);
+    if ($realPath !== false) {
+        $path = str_replace('\\', '/', $realPath);
+    }
+    if ($realRoot !== false) {
+        $root = str_replace('\\', '/', $realRoot);
+    }
+    return $path === $root || str_starts_with($path, $root . '/');
+}
+
+/**
+ * Live secrets live outside the web root.
+ * $explicit === false reads PAYROLL_ENV_FILE. An empty string uses the default path.
+ */
+function payroll_resolve_env_file(string $appRoot, $explicit = false): string
+{
+    if ($explicit === false) {
+        $fromEnv = getenv('PAYROLL_ENV_FILE');
+        $explicit = is_string($fromEnv) ? $fromEnv : '';
+    }
+    if (!is_string($explicit)) {
+        throw new RuntimeException('Database config path is not a string.');
+    }
+    if ($explicit !== '') {
+        if (payroll_path_inside_app($explicit, $appRoot)) {
+            throw new RuntimeException('Refusing a config file inside the web root. Set PAYROLL_ENV_FILE outside the site directory.');
+        }
+        return $explicit;
+    }
+    $path = dirname($appRoot, 2) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'payroll.env';
+    if (payroll_path_inside_app($path, $appRoot)) {
+        throw new RuntimeException('The default config path is inside the web root. Set PAYROLL_ENV_FILE outside the site directory.');
+    }
+    return $path;
 }
 
 function payroll_pdo(array $cfg): PDO

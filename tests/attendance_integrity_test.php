@@ -130,7 +130,7 @@ $feed = file_get_contents($root . '/get_staff_audit.php');
 check('audit feed hides deleted rows', strpos($feed, 'att_live_predicate') !== false);
 
 $sync = file_get_contents($root . '/daily_sync.php');
-check('daily sync loads the env file', strpos($sync, 'payroll_db_config') !== false && strpos($sync, 'config/payroll.env') !== false);
+check('daily sync loads the env file', strpos($sync, 'payroll_db_config') !== false && strpos($sync, 'payroll_resolve_env_file') !== false);
 check('daily sync has no inline password', !preg_match('/\$(db_)?pass(word)?\s*=\s*[\'"][^\'"]+[\'"]/i', $sync));
 
 foreach (['payroll_master_ledger.php', 'payroll_payment_status.php', 'generate_pay_documents.php', 'engine/payroll_cheque_lib.php', 'engine/payroll_payment_status_lib.php', 'engine/payroll_sheet_review_lib.php'] as $file) {
