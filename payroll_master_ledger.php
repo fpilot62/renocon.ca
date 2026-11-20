@@ -596,6 +596,40 @@ foreach ($raw as $r) {
     $period_tot['er_wcb'] += (float)$r['er_wcb'];
     $period_tot['er_vac'] += (float)$r['er_vac'];
 }
+// CPP and CPP2 are stored once per pay period. Shift rows stay at $0 for CPP.
+if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
+    $cppStats = pe_read_period_stats($pdo, $from_date, $to_date);
+    foreach ($sites_tree as &$siteRow) {
+        $sid = (int)($siteRow['site_id'] ?? 0);
+        foreach ($siteRow['emps'] as &$empRow) {
+            $k = ((int)$empRow['user_id']) . '|' . $sid;
+            if (!isset($cppStats[$k])) continue;
+            $cpp = round((float)$cppStats[$k]['cpp'] + (float)($cppStats[$k]['cpp2'] ?? 0), 2);
+            $cppEr = round((float)$cppStats[$k]['cpp_er'] + (float)($cppStats[$k]['cpp2_er'] ?? 0), 2);
+            if ($cpp < 0.005 && $cppEr < 0.005) continue;
+            $empRow['t_ee_cpp'] += $cpp;
+            $empRow['t_ee'] += $cpp;
+            $empRow['t_net'] = max(0, $empRow['t_net'] - $cpp);
+            $empRow['t_rem'] = max(0, $empRow['t_rem'] - $cpp);
+            $empRow['t_er_cpp'] += $cppEr;
+            $empRow['t_er'] += $cppEr;
+            $siteRow['t_ee_cpp'] += $cpp;
+            $siteRow['t_ee'] += $cpp;
+            $siteRow['t_net'] = max(0, $siteRow['t_net'] - $cpp);
+            $siteRow['t_rem'] = max(0, $siteRow['t_rem'] - $cpp);
+            $siteRow['t_er_cpp'] += $cppEr;
+            $siteRow['t_er'] += $cppEr;
+            $period_tot['ee_cpp'] += $cpp;
+            $period_tot['ee'] += $cpp;
+            $period_tot['net'] = max(0, $period_tot['net'] - $cpp);
+            $period_tot['rem'] = max(0, $period_tot['rem'] - $cpp);
+            $period_tot['er_cpp'] += $cppEr;
+            $period_tot['er'] += $cppEr;
+        }
+        unset($empRow);
+    }
+    unset($siteRow);
+}
 // sort sites by name, employees within each by name
 uksort($sites_tree, fn($a,$b) => strcmp($a,$b));
 foreach ($sites_tree as &$st) { uasort($st['emps'], fn($a,$b)=>strcmp($a['name'],$b['name'])); }

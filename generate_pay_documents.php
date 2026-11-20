@@ -338,16 +338,46 @@ foreach ($rows as $r) {
     unset($g);
 }
 
-foreach ($groups as &$g) {
-    if (function_exists('pe_read_period_stats') && !empty($g['user_id']) && !empty($g['wstart'])) {
-        $site = (int)($g['lines'][0]['site_id'] ?? 0);
-        $stats = pe_read_period_stats($pdo, $g['wstart'], $g['wend'] ?: $g['wstart'], [(int)$g['user_id']], $site ? [$site] : []);
-        $k = ((int)$g['user_id']) . '|' . $site;
-        if (isset($stats[$k])) {
-            $g['ee_cpp'] = (float)$stats[$k]['cpp'] + (float)($stats[$k]['cpp2'] ?? 0);
-            $g['er_cpp'] = (float)$stats[$k]['cpp_er'] + (float)($stats[$k]['cpp2_er'] ?? 0);
-        }
+function paydocs_apply_salary(PDO $pdo, array &$g): void
+{
+    $uid = (int)($g['user_id'] ?? 0);
+    if ($uid <= 0 || !function_exists('pe_line_for') || !function_exists('pe_normalize_employee_type')) {
+        return;
     }
+    try {
+        $st = $pdo->prepare('SELECT employee_type, COALESCE(salary_amount, 0) AS salary_amount FROM users WHERE id = ?');
+        $st->execute([$uid]);
+        $u = $st->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        return;
+    }
+    if (!$u) {
+        return;
+    }
+    $type = pe_normalize_employee_type($u['employee_type'] ?? 'hourly');
+    $salary = round((float)($u['salary_amount'] ?? 0), 2);
+    if ($type !== 'monthly' || $salary <= 0) {
+        return;
+    }
+    $site = (int)($g['site_id'] ?? 0);
+    $day = (string)($g['disp_end'] ?? '');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) {
+        $day = date('Y-m-d');
+    }
+    $line = pe_line_for($pdo, $uid, $site, $day, $salary);
+    $g['salaried'] = true;
+    $g['gross'] = (float)$line['pay_gross'];
+    $g['ee_cpp'] = (float)$line['cpp'] + (float)($line['cpp2'] ?? 0);
+    $g['ee_ei'] = (float)$line['ei'];
+    $g['ee_tax'] = (float)$line['income_tax'];
+    $g['er_cpp'] = (float)$line['cpp_er'] + (float)($line['cpp2_er'] ?? 0);
+    $g['er_ei'] = (float)$line['ei_er'];
+    $g['er_wcb'] = (float)$line['wcb'];
+    $g['vac_earn'] = (float)$line['vac'];
+    $g['er_vac'] = (float)($line['vac_accrued'] ?? $line['vac']);
+}
+
+foreach ($groups as &$g) {
     $pstart = $req_period_start ?: $g['wstart'];
     $pend   = $req_period_end ?: ($g['wend'] ?: ($g['period_end'] ?: $g['wstart']));
     if ($req_period_start && $req_period_end && $req_period_start > $req_period_end) {
@@ -357,6 +387,19 @@ foreach ($groups as &$g) {
     $g['disp_end']   = $pend;
     $issueBase = $req_period_end ?: $pend;
     $g['issue_date'] = $req_issue_date ?: date('Y-m-d', strtotime($issueBase . ' +5 days'));
+    paydocs_apply_salary($pdo, $g);
+    if (!empty($g['salaried'])) {
+        continue;
+    }
+    if (function_exists('pe_read_period_stats') && !empty($g['user_id']) && !empty($g['wstart'])) {
+        $site = (int)($g['lines'][0]['site_id'] ?? 0);
+        $stats = pe_read_period_stats($pdo, $g['wstart'], $g['wend'] ?: $g['wstart'], [(int)$g['user_id']], $site ? [$site] : []);
+        $k = ((int)$g['user_id']) . '|' . $site;
+        if (isset($stats[$k])) {
+            $g['ee_cpp'] = (float)$stats[$k]['cpp'] + (float)($stats[$k]['cpp2'] ?? 0);
+            $g['er_cpp'] = (float)$stats[$k]['cpp_er'] + (float)($stats[$k]['cpp2_er'] ?? 0);
+        }
+    }
 }
 unset($g);
 

@@ -64,3 +64,13 @@ Sheet review is unchanged. It posts a line only when the sheet says employee ded
 `engine/orgscope_guard.php` and an ROE XML builder are not on this branch. The new pages load the org-scope guard when that file is present, and they still use the privacy and organization checks that are on main. `pe_t4_roe()` returns insurable earnings and hours by line for an ROE builder to read. It does not write XML.
 
 The quick-hours patch calls `pe_line` once per earnings type and then `pe_refresh_period_stat`. After that refresh, the stored period total is the T4127 result. A preview that calls `pe_line` twice before anything is saved still sees each call as its own period. Pass `period_gross_before` on the second call, or preview with one combined gross, if that screen is merged later.
+
+## Live payroll source
+
+The November 19, 2026 production PHP tree is in this branch, without database credential files. `pe_line` and `pe_refresh_period_stat` in the live engine now call this calculator. The function signatures are the same. Extra return keys (`cpp2`, `cpp2_er`, `eht`, `edition`) are ignored by inserts that do not name them.
+
+Period CPP stays on `payroll_period_stat`, and the shift rows keep CPP at zero, which is how the ledger avoids charging the basic exemption once per shift. After a refresh, EI, income tax, WCB, and CPP2 on the lines add up to the period total. A period that already has a payment is not rewritten.
+
+Canada rows in bulk finalize, process payroll, process audit, manual pay, and stat shifts call `pe_line`. US, UK, and Australia rows in `bulk_finalize_autosplit.php` are unchanged.
+
+Install over production only the deduction files named in the pull request. Privacy pages, the cheque register, and sheet review that already differed between git and the November 19 server were left as the git versions. Do not copy those over the server as part of this change.
