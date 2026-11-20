@@ -1023,6 +1023,39 @@ function payroll_help_content(): array {
         ],
     ],
 
+    'roe.php' => [
+        'title'   => 'How to file an ROE',
+        'purpose' => 'Build a Record of Employment from finalized pay lines, download the ROE Web payroll extract (.BLK), then upload, review, and submit it yourself in ROE Web. This app does not send the file.',
+        'how'     => [
+            'Open How to file an ROE and pick the employee. The checklist shows which fields the ROE code reads, and links to Employee Hub to edit them. A real SIN, legal name, street, city, and postal code have to be on the employee before the draft can pass.',
+            'On ROE (Record of Employment), under New ROE, choose Employee, Legal employer (BN15), and Reason (block 16). Last day for which paid is optional. Press Create draft from pay lines.',
+            'On the draft, set Block 14 expected recall to U – Unknown, N – Not returning, or Y – Expected date of recall. Y needs Recall date (only for Y). Press Mark ready to download when the red list is empty.',
+            'Back on the list, tick the ready rows. Leave Issue = D: ROE Web saves as draft (review there). Press Download selected ready ROEs (.BLK).',
+            'In ROE Web, sign in, choose Upload a Payroll Extract file, then open View Payroll Extract files. A draft is not issued. Review it and submit it. ROE Web assigns a serial number only after the ROE is submitted and passes the edits. Drafts that are not submitted are deleted after 15 days.',
+        ],
+        'calc'    => [
+            'Blocks 10, 11, 12, 15A, and 15C are filled from finalized pay lines at that employer\'s stores: regular, overtime, and travel hours, and total gross by work date.',
+            'The file is XML version 2.0 (FileVersion W-2.0) with a .BLK name. It is checked against the ROE Web schema before download.',
+        ],
+        'notes'   => [
+            'Issue = S: ROE Web submits on upload. Use that only when you intend to issue on upload. The default is Issue = D, which leaves a draft in ROE Web.',
+            'Nothing on this page is sent to Service Canada.',
+        ],
+        'tour'    => [
+            ['sel'=>null, 'title'=>'File an ROE', 'body'=>'This tour is the ROE path. First check the employee, then create the draft and pick the reason, set the recall code on the draft, download the payroll extract, and upload it in ROE Web. Review it there, then submit. A draft is not issued.'],
+            ['sel'=>'#roeHowToFile', 'title'=>'Check the employee', 'body'=>'Open How to file an ROE. Pick the employee. The checklist names the database columns and shows what is missing. Edit the person in Employee Hub before you create the draft.'],
+            ['sel'=>'select[name="user_id"]', 'title'=>'Employee', 'body'=>'Under New ROE, the Employee list is this organization only. Choose the person.'],
+            ['sel'=>'select[name="bn15"]', 'title'=>'Legal employer (BN15)', 'body'=>'Choose the CRA payroll account. One file is made per business number. The account comes from the store\'s payroll account.'],
+            ['sel'=>'select[name="reason_code"]', 'title'=>'Reason (block 16)', 'body'=>'Pick the reason code. Common ones: A00 shortage of work, E00 quit, M00 dismissal, K00 other. K00 and K15 need a comment in Block 18 on the draft. The full list is in the dropdown.'],
+            ['sel'=>'#roeCreateDraft', 'title'=>'Create the draft', 'body'=>'Last day for which paid can stay blank. The app then uses the last paid work day. Press Create draft from pay lines. Blocks 10, 11, 12, 15A, and 15C come from finalized pay lines.'],
+            ['sel'=>null, 'title'=>'Recall code', 'body'=>'On the draft, Block 14 expected recall is U – Unknown, N – Not returning, or Y – Expected date of recall. Y needs Recall date (only for Y), and that date must be after the last day for which paid. Y is not allowed for quit, mandatory retirement, or dismissal. Press Mark ready to download when the red list is clear.'],
+            ['sel'=>'#roeIssue', 'title'=>'Issue = D or Issue = S', 'body'=>'Tick the ready ROEs. Issue = D means ROE Web saves a draft for you to review. Issue = S means ROE Web submits on upload. Leave D unless you mean to issue immediately.'],
+            ['sel'=>'#roeDownloadBlk', 'title'=>'Download the payroll extract', 'body'=>'Press Download selected ready ROEs (.BLK). One business number is a .BLK file. Several come as a zip, one .BLK per business number. The file is checked against the schema first.'],
+            ['sel'=>null, 'title'=>'Upload in ROE Web', 'body'=>'Sign in to ROE Web with a GCKey or a Sign-In Partner. Choose Upload a Payroll Extract file and upload the .BLK. Then open View Payroll Extract files.'],
+            ['sel'=>null, 'title'=>'Review, then submit', 'body'=>'An uploaded draft is not issued. Review it. Submit it in ROE Web. A serial number is assigned only after it is submitted and passes the edits. If you do not submit, ROE Web deletes the draft after 15 days. Come back here and press Record as issued with that serial.'],
+        ],
+    ],
+
     ];
 }
 
