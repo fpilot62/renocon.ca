@@ -317,6 +317,383 @@ if (!function_exists('sh_wage_rows')) {
     }
 }
 
+if (!function_exists('sh_table_cols')) {
+    function sh_table_cols(PDO $pdo, string $table): array {
+        static $cache = [];
+        $key = spl_object_id($pdo) . '|' . $table;
+        if (isset($cache[$key])) {
+            return $cache[$key];
+        }
+        $out = [];
+        try {
+            if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+                $q = $pdo->query('PRAGMA table_info(' . $table . ')');
+                if ($q) {
+                    foreach ($q as $col) {
+                        $out[strtolower((string)$col['name'])] = true;
+                    }
+                }
+            } else {
+                $st = $pdo->prepare('SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?');
+                $st->execute([$table]);
+                foreach ($st as $col) {
+                    $out[strtolower((string)$col['COLUMN_NAME'])] = true;
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        return $cache[$key] = $out;
+    }
+}
+
+if (!function_exists('sh_on_after_days')) {
+    function sh_on_after_days(): int {
+        $n = (int)(getenv('SH_ON_AFTER_DAYS') ?: 28);
+        return $n > 0 ? $n : 28;
+    }
+}
+
+if (!function_exists('sh_date_only')) {
+    function sh_date_only($value): ?string {
+        $value = substr(trim((string)$value), 0, 10);
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) && $value !== '0000-00-00' ? $value : null;
+    }
+}
+
+if (!function_exists('sh_employment_end')) {
+    /** Earliest known end: users end date, service end date, or an ROE last day paid. */
+    function sh_employment_end(PDO $pdo, int $userId, int $siteId, int $orgId = 0): ?string {
+        $dates = [];
+        $userCols = sh_table_cols($pdo, 'users');
+        foreach (['enddate', 'end_date', 'termination_date'] as $col) {
+            if (!isset($userCols[$col])) {
+                continue;
+            }
+            try {
+                $st = $pdo->prepare("SELECT `$col` FROM users WHERE id=? LIMIT 1");
+                $st->execute([$userId]);
+                $d = sh_date_only($st->fetchColumn());
+                if ($d) {
+                    $dates[] = $d;
+                }
+                if ($orgId <= 0 && isset($userCols['org_id'])) {
+                    $st = $pdo->prepare('SELECT org_id FROM users WHERE id=? LIMIT 1');
+                    $st->execute([$userId]);
+                    $orgId = (int)$st->fetchColumn();
+                }
+            } catch (Throwable $e) {
+            }
+            break;
+        }
+        $svcCols = sh_table_cols($pdo, 'employee_company_service');
+        foreach (['end_date', 'enddate'] as $col) {
+            if (!isset($svcCols[$col])) {
+                continue;
+            }
+            try {
+                $st = $pdo->prepare("SELECT `$col` FROM employee_company_service WHERE user_id=? AND site_id=? AND `$col` IS NOT NULL ORDER BY `$col` LIMIT 1");
+                $st->execute([$userId, $siteId]);
+                $d = sh_date_only($st->fetchColumn());
+                if ($d) {
+                    $dates[] = $d;
+                }
+            } catch (Throwable $e) {
+            }
+        }
+        if (isset(sh_table_cols($pdo, 'roe_records')['last_day_paid'])) {
+            try {
+                $sql = "SELECT MIN(last_day_paid) FROM roe_records WHERE user_id=? AND last_day_paid IS NOT NULL AND COALESCE(status,'') NOT IN ('void','cancelled')";
+                $params = [$userId];
+                if ($orgId > 0 && isset(sh_table_cols($pdo, 'roe_records')['org_id'])) {
+                    $sql .= ' AND org_id=?';
+                    $params[] = $orgId;
+                }
+                $st = $pdo->prepare($sql);
+                $st->execute($params);
+                $d = sh_date_only($st->fetchColumn());
+                if ($d) {
+                    $dates[] = $d;
+                }
+            } catch (Throwable $e) {
+            }
+        }
+        if (!$dates) {
+            return null;
+        }
+        sort($dates);
+        return $dates[0];
+    }
+}
+
+if (!function_exists('sh_employment_ended_before')) {
+    function sh_employment_ended_before(PDO $pdo, int $userId, int $siteId, int $orgId, string $holidayDate): bool {
+        $end = sh_employment_end($pdo, $userId, $siteId, $orgId);
+        return $end !== null && $end < substr($holidayDate, 0, 10);
+    }
+}
+
+if (!function_exists('sh_missed_status')) {
+    function sh_missed_status(string $status): bool {
+        return in_array(strtolower(trim($status)), ['missed', 'absent', 'no-show', 'noshow'], true);
+    }
+}
+
+if (!function_exists('sh_on_review_flags')) {
+    /**
+     * Ontario last-and-first questions. Empty means the line can be posted.
+     * no_shift_after is raised only after the watch window has closed.
+     *
+     * @return list<string>
+     */
+    function sh_on_review_flags(PDO $pdo, int $userId, int $siteId, string $holidayDate, ?string $asOf = null, ?int $afterDays = null): array {
+        $holiday = substr($holidayDate, 0, 10);
+        $asOf = $asOf ?: date('Y-m-d');
+        $afterDays = $afterDays ?? sh_on_after_days();
+        $afterEnd = date('Y-m-d', strtotime($holiday . ' +' . $afterDays . ' days'));
+        $flags = [];
+        if (sh_on_missed_last_shift($pdo, $userId, $siteId, $holiday)) {
+            $flags[] = 'missed_before';
+        }
+        try {
+            $st = $pdo->prepare(
+                "SELECT status FROM attendance
+                  WHERE user_id=? AND site_id=? AND substr(clock_in,1,10) > ? AND substr(clock_in,1,10) <= ?
+                  ORDER BY clock_in ASC LIMIT 1"
+            );
+            $st->execute([$userId, $siteId, $holiday, $afterEnd]);
+            $status = $st->fetchColumn();
+            if ($status !== false && sh_missed_status((string)$status)) {
+                $flags[] = 'missed_after';
+            }
+        } catch (Throwable $e) {
+        }
+        if ($asOf >= $afterEnd) {
+            $seen = false;
+            try {
+                $st = $pdo->prepare(
+                    "SELECT 1 FROM attendance
+                      WHERE user_id=? AND site_id=? AND substr(clock_in,1,10) > ? AND substr(clock_in,1,10) <= ?
+                      LIMIT 1"
+                );
+                $st->execute([$userId, $siteId, $holiday, $afterEnd]);
+                $seen = (bool)$st->fetchColumn();
+            } catch (Throwable $e) {
+            }
+            if (!$seen) {
+                try {
+                    $st = $pdo->prepare(
+                        "SELECT 1 FROM payroll_finalized
+                          WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
+                            AND COALESCE(category,'') NOT LIKE 'Statutory%'
+                          LIMIT 1"
+                    );
+                    $st->execute([$userId, $siteId, $holiday, $afterEnd]);
+                    $seen = (bool)$st->fetchColumn();
+                } catch (Throwable $e) {
+                }
+            }
+            if (!$seen) {
+                $flags[] = 'no_shift_after';
+            }
+        }
+        return array_values(array_unique($flags));
+    }
+}
+
+if (!function_exists('sh_ensure_holiday_review')) {
+    function sh_ensure_holiday_review(PDO $pdo): void {
+        $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'sqlite') {
+            $pdo->exec("CREATE TABLE IF NOT EXISTS stat_holiday_review (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INT NOT NULL, user_id INT NOT NULL, site_id INT NOT NULL,
+                holiday_date TEXT NOT NULL, holiday_name TEXT, province TEXT,
+                amount REAL NOT NULL DEFAULT 0, flags TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', decision TEXT,
+                decided_by INT, decided_at TEXT, note TEXT, created_at TEXT,
+                UNIQUE (org_id, user_id, site_id, holiday_date))");
+            return;
+        }
+        $pdo->exec("CREATE TABLE IF NOT EXISTS stat_holiday_review (
+            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            org_id INT NOT NULL, user_id INT NOT NULL, site_id INT NOT NULL,
+            holiday_date DATE NOT NULL, holiday_name VARCHAR(120) NULL, province VARCHAR(8) NULL,
+            amount DECIMAL(12,2) NOT NULL DEFAULT 0, flags VARCHAR(80) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending', decision VARCHAR(20) NULL,
+            decided_by INT NULL, decided_at DATETIME NULL, note VARCHAR(255) NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_stat_review (org_id, user_id, site_id, holiday_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+}
+
+if (!function_exists('sh_review_row')) {
+    function sh_review_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate): ?array {
+        try {
+            $st = $pdo->prepare('SELECT * FROM stat_holiday_review WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=? LIMIT 1');
+            $st->execute([$orgId, $userId, $siteId, substr($holidayDate, 0, 10)]);
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+            return $row ?: null;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+}
+
+if (!function_exists('sh_queue_review')) {
+    function sh_queue_review(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, float $amount, array $flags): void {
+        sh_ensure_holiday_review($pdo);
+        $existing = sh_review_row($pdo, $orgId, $userId, $siteId, $holidayDate);
+        $flagText = implode(',', $flags);
+        if ($existing && ($existing['status'] ?? '') !== 'pending') {
+            return;
+        }
+        if ($existing) {
+            $pdo->prepare('UPDATE stat_holiday_review SET amount=?, flags=?, holiday_name=?, province=? WHERE id=?')
+                ->execute([round($amount, 2), $flagText, $holidayName, $province, (int)$existing['id']]);
+            return;
+        }
+        $pdo->prepare('INSERT INTO stat_holiday_review (org_id, user_id, site_id, holiday_date, holiday_name, province, amount, flags, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+            ->execute([$orgId, $userId, $siteId, substr($holidayDate, 0, 10), $holidayName, $province, round($amount, 2), $flagText, 'pending', date('Y-m-d H:i:s')]);
+    }
+}
+
+if (!function_exists('sh_should_hold_stat')) {
+    /** True when a payable statutory line must not be written yet. */
+    function sh_should_hold_stat(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, float $amount, ?string $asOf = null, bool $queue = true): bool {
+        if (sh_normalize_province($province) !== 'ON') {
+            return false;
+        }
+        $flags = sh_on_review_flags($pdo, $userId, $siteId, $holidayDate, $asOf);
+        $row = sh_review_row($pdo, $orgId, $userId, $siteId, $holidayDate);
+        if (!$flags) {
+            if ($row && ($row['status'] ?? '') === 'pending' && strpos((string)$row['flags'], 'no_shift_after') !== false && strpos((string)$row['flags'], 'missed') === false) {
+                $pdo->prepare("UPDATE stat_holiday_review SET status='employed', decision='employed', decided_at=? WHERE id=?")
+                    ->execute([date('Y-m-d H:i:s'), (int)$row['id']]);
+            }
+            return false;
+        }
+        $status = (string)($row['status'] ?? '');
+        if (in_array($status, ['employed', 'reasonable', 'leave_pay'], true)) {
+            return false;
+        }
+        if (in_array($status, ['quit', 'no_cause', 'deny'], true)) {
+            return true;
+        }
+        if ($queue) {
+            sh_queue_review($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, $amount, $flags);
+        }
+        return true;
+    }
+}
+
+if (!function_exists('sh_review_audit')) {
+    function sh_review_audit(PDO $pdo, int $userId, string $decision, string $note): void {
+        if (!function_exists('aa_log')) {
+            return;
+        }
+        try {
+            $st = $pdo->prepare('SELECT id FROM attendance WHERE user_id=? ORDER BY id DESC LIMIT 1');
+            $st->execute([$userId]);
+            $id = (int)$st->fetchColumn();
+            if ($id > 0) {
+                aa_log($pdo, 'update', $id, null, null, 'Holiday eligibility review: ' . $decision . ' ' . $note);
+            }
+        } catch (Throwable $e) {
+        }
+    }
+}
+
+if (!function_exists('sh_apply_review_decision')) {
+    function sh_apply_review_decision(PDO $pdo, int $orgId, int $reviewId, string $decision, int $actorId, ?string $endDate = null): bool {
+        sh_ensure_holiday_review($pdo);
+        $st = $pdo->prepare('SELECT * FROM stat_holiday_review WHERE id=? AND org_id=?');
+        $st->execute([$reviewId, $orgId]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return false;
+        }
+        $allowed = ['quit', 'leave_wait', 'leave_pay', 'employed', 'reasonable', 'no_cause'];
+        if (!in_array($decision, $allowed, true)) {
+            return false;
+        }
+        $pdo->prepare('UPDATE stat_holiday_review SET status=?, decision=?, decided_by=?, decided_at=?, note=? WHERE id=?')
+            ->execute([$decision, $decision, $actorId, date('Y-m-d H:i:s'), $endDate, $reviewId]);
+        if ($decision === 'quit' && $endDate && sh_date_only($endDate)) {
+            $userCols = sh_table_cols($pdo, 'users');
+            foreach (['enddate', 'end_date', 'termination_date'] as $col) {
+                if (isset($userCols[$col])) {
+                    $pdo->prepare("UPDATE users SET `$col`=? WHERE id=? AND org_id=?")->execute([$endDate, (int)$row['user_id'], $orgId]);
+                    break;
+                }
+            }
+        }
+        sh_review_audit($pdo, (int)$row['user_id'], $decision, (string)$row['holiday_date']);
+        if (in_array($decision, ['employed', 'reasonable', 'leave_pay'], true)) {
+            sh_post_stat_line($pdo, $orgId, (int)$row['user_id'], (int)$row['site_id'], (string)$row['holiday_date'], (string)$row['holiday_name'], (string)$row['province'], $actorId);
+        }
+        return true;
+    }
+}
+
+if (!function_exists('sh_release_leave_reviews')) {
+    function sh_release_leave_reviews(PDO $pdo, int $orgId, int $userId, int $siteId): int {
+        try {
+            $st = $pdo->prepare("SELECT * FROM stat_holiday_review WHERE org_id=? AND user_id=? AND site_id=? AND status='leave_wait'");
+            $st->execute([$orgId, $userId, $siteId]);
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return 0;
+        }
+        $n = 0;
+        foreach ($rows as $row) {
+            $holiday = (string)$row['holiday_date'];
+            $seen = false;
+            try {
+                $q = $pdo->prepare("SELECT 1 FROM payroll_finalized WHERE user_id=? AND site_id=? AND work_date > ? AND COALESCE(category,'') NOT LIKE 'Statutory%' LIMIT 1");
+                $q->execute([$userId, $siteId, $holiday]);
+                $seen = (bool)$q->fetchColumn();
+            } catch (Throwable $e) {
+            }
+            if (!$seen) {
+                try {
+                    $q = $pdo->prepare('SELECT 1 FROM attendance WHERE user_id=? AND site_id=? AND substr(clock_in,1,10) > ? LIMIT 1');
+                    $q->execute([$userId, $siteId, $holiday]);
+                    $seen = (bool)$q->fetchColumn();
+                } catch (Throwable $e) {
+                }
+            }
+            if ($seen && sh_apply_review_decision($pdo, $orgId, (int)$row['id'], 'leave_pay', 0, null)) {
+                $n++;
+            }
+        }
+        return $n;
+    }
+}
+
+if (!function_exists('sh_pending_review_count')) {
+    function sh_pending_review_count(PDO $pdo, int $orgId, string $from, string $to): int {
+        $st = $pdo->prepare("SELECT COUNT(*) FROM stat_holiday_review WHERE org_id=? AND status IN ('pending','leave_wait') AND holiday_date BETWEEN ? AND ?");
+        $st->execute([$orgId, $from, $to]);
+        return (int)$st->fetchColumn();
+    }
+}
+
+if (!function_exists('sh_review_banner_html')) {
+    function sh_review_banner_html(PDO $pdo, int $orgId, string $from, string $to): string {
+        try {
+            $n = sh_pending_review_count($pdo, $orgId, $from, $to);
+        } catch (Throwable $e) {
+            return '';
+        }
+        if ($n < 1) {
+            return '';
+        }
+        $href = 'stat_holiday_review.php?org_id=' . $orgId . '&from_date=' . urlencode($from) . '&to_date=' . urlencode($to);
+        return '<div class="alert alert-warning font-weight-bold">Holiday eligibility review: ' . $n . ' pending. <a href="' . htmlspecialchars($href) . '">Open the review list</a></div>';
+    }
+}
+
 if (!function_exists('sh_on_missed_last_shift')) {
     function sh_on_missed_last_shift(PDO $pdo, int $userId, int $siteId, string $holidayDate): bool {
         try {
@@ -345,6 +722,17 @@ if (!function_exists('sh_compute_stat_pay')) {
         $blank = ['eligible' => false, 'amount' => 0.0, 'reason' => '', 'formula' => '', 'from' => $from, 'to' => $to, 'days' => 0, 'wages' => 0.0, 'vacation' => 0.0];
         if (!in_array($prov, ['BC', 'ON', 'SK'], true)) {
             $blank['reason'] = 'province is not BC, ON, or SK';
+            return $blank;
+        }
+        $orgId = 0;
+        try {
+            $ost = $pdo->prepare('SELECT org_id FROM users WHERE id=? LIMIT 1');
+            $ost->execute([$userId]);
+            $orgId = (int)$ost->fetchColumn();
+        } catch (Throwable $e) {
+        }
+        if (sh_employment_ended_before($pdo, $userId, $siteId, $orgId, $holidayDate)) {
+            $blank['reason'] = 'employment ended before the holiday';
             return $blank;
         }
         $start = sh_start_date($pdo, $userId, $siteId);
@@ -393,10 +781,6 @@ if (!function_exists('sh_compute_stat_pay')) {
             $blank['wages'] = sh_money($regular);
             $blank['vacation'] = sh_money($vacation);
             $blank['days'] = $dayCount;
-            if (sh_on_missed_last_shift($pdo, $userId, $siteId, $holidayDate)) {
-                $blank['reason'] = 'missed the last shift before the holiday';
-                return $blank;
-            }
             $blank['eligible'] = true;
             $blank['amount'] = sh_money(($regular + $vacation) / 20);
             $blank['reason'] = 'eligible';
@@ -487,12 +871,15 @@ if (!function_exists('sh_finalized_stat_line')) {
 }
 
 if (!function_exists('sh_post_stat_line')) {
-    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = ''): bool {
+    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = '', ?string $asOf = null): bool {
         if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {
             return false;
         }
         $calc = sh_compute_stat_pay($pdo, $userId, $siteId, $holidayDate, $province);
         if (!$calc['eligible'] || $calc['amount'] < 0.01) {
+            return false;
+        }
+        if (sh_should_hold_stat($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, (float)$calc['amount'], $asOf)) {
             return false;
         }
         if (!function_exists('pe_line')) {
@@ -577,6 +964,12 @@ if (!function_exists('sh_after_finalize')) {
         foreach (sh_calendar_holidays($province, $start, $end) as $holiday) {
             if (sh_post_stat_line($pdo, $orgId, $userId, $siteId, $holiday['holiday_date'], $holiday['holiday_name'], $province, $byUser)) {
                 $posted++;
+            }
+        }
+        if ($province === 'ON') {
+            try {
+                sh_release_leave_reviews($pdo, $orgId, $userId, $siteId);
+            } catch (Throwable $e) {
             }
         }
         if (function_exists('pe_refresh_period_stat')) {

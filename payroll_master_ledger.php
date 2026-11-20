@@ -891,6 +891,11 @@ function ledgerOnOrgChange(sel){
             </form>
         </div>
 
+        <?php
+        $statHolLib = __DIR__ . '/payroll_engine/stat_holidays.php';
+        if (is_file($statHolLib)) { require_once $statHolLib; }
+        if (function_exists('sh_review_banner_html')) { echo sh_review_banner_html($pdo, (int)$user_org_id, $from_date, $to_date); }
+        ?>
         <?php if (ledger_stat_visible((float)$stat_summary['stat_total'])): ?>
         <div class="mb-2 font-weight-bold" style="color:#854d0e;">
             <span class="stat-pay-mark"><?= (int)$stat_summary['employees'] ?> employees with stat pay, $<?= number_format($stat_summary['stat_total'], 2) ?> total</span>

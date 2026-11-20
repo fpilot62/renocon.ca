@@ -84,11 +84,12 @@ seed_person($on, 4, 20, 'ON', '2025-01-01');
 add_day($on, 3, 20, $from, 2000, 0, 80);
 add_day($on, 4, 20, $from, 2000, 0, 80);
 $on->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (1,3,20,?,?)')->execute([$from, 'worked']);
+$on->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (3,3,20,?,?)')->execute(['2026-09-20', 'worked']);
 $on->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (2,4,20,?,?)')->execute([$to, 'missed']);
 $onOk = sh_compute_stat_pay($on, 3, 20, '2026-09-07', 'ON');
 $onNo = sh_compute_stat_pay($on, 4, 20, '2026-09-07', 'ON');
 check('ON public holiday pay is wages plus vacation over 20', $onOk['eligible'] && abs($onOk['amount'] - 104) < 0.01);
-check('ON employee who missed the last shift is not eligible', !$onNo['eligible']);
+check('ON missed last shift still has an amount for review', $onNo['eligible'] && abs($onNo['amount'] - 104) < 0.01);
 check('ON posts once', sh_after_finalize($on, 3, 20, '2026-09-07', 1) === 1 && stat_count($on, 3, 20, '2026-09-07') === 1);
 check('ON finalize again does not duplicate', sh_after_finalize($on, 3, 20, '2026-09-07', 1) === 0 && stat_count($on, 3, 20, '2026-09-07') === 1);
 
