@@ -11,6 +11,11 @@
 #   already-paid statutory lines that are left paid
 # The review table from the undeployed holiday-review change is not used.
 # Approval columns on payroll_finalized are the schema this install needs.
+# ops/t4127_stat_backfill.php is not a web page. deploy_stat_backfill_v1.sh
+# downloads it to $STAGE/t4127_stat_backfill.php (default /root/t4127-stage)
+# and runs it from there, so the web root often has no copy. A missing web
+# copy is a new file. The stage copy, when it is there, must still match a
+# known hash. go updates that copy, and rollback puts it back.
 set -euo pipefail
 M=${1:-check}
 export PAYROLL_APP=${PAYROLL_APP:-/home/renocon/public_html/payroll}
@@ -30,7 +35,7 @@ payroll_master_ledger.php d97a3af30d0c1879c6482c560defe330,0364d96da0960959067ae
 payroll_master_ledger1.php 23d06f90bf727fdb5ff4a3ed5d27bfea,8163a859e9d5e46ca179ff9a33db8790,614e8a3895693d1c08ecc69e0371b1f6,0688677ee41046e0a5cb2055b6c69f3f,742e3cd8369734bdb58c9ef83ef3b87f 298757d67946f5e7a6178f346206d699
 generate_stat_shifts.php 3385210d69e3e1a99f14dd2fab0b9bee,45258fe978ae9b0a403b68bab27bb680,b8c5122dae4f7ceed8e98f53c1cf1143 9937224cc569b2875c24bd1c48c05b46
 generate_pay_documents.php 88f43817563e848678a5544a1051f1b1,e0871e140bf263197cee45dd48425836 0f8281d8e4737fb4336f0ba6265655eb
-ops/t4127_stat_backfill.php 7a152d9946968c7ab4d5b2acdec0ef6a,85881f9183edd90999d43393eb7b1236 85881f9183edd90999d43393eb7b1236
+ops/t4127_stat_backfill.php -,7a152d9946968c7ab4d5b2acdec0ef6a,85881f9183edd90999d43393eb7b1236 85881f9183edd90999d43393eb7b1236
 stat_holiday_review.php -,962a5f17e30d97cdadcddfb830a4dabe bb2ffd0a3b0101aeff1fff1be6d50b6f
 migrations/20261121_stat_approval.sql - a62605dba3685a1f508cc3d4a9343ed1'
 
@@ -74,6 +79,30 @@ for line in difflib.ndiff(base, live):
 sys.exit(0 if ok else 1)
 PY
 }
+# deploy_stat_backfill_v1.sh runs this from the stage dir, not the web root.
+stage_runner() { echo "$STAGE/t4127_stat_backfill.php"; }
+known_hash() {
+  local prevs=$1 want=$2 newMd=$3 p
+  [[ $want == "$newMd" ]] && return 0
+  local prev
+  IFS=',' read -ra prev <<< "$prevs"
+  for p in "${prev[@]}"; do
+    [[ $p != '-' && $want == "$p" ]] && return 0
+  done
+  return 1
+}
+check_stage_runner() {
+  local prevs=$1 newMd=$2 runner runnerMd
+  runner=$(stage_runner)
+  [[ -f $runner ]] || return 0
+  runnerMd=$(md "$runner")
+  if known_hash "$prevs" "$runnerMd" "$newMd"; then
+    echo "CLEAN stage runner $runner $runnerMd"
+    return 0
+  fi
+  echo "DRIFT $runner live $runnerMd"
+  return 1
+}
 check_one() {
   local rel=$1 prevs=$2 newMd=$3
   local bundle="$STAGE/bundle/$rel" live="$APP/$rel"
@@ -84,25 +113,40 @@ check_one() {
   [[ $got == "$newMd" ]] || { echo "BUNDLE_MD5_BAD $rel want $newMd"; return 1; }
   if [[ ! -f $live ]]; then
     case ",$prevs," in
-      *,-,*) echo "CLEAN $rel new file"; return 0 ;;
+      *,-,*)
+        if [[ $rel == ops/t4127_stat_backfill.php ]]; then
+          check_stage_runner "$prevs" "$newMd" || return 1
+        fi
+        echo "CLEAN $rel new file"
+        return 0
+        ;;
     esac
     echo "MISSING $live"; return 1
   fi
   local liveMd
   liveMd=$(md "$live")
-  if [[ $liveMd == "$newMd" ]]; then echo "CLEAN $rel live $liveMd"; return 0; fi
+  if [[ $liveMd == "$newMd" ]]; then
+    if [[ $rel == ops/t4127_stat_backfill.php ]]; then check_stage_runner "$prevs" "$newMd" || return 1; fi
+    echo "CLEAN $rel live $liveMd"; return 0
+  fi
   if [[ $prevs != '-' ]]; then
     local prev p
     IFS=',' read -ra prev <<< "$prevs"
     for p in "${prev[@]}"; do
-      if [[ $p != '-' && $liveMd == "$p" ]]; then echo "CLEAN $rel live $liveMd"; return 0; fi
+      if [[ $p != '-' && $liveMd == "$p" ]]; then
+        if [[ $rel == ops/t4127_stat_backfill.php ]]; then check_stage_runner "$prevs" "$newMd" || return 1; fi
+        echo "CLEAN $rel live $liveMd"; return 0
+      fi
     done
   fi
   local snap
   for snap in "$STAT" "$LEDGER2" "$LEDGER3" "$PINNED"; do
     local base="$STAGE/snap/$snap/$rel"
     if ! fetch_sha "$snap" "$rel" "$base"; then continue; fi
-    if only_osg "$base" "$live"; then echo "CLEAN $rel org-scope lines only"; return 0; fi
+    if only_osg "$base" "$live"; then
+      if [[ $rel == ops/t4127_stat_backfill.php ]]; then check_stage_runner "$prevs" "$newMd" || return 1; fi
+      echo "CLEAN $rel org-scope lines only"; return 0
+    fi
   done
   echo "DRIFT $rel live $liveMd"
   return 1
@@ -124,6 +168,15 @@ restore_files() {
       echo "Removed new $rel"
     fi
   done <<< "$MAN"
+  local runner
+  runner=$(stage_runner)
+  if [[ -f $src/stage/t4127_stat_backfill.php ]]; then
+    cp -f "$src/stage/t4127_stat_backfill.php" "$runner"
+    echo "Restored $runner"
+  elif [[ -f $src/stage/was-absent ]]; then
+    rm -f "$runner"
+    echo "Removed new $runner"
+  fi
 }
 smoke() {
   local url=$1 follow=$2 code
@@ -174,6 +227,13 @@ case "$M" in
       fi
     done <<< "$MAN"
     echo "Backup $BK/pre-stat-approval-$TS.sql.gz and $DEST"
+    runner=$(stage_runner)
+    mkdir -p "$DEST/stage"
+    if [[ -f $runner ]]; then
+      cp -f "$runner" "$DEST/stage/t4127_stat_backfill.php"
+    else
+      : > "$DEST/stage/was-absent"
+    fi
     while read -r rel _ _; do
       [[ -n $rel ]] || continue
       if [[ -f $APP/$rel ]]; then keep_osg "$APP/$rel" "$STAGE/bundle/$rel"; fi
@@ -188,6 +248,12 @@ case "$M" in
         fi
       fi
     done <<< "$MAN"
+    cp -f "$STAGE/bundle/ops/t4127_stat_backfill.php" "$runner"
+    if ! php -l "$runner"; then
+      echo "php -l failed on the stage backfill runner, restoring files"
+      restore_files "$TS"
+      exit 1
+    fi
     if ! ${T4127_MYSQL:-mysql} "$DB" < "$APP/migrations/20261121_stat_approval.sql"; then
       echo "migration failed, restoring files. Database restore: bash $0 rollback $TS"
       restore_files "$TS"
