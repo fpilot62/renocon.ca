@@ -8,6 +8,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
     require_once __DIR__ . '/break_waiver_finalize_guard.php';
 }
@@ -216,6 +217,9 @@ foreach ($ids as $id) {
 
         // 4. Update parent shift status so it hides from active audit view panels
         $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$id]);
+        if (!empty($canada) && !empty($shift['user_id']) && !empty($shift['site_id']) && !empty($work_date)) {
+            sh_after_finalize($pdo, (int)$shift['user_id'], (int)$shift['site_id'], $work_date, (int)($_SESSION['user_id'] ?? 0));
+        }
 
         $pdo->commit();
         $results['success'][] = "ID $id: Split and finalized successfully.";

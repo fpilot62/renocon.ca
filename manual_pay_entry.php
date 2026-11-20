@@ -209,6 +209,11 @@ function mpe_insert_line(PDO $pdo, int $orgId, int $siteId, int $userId, string 
         if (function_exists('pe_refresh_period_stat')) {
             pe_refresh_period_stat($pdo, $userId, $siteId, $entryDate);
         }
+        if (!$isDeduction && !in_array($reason, ['bonus', 'termination', 'car_allowance', 'benefit'], true)
+            && is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+            require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+            sh_after_finalize($pdo, $userId, $siteId, $entryDate, $actorId);
+        }
     }
 
     return ['id' => $entryId, 'include' => $include];

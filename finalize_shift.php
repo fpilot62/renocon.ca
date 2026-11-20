@@ -48,15 +48,7 @@ if (!$attendance_id) {
 }
 
 try {
-    // 4. LOAD OPERATIONAL GLOBAL SETTINGS
-    $settings_query = $pdo->query("SELECT * FROM payroll_settings LIMIT 1");
-    $settings = $settings_query ? $settings_query->fetch(PDO::FETCH_ASSOC) : [];
-
-    $fed_rate = isset($settings['fed_tax_rate']) ? (float)$settings['fed_tax_rate'] : 0.15;
-    $cpp_rate = isset($settings['cpp_rate']) ? (float)$settings['cpp_rate'] : 0.0595;
-    $ei_rate  = isset($settings['ei_rate']) ? (float)$settings['ei_rate'] : 0.0163;
-    $wcb_rate = isset($settings['wcb_rate']) ? (float)$settings['wcb_rate'] : 0.02;
-    $ei_mult  = isset($settings['ei_employer_factor']) ? (float)$settings['ei_employer_factor'] : 1.4;
+    // Deductions on this screen come from pe_line (the preview request below).
 
     // 5. EXTRACT SHIFT DATA
     $sql = "SELECT a.id, a.user_id, a.site_id, a.clock_in, a.clock_out, a.approved_hours, a.status, a.transfer_status,

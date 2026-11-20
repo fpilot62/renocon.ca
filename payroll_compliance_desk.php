@@ -4,7 +4,8 @@
  * PRODUCTION PIPELINE - TOTAL MULTI-ORG WORKFORCE COMPLIANCE CORE BUILD
  */
 
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'engine/menu_generator.php';
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
@@ -35,10 +36,13 @@ $stmt = $pdo->prepare("
            COALESCE(NULLIF(u.bank_account, ''), '000000000000') as account,
            SUM(pf.reg_hours) as total_hours,
            SUM(pf.total_gross) as total_gross,
-           SUM(COALESCE(pf.paid_amount, 0.00)) as actual_paid
+           SUM(COALESCE(pf.paid_amount, 0.00)) as actual_paid,
+           CAST(SUBSTRING_INDEX(GROUP_CONCAT(pf.site_id ORDER BY pf.total_gross DESC), ',', 1) AS UNSIGNED) AS site_id,
+           MAX(s.province) AS site_province
     FROM payroll_finalized pf
     LEFT JOIN users u ON pf.user_id = u.id
     LEFT JOIN organizations org ON u.org_id = org.id
+    LEFT JOIN sites s ON s.SId = pf.site_id
     WHERE pf.work_date BETWEEN ? AND ?
     GROUP BY org.id, pf.user_id
     ORDER BY org.id ASC, u.Name ASC
@@ -82,6 +86,34 @@ if ($report_type === 'download_eft') {
         echo "Z9999999900000000000000000000000000000000000000000000000\r\n\r\n";
     }
     exit;
+}
+
+function compliance_deduction(PDO $pdo, array $row, string $asOf): array
+{
+    $gross = (float)$row['total_gross'];
+    $uid = (int)$row['user_id'];
+    $sid = (int)($row['site_id'] ?? 0);
+    $org = (int)($row['org_id'] ?? 0);
+    $line = pe_line($gross, pe_vacation_rate($pdo, $uid, $sid, $asOf), pe_rates($pdo), [
+        'pdo' => $pdo,
+        'user_id' => $uid,
+        'site_id' => $sid,
+        'org_id' => $org,
+        'work_date' => $asOf,
+        'pay_date' => $asOf,
+    ]);
+    $cpp = (float)$line['cpp'] + (float)($line['cpp2'] ?? 0);
+    $ei = (float)$line['ei'];
+    $tax = (float)$line['income_tax'];
+    return [
+        'tax' => $tax,
+        'cpp' => $cpp,
+        'ei' => $ei,
+        'ded' => round($tax + $cpp + $ei, 2),
+        'er_cpp' => (float)$line['cpp_er'] + (float)($line['cpp2_er'] ?? 0),
+        'er_ei' => (float)$line['ei_er'],
+        'net' => (float)$line['net'],
+    ];
 }
 ?>
 <!DOCTYPE html>
@@ -204,14 +236,16 @@ session_write_close();
                     </thead>
                     <tbody>
                         <?php 
-                        $c_gross = 0; $c_paid = 0; $c_hours = 0;
+                        $c_gross = 0; $c_paid = 0; $c_hours = 0; $c_ded = 0; $c_net = 0;
                         foreach ($bucket['staff'] as $row): 
                             $gross = (float)$row['total_gross'];
-                            $deductions = $gross * (0.12 + 0.0595 + 0.0166);
-                            $net = $gross - $deductions;
+                            $ded = compliance_deduction($pdo, $row, $selected_end);
+                            $deductions = $ded['ded'];
+                            $net = $ded['net'];
                             $paid = (float)$row['actual_paid'];
                             $remaining = $net - $paid;
                             $c_gross += $gross; $c_paid += $paid; $c_hours += (float)$row['total_hours'];
+                            $c_ded += $deductions; $c_net += $net;
                         ?>
                             <tr>
                                 <td><strong><?= htmlspecialchars($row['staff_name']) ?></strong></td>
@@ -227,10 +261,10 @@ session_write_close();
                             <td>SUBTOTAL BALANCES:</td>
                             <td><?= round($c_hours, 2) ?> Hrs</td>
                             <td>$<?= number_format($c_gross, 2) ?></td>
-                            <td>$<?= number_format($c_gross * (0.12 + 0.0595 + 0.0166), 2) ?></td>
-                            <td>$<?= number_format($c_gross - ($c_gross * (0.12 + 0.0595 + 0.0166)), 2) ?></td>
+                            <td>$<?= number_format($c_ded, 2) ?></td>
+                            <td>$<?= number_format($c_net, 2) ?></td>
                             <td style="color: #16a34a;">$<?= number_format($c_paid, 2) ?></td>
-                            <td style="color: #b45309;">$<?= number_format(max(0, ($c_gross - ($c_gross * (0.12 + 0.0595 + 0.0166))) - $c_paid), 2) ?></td>
+                            <td style="color: #b45309;">$<?= number_format(max(0, $c_net - $c_paid), 2) ?></td>
                         </tr>
                     </tbody>
                 </table>
@@ -239,10 +273,13 @@ session_write_close();
 
     <?php elseif ($report_type === 'remittance'): ?>
         <?php foreach ($company_buckets as $company_name => $bucket): 
-            $total_gross_pool = 0;
-            foreach ($bucket['staff'] as $row) { $total_gross_pool += (float)$row['total_gross']; }
-            $ee_tax = $total_gross_pool * 0.12; $ee_cpp = $total_gross_pool * 0.0595; $ee_ei = $total_gross_pool * 0.0166;
-            $er_cpp = $ee_cpp * 1.0; $er_ei = $ee_ei * 1.4; $total_cra_remittance = $ee_tax + $ee_cpp + $er_cpp + $ee_ei + $er_ei;
+            $ee_tax = 0; $ee_cpp = 0; $ee_ei = 0; $er_cpp = 0; $er_ei = 0;
+            foreach ($bucket['staff'] as $row) {
+                $ded = compliance_deduction($pdo, $row, $selected_end);
+                $ee_tax += $ded['tax']; $ee_cpp += $ded['cpp']; $ee_ei += $ded['ei'];
+                $er_cpp += $ded['er_cpp']; $er_ei += $ded['er_ei'];
+            }
+            $total_cra_remittance = $ee_tax + $ee_cpp + $er_cpp + $ee_ei + $er_ei;
         ?>
             <div class="card">
                 <div class="company-header-banner"><span><i class="fas fa-gavel"></i> CRA Source Remittance: <?= htmlspecialchars($company_name) ?></span></div>
@@ -281,8 +318,10 @@ session_write_close();
                 $whole_dollars = floor($emp['actual_paid']); $cents = round(($emp['actual_paid'] - $whole_dollars) * 100);
                 $legal_words_string = strtoupper(number_format($whole_dollars) . " DOLLARS AND " . $cents . "/100 CENTS");
 
-                $gross = (float)$emp['total_gross']; $tax = $gross * 0.12; $cpp = $gross * 0.0595; $ei = $gross * 0.0166;
-                $net = $gross - $tax - $cpp - $ei; $paid = (float)$emp['actual_paid']; $bal = $net - $paid;
+                $gross = (float)$emp['total_gross'];
+                $ded = compliance_deduction($pdo, $emp, $selected_end);
+                $tax = $ded['tax']; $cpp = $ded['cpp']; $ei = $ded['ei'];
+                $net = $ded['net']; $paid = (float)$emp['actual_paid']; $bal = $net - $paid;
         ?>
                 <div class="print-package-group">
                     
@@ -338,7 +377,7 @@ session_write_close();
                                 <h4>Employee Profile</h4>
                                 <strong>Recipient Name:</strong> <?= htmlspecialchars($emp['staff_name']) ?><br>
                                 <strong>Email Address:</strong> <?= htmlspecialchars($emp['user_email'] ?? 'N/A') ?><br>
-                                <strong>Jurisdiction:</strong> British Columbia (BC)
+                                <strong>Jurisdiction:</strong> <?= htmlspecialchars((string)($emp['site_province'] ?: 'site province')) ?>
                             </div>
                             <div class="stub-box">
                                 <h4>Banking Distribution Routing Data</h4>
@@ -358,9 +397,9 @@ session_write_close();
                             <div class="stub-box">
                                 <h4>Statutory Source Deductions (Withheld)</h4>
                                 <table style="margin:0; width:100%; line-height:1.3;">
-                                    <tr><td>Income Tax (12%):</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($tax, 2) ?></td></tr>
-                                    <tr><td>CPP (5.95%):</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($cpp, 2) ?></td></tr>
-                                    <tr><td>EI (1.66%):</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($ei, 2) ?></td></tr>
+                                    <tr><td>Income Tax:</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($tax, 2) ?></td></tr>
+                                    <tr><td>CPP and CPP2:</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($cpp, 2) ?></td></tr>
+                                    <tr><td>EI:</td><td style="text-align:right; color:#dc2626;">-$<?= number_format($ei, 2) ?></td></tr>
                                 </table>
                             </div>
                         </div>
