@@ -110,6 +110,20 @@ $onDays = sh_calendar_holidays('ON', '2027-01-01', '2027-12-31');
 check('BC 2026 list has 11 holidays', count($bcDays) === 11);
 check('ON 2027 list has 9 holidays', count($onDays) === 9);
 
+$postedLine = sh_finalized_stat_line($sk, 5, 30, '2026-08-03');
+check('preview sees the payroll_finalized stat line', $postedLine !== null && (int)$postedLine['id'] > 0);
+check('preview uses the ledger amount', $postedLine && abs($postedLine['amount'] - 50) < 0.01);
+check('unpaid stat line is pending', $postedLine && $postedLine['status'] === 'pending');
+check('another employee is not marked posted', sh_finalized_stat_line($sk, 6, 30, '2026-08-03') === null);
+check('a regular line is not a stat post', sh_finalized_stat_line($sk, 5, 30, $sFrom) === null);
+$sk->exec('ALTER TABLE payroll_finalized ADD COLUMN paid_amount REAL DEFAULT 0');
+$sk->exec("ALTER TABLE payroll_finalized ADD COLUMN payment_status TEXT DEFAULT ''");
+$sk->prepare("UPDATE payroll_finalized SET payment_status='paid', paid_amount=total_gross WHERE id=?")->execute([(int)$postedLine['id']]);
+$paidLine = sh_finalized_stat_line($sk, 5, 30, '2026-08-03');
+check('paid stat line is paid', $paidLine && $paidLine['status'] === 'paid' && abs($paidLine['amount'] - 50) < 0.01);
+$page = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
+check('preview page treats the ledger line as posted', strpos($page, 'sh_finalized_stat_line') !== false && strpos($page, 'posted_status') !== false);
+
 if ($fail > 0) {
     echo $fail . " failed\n";
     exit(1);
