@@ -114,7 +114,7 @@ check('ON 2027 list has 9 holidays', count($onDays) === 9);
 $postedLine = sh_finalized_stat_line($sk, 5, 30, '2026-08-03');
 check('preview sees the payroll_finalized stat line', $postedLine !== null && (int)$postedLine['id'] > 0);
 check('preview uses the ledger amount', $postedLine && abs($postedLine['amount'] - 50) < 0.01);
-check('unpaid stat line is pending', $postedLine && $postedLine['status'] === 'pending');
+check('unpaid stat line needs approval', $postedLine && $postedLine['status'] === 'needs approval');
 check('another employee is not marked posted', sh_finalized_stat_line($sk, 6, 30, '2026-08-03') === null);
 check('a regular line is not a stat post', sh_finalized_stat_line($sk, 5, 30, $sFrom) === null);
 $sk->exec('ALTER TABLE payroll_finalized ADD COLUMN paid_amount REAL DEFAULT 0');

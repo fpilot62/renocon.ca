@@ -1,107 +1,115 @@
 <?php
-/**
- * Ontario public-holiday eligibility review. Org-scoped.
- * A pending row is not a pay line and cannot be paid until someone decides.
- */
-$guard = __DIR__ . '/engine/orgscope_guard.php';
-if (is_file($guard)) {
-    require_once $guard;
-    if (function_exists('osg_page')) {
-        osg_page(['level' => 10]);
-    }
-}
-require_once 'db.php';
-require_once 'payroll_scope.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/payroll_scope.php';
 require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+if (is_file(__DIR__ . '/engine/orgscope_guard.php')) {
+    require_once __DIR__ . '/engine/orgscope_guard.php';
+    osg_page(['level' => 10]);
+}
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 ps_require_payroll_admin();
 $orgId = ps_selected_org($pdo);
-sh_ensure_holiday_review($pdo);
-$from = (string)($_GET['from_date'] ?? $_POST['from_date'] ?? '');
-$to = (string)($_GET['to_date'] ?? $_POST['to_date'] ?? '');
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) { $from = ''; }
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) { $to = ''; }
-$message = '';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['review_id'], $_POST['decision'])) {
+$actor = (int)($_SESSION['user_id'] ?? 0);
+$msg = '';
+$err = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ps_require_csrf();
-    $ok = sh_apply_review_decision(
-        $pdo,
-        $orgId,
-        (int)$_POST['review_id'],
-        (string)$_POST['decision'],
-        (int)($_SESSION['user_id'] ?? 0),
-        sh_date_only($_POST['end_date'] ?? '')
-    );
-    $message = $ok ? 'Decision saved.' : 'That decision was not saved.';
-}
-$sql = "SELECT r.*, u.Name AS employee, s.nick_name AS site
-          FROM stat_holiday_review r
-          JOIN users u ON u.id=r.user_id AND u.org_id=r.org_id
-          LEFT JOIN sites s ON s.SId=r.site_id AND s.org_id=r.org_id
-         WHERE r.org_id=?";
-$params = [$orgId];
-if ($from !== '' && $to !== '') {
-    $sql .= ' AND r.holiday_date BETWEEN ? AND ?';
-    $params[] = $from;
-    $params[] = $to;
-}
-$sql .= " ORDER BY r.holiday_date, s.nick_name, u.Name";
-$st = $pdo->prepare($sql);
-$st->execute($params);
-$rows = $st->fetchAll(PDO::FETCH_ASSOC);
-$pending = 0;
-foreach ($rows as $row) {
-    if (in_array($row['status'], ['pending', 'leave_wait'], true)) {
-        $pending++;
+    if (isset($_POST['bulk_approve'])) {
+        $n = sh_bulk_approve_unflagged($pdo, $orgId, $actor);
+        $msg = $n . ' unflagged stat lines approved. Nothing was marked paid.';
+    } elseif (isset($_POST['approve_line'])) {
+        $lineId = (int)($_POST['line_id'] ?? 0);
+        $amount = ($_POST['amount'] ?? '') === '' ? null : (float)$_POST['amount'];
+        $hours = ($_POST['hours'] ?? '') === '' ? null : (float)$_POST['hours'];
+        $reason = trim((string)($_POST['reason'] ?? ''));
+        if ($reason === 'other') {
+            $reason = trim((string)($_POST['reason_other'] ?? ''));
+        }
+        if (sh_approve_stat_line($pdo, $orgId, $lineId, $actor, $amount, $hours, $reason)) {
+            $msg = 'Line approved. It can be paid on the next pay run. It is not paid yet.';
+        } else {
+            $err = 'Could not approve. If the amount differs from the calculated amount, pick a reason.';
+        }
     }
 }
+
+$rows = [];
+try {
+    $st = $pdo->prepare(
+        "SELECT f.id, f.user_id, f.work_date, f.reg_hours, f.total_gross, f.comments,
+                COALESCE(f.stat_calculated_amount, f.total_gross) AS calculated_amount,
+                COALESCE(f.stat_flag, '') AS stat_flag,
+                u.Name AS employee, s.nick_name AS site_name
+           FROM payroll_finalized f
+           INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+           INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
+          WHERE f.category = 'Statutory Holiday' AND f.status = 'needs approval'
+          ORDER BY (COALESCE(f.stat_flag, '') = '') ASC, f.work_date, u.Name"
+    );
+    $st->execute([$orgId]);
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $st = $pdo->prepare(
+        "SELECT f.id, f.user_id, f.work_date, f.reg_hours, f.total_gross, f.comments,
+                f.total_gross AS calculated_amount, '' AS stat_flag,
+                u.Name AS employee, s.nick_name AS site_name
+           FROM payroll_finalized f
+           INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+           INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
+          WHERE f.category = 'Statutory Holiday' AND f.status = 'needs approval'
+          ORDER BY f.work_date, u.Name"
+    );
+    $st->execute([$orgId]);
+    $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+}
+$reasons = ['quit', 'on vacation/leave - pay on return', 'missed shift without reasonable cause', 'other'];
 ?>
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Holiday eligibility review</title>
-<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-<style>body{background:#f1f5f9;padding:24px;font-family:Inter,Arial}.wrap{max-width:1200px;margin:auto}</style>
-</head><body><div class="wrap">
-<h2>Holiday eligibility review</h2>
-<p class="text-muted">Ontario last-and-first questions. A pending row is not on the pay ledger and cannot be paid until you decide. Quit asks for an end date so later holidays are excluded.</p>
-<?php if ($message): ?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif; ?>
-<p><strong><?=$pending?> pending</strong> in this list. <a href="payroll_master_ledger.php?org_id=<?=$orgId?>">Back to the pay ledger</a></p>
-<table class="table table-sm table-bordered bg-white"><thead class="thead-dark"><tr>
-<th>Holiday</th><th>Site</th><th>Employee</th><th>Amount</th><th>Why</th><th>Status</th><th>Decide</th>
-</tr></thead><tbody>
-<?php if (!$rows): ?><tr><td colspan="7" class="text-muted p-3">No reviews for this organization.</td></tr><?php endif; ?>
-<?php foreach ($rows as $row):
-    $flags = explode(',', (string)$row['flags']);
-    $open = in_array($row['status'], ['pending', 'leave_wait'], true);
-?>
-<tr>
-<td><?=htmlspecialchars($row['holiday_date'].' '.$row['holiday_name'])?></td>
-<td><?=htmlspecialchars((string)$row['site'])?></td>
-<td><?=htmlspecialchars((string)$row['employee'])?></td>
-<td>$<?=number_format((float)$row['amount'], 2)?></td>
-<td><?=htmlspecialchars(str_replace('_', ' ', (string)$row['flags']))?></td>
-<td><?=htmlspecialchars((string)$row['status'])?><?php if ($row['decided_at']): ?><div class="small text-muted"><?=htmlspecialchars((string)$row['decided_by'])?> · <?=htmlspecialchars((string)$row['decided_at'])?></div><?php endif; ?></td>
-<td><?php if ($open): ?>
-<form method="post" class="m-0">
-<input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
-<input type="hidden" name="review_id" value="<?=(int)$row['id']?>">
-<input type="hidden" name="from_date" value="<?=htmlspecialchars($from)?>">
-<input type="hidden" name="to_date" value="<?=htmlspecialchars($to)?>">
-<?php if (in_array('no_shift_after', $flags, true)): ?>
-<select name="decision" class="form-control form-control-sm mb-1">
-<option value="quit">Quit — no stat</option>
-<option value="leave_wait">On vacation/leave — pay when the first shift back exists</option>
-<option value="leave_pay">On vacation/leave — pay now</option>
-<option value="employed">Still employed — pay</option>
-</select>
-<label class="small mb-1">End date if they quit <input type="date" name="end_date" class="form-control form-control-sm"></label>
-<?php else: ?>
-<select name="decision" class="form-control form-control-sm mb-1">
-<option value="reasonable">Reasonable cause — pay</option>
-<option value="no_cause">No reasonable cause — no stat</option>
-</select>
-<?php endif; ?>
-<button class="btn btn-sm btn-primary">Save</button>
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Stat holiday approval</title>
+<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"></head>
+<body class="p-3">
+<h1 class="h4">Stat holiday approval</h1>
+<p class="text-muted">Every new stat line starts here. Approving it does not pay it. Flagged lines (no shift after the holiday, or a missed shift) need their own approval.</p>
+<?php if ($msg): ?><div class="alert alert-success"><?= htmlspecialchars($msg) ?></div><?php endif; ?>
+<?php if ($err): ?><div class="alert alert-danger"><?= htmlspecialchars($err) ?></div><?php endif; ?>
+<form method="post" onsubmit="return confirm('Approve every unflagged line at the amount shown? Flagged lines stay on this list.');">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(ps_csrf_token()) ?>">
+    <button class="btn btn-primary mb-3" name="bulk_approve" value="1">Approve all unflagged</button>
 </form>
-<?php else: ?><?=htmlspecialchars((string)$row['decision'])?><?php endif; ?></td>
+<table class="table table-sm">
+<thead><tr><th>Holiday</th><th>Employee</th><th>Site</th><th>Flag</th><th>Calculated</th><th>Amount</th><th>Hours</th><th>Reason if changed</th><th></th></tr></thead>
+<tbody>
+<?php foreach ($rows as $r):
+    $flag = trim((string)$r['stat_flag']);
+    if ($flag === '' && preg_match('/FLAG:\s*([^.]+)/', (string)$r['comments'], $m)) {
+        $flag = trim($m[1]);
+    }
+?>
+<tr style="<?= $flag !== '' ? 'background:#fde68a' : '' ?>">
+<td colspan="9" style="padding:0;">
+<form method="post" class="form-inline" style="display:flex; gap:8px; align-items:center; padding:6px;">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(ps_csrf_token()) ?>">
+    <input type="hidden" name="line_id" value="<?= (int)$r['id'] ?>">
+    <span style="width:110px;"><?= htmlspecialchars($r['work_date']) ?></span>
+    <span style="width:160px;"><?= htmlspecialchars($r['employee']) ?></span>
+    <span style="width:120px;"><?= htmlspecialchars($r['site_name']) ?></span>
+    <span style="width:220px; font-weight:bold;"><?= htmlspecialchars($flag) ?></span>
+    <span style="width:90px;">$<?= number_format((float)$r['calculated_amount'], 2) ?></span>
+    <input class="form-control form-control-sm" style="width:90px;" name="amount" value="<?= htmlspecialchars(number_format((float)$r['total_gross'], 2, '.', '')) ?>">
+    <input class="form-control form-control-sm" style="width:70px;" name="hours" value="<?= htmlspecialchars(number_format((float)$r['reg_hours'], 2, '.', '')) ?>">
+    <select class="form-control form-control-sm" style="width:240px;" name="reason">
+        <option value="">Amount unchanged</option>
+        <?php foreach ($reasons as $reason): ?><option><?= htmlspecialchars($reason) ?></option><?php endforeach; ?>
+    </select>
+    <input class="form-control form-control-sm" style="width:180px;" name="reason_other" placeholder="Reason if Other">
+    <button class="btn btn-sm btn-success" name="approve_line" value="1">Approve</button>
+</form>
+</td>
 </tr>
 <?php endforeach; ?>
+<?php if (!$rows): ?><tr><td colspan="9">No stat lines are waiting for approval.</td></tr><?php endif; ?>
 </tbody></table>
-</div></body></html>
+</body></html>

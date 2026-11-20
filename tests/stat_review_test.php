@@ -26,7 +26,7 @@ function fresh(): PDO {
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INT, org_id INT, site_id INT, work_date TEXT, pay_period_end TEXT,
         category TEXT, display_label TEXT, pay_type TEXT, reg_hours REAL, hourly_rate REAL, reg_pay REAL, total_gross REAL,
         overtime_hours REAL, vac REAL, cpp REAL, ei REAL, income_tax REAL, cpp_er REAL, ei_er REAL, wcb REAL,
-        status TEXT, finalized_by INT, comments TEXT)");
+        status TEXT, finalized_by INT, comments TEXT, paid_amount REAL DEFAULT 0)");
     $pdo->exec('CREATE TABLE attendance (id INTEGER PRIMARY KEY, user_id INT, site_id INT, clock_in TEXT, status TEXT)');
     return $pdo;
 }
@@ -55,22 +55,21 @@ check('SK also excludes an employment end before the holiday', !$skEnd['eligible
 
 person($pdo, 3, 'ON');
 wage($pdo, 3, '2026-09-15', 2000);
-check('ON with no shift in the 28 days after is held', sh_post_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving Day', 'ON', 1, null, '', '2026-11-20') === false);
-$review = sh_review_row($pdo, 4, 3, 30, '2026-10-12');
-check('the hold is a pending review, not a pay line', $review && $review['status'] === 'pending' && strpos((string)$review['flags'], 'no_shift_after') !== false);
-$lines = $pdo->query("SELECT COUNT(*) FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday'")->fetchColumn();
-check('the pending review is not payable', (int)$lines === 0);
-check('queueing the same holiday again does not duplicate', sh_post_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving Day', 'ON', 1, null, '', '2026-11-20') === false && (int)$pdo->query('SELECT COUNT(*) FROM stat_holiday_review WHERE user_id=3')->fetchColumn() === 1);
+check('ON with no shift in the 28 days after still gets a line', sh_post_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving Day', 'ON', 1, null, '', '2026-11-20') === true);
+$flagged = $pdo->query("SELECT status, comments FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
+check('that line is flagged and not payable', $flagged && $flagged['status'] === 'needs approval' && strpos($flagged['comments'], 'No shift in 28 days after') !== false && !sh_stat_payable($flagged));
+check('queueing the same holiday again does not duplicate', sh_post_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving Day', 'ON', 1, null, '', '2026-11-20') === false
+    && (int)$pdo->query("SELECT COUNT(*) FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday'")->fetchColumn() === 1);
 
 person($pdo, 4, 'ON');
 wage($pdo, 4, '2026-09-20', 2000);
 $pdo->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (1,4,40,?,?)')->execute(['2026-10-01', 'missed']);
 $pdo->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (2,4,40,?,?)')->execute(['2026-10-20', 'worked']);
-check('a missed last shift before the holiday is held', sh_post_stat_line($pdo, 4, 4, 40, '2026-10-12', 'Thanksgiving Day', 'ON', 9, null, '', '2026-11-20') === false);
-$missed = sh_review_row($pdo, 4, 4, 40, '2026-10-12');
-check('the missed-shift review offers a cause decision', $missed && strpos((string)$missed['flags'], 'missed_before') !== false);
-check('reasonable cause posts the line', sh_apply_review_decision($pdo, 4, (int)$missed['id'], 'reasonable', 9) === true);
-check('the posted line exists after the decision', (int)$pdo->query("SELECT COUNT(*) FROM payroll_finalized WHERE user_id=4 AND category='Statutory Holiday'")->fetchColumn() === 1);
+check('a missed last shift is created and flagged', sh_post_stat_line($pdo, 4, 4, 40, '2026-10-12', 'Thanksgiving Day', 'ON', 9, null, '', '2026-11-20') === true);
+$missedLine = $pdo->query("SELECT id, status, comments, total_gross FROM payroll_finalized WHERE user_id=4 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
+check('the missed-shift line names the reason', $missedLine && strpos($missedLine['comments'], 'Missed last shift before') !== false);
+check('approving it does not mark it paid', sh_approve_stat_line($pdo, 4, (int)$missedLine['id'], 9, null, null, '') === true
+    && (float)$pdo->query("SELECT COALESCE(paid_amount,0) FROM payroll_finalized WHERE user_id=4 AND category='Statutory Holiday'")->fetchColumn() == 0.0);
 
 person($pdo, 5, 'SK');
 wage($pdo, 5, '2026-08-20', 1000);

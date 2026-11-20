@@ -146,7 +146,7 @@ if ($is_cli) {
         $req_period_end   = $req_period_end ?: $cli_to;
         $sqlCli = "SELECT f.id FROM payroll_finalized f
                    LEFT JOIN users u ON u.id = f.user_id
-                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?";
+                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ? AND COALESCE(f.status,'') <> 'needs approval'";
         $paramsCli = [$cli_site, $cli_from, $cli_to];
         if ($cli_name !== '') {
             $sqlCli .= " AND u.Name LIKE ?";
@@ -205,7 +205,7 @@ $sql = "SELECT
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate,
             f.total_gross, f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
             f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
-            f.paid_amount, f.payment_status, f.category, f.display_label
+            f.paid_amount, f.payment_status, f.status AS line_status, f.category, f.display_label
             $extraFin,
             u.Name AS emp_name, u.Email AS emp_email,
             u.bank_transit, u.bank_institution, u.bank_account,
@@ -221,6 +221,9 @@ $sql = "SELECT
 $stmt = $pdo->prepare($sql);
 $stmt->execute($line_ids);
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$rows = array_values(array_filter($rows, static function ($r) {
+    return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+}));
 if (empty($rows)) { die("Selected rows not found."); }
 
 $vac_paid_mode = false;
