@@ -93,21 +93,18 @@ function stat_selected_org(PDO $pdo): int {
         return ps_selected_org($pdo);
     }
     $raw = $_GET['org_id'] ?? $_POST['org_id'] ?? null;
-    if ($raw === null || $raw === '') {
-        $raw = $_COOKIE['sip_org_id'] ?? ($_COOKIE['sa_org_id'] ?? null);
+    if ($raw !== null && $raw !== '' && $raw !== 'all' && (int)$raw > 0) {
+        return (int)$raw;
     }
-    if ($raw === null || $raw === '' || $raw === 'all') {
-        $org = ps_org_id();
-        if ($org > 0) {
-            return $org;
-        }
-        try {
-            return (int)$pdo->query('SELECT id FROM organizations ORDER BY id LIMIT 1')->fetchColumn();
-        } catch (Throwable $e) {
-            return 0;
-        }
+    $session = ps_org_id();
+    if ($session > 0) {
+        return $session;
     }
-    return (int)$raw;
+    $cookie = $_COOKIE['sip_org_id'] ?? ($_COOKIE['sa_org_id'] ?? '');
+    if ($cookie !== '' && $cookie !== 'all' && (int)$cookie > 0) {
+        return (int)$cookie;
+    }
+    return 0;
 }
 
 function stat_holiday_provinces_for(PDO $pdo, array $orgProvinces, string $holidayDate, string $holidayName): array {
