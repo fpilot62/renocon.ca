@@ -14,6 +14,7 @@ require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/payroll_scope.php';
 require_once __DIR__ . '/engine/menu_generator.php';
 require_once __DIR__ . '/engine/help_qa_lib.php';
+require_once __DIR__ . '/engine/help_qa_panel.php';
 
 if (empty($_SESSION['user_id'])) {
     header('Location: login_kiosk.php?err=session_expired');
@@ -102,6 +103,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && (string)($_POST['action'] ?
     }
 }
 
+if ((string)($_GET['export'] ?? '') === 'user_questions' && help_user_question_table_ready($pdo)) {
+    $st = $pdo->query("SELECT * FROM help_user_question WHERE app = 'payroll' ORDER BY id ASC");
+    $out = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $out[] = help_user_question_export_row($row);
+    }
+    header('Content-Type: application/json; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="help_user_question_payroll.json"');
+    echo json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
 if (isset($_GET['export']) && help_qa_table_ready($pdo)) {
     $st = $pdo->query("SELECT * FROM help_qa WHERE app = 'payroll' ORDER BY page_key ASC, sort_order ASC, id ASC");
     $out = [];
@@ -163,6 +176,7 @@ body{background:#f1f5f9;padding:90px 16px 40px;font-size:14px;color:#1e293b}
         <button class="btn btn-dark">Search</button>
         <?php if ($q !== ''): ?><a class="btn btn-link" href="help_qa.php">Clear</a><?php endif; ?>
         <a class="btn btn-outline-primary ml-2" href="help_qa.php?export=1">Export JSON</a>
+        <a class="btn btn-outline-primary ml-2" href="help_qa.php?export=user_questions">Export user questions</a>
     </form>
     <div class="sheet">
         <h6 class="font-weight-bold">Import JSON</h6>
@@ -173,6 +187,15 @@ body{background:#f1f5f9;padding:90px 16px 40px;font-size:14px;color:#1e293b}
             <input type="file" name="qa_json" accept="application/json,.json">
             <button class="btn btn-sm btn-primary ml-2">Import</button>
         </form>
+    </div>
+    <div class="sheet">
+        <h6 class="font-weight-bold">User questions</h6>
+        <p class="text-muted">Questions people sent from a page. Saving an answer creates a hidden question on that page. You can make it live from the list below.</p>
+        <?php
+        $uqStatus = help_user_question_status_filter((string)($_GET['uq_status'] ?? 'new'));
+        $uqRows = help_user_question_list($pdo, $uqStatus, '');
+        echo help_qa_user_queue($uqRows, $uqStatus, 'help_qa_action.php', $csrf, 'help_qa.php', false, help_user_question_table_ready($pdo));
+        ?>
     </div>
     <?php if (!$groups): ?><p class="text-muted">No questions<?= $q !== '' ? ' match that search' : '' ?>.</p><?php endif; ?>
     <?php foreach ($groups as $page => $items): ?>

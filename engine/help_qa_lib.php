@@ -346,3 +346,111 @@ function help_qa_datetime_or_null($v): ?string
     $dt = DateTime::createFromFormat(DateTime::ATOM, $v);
     return $dt instanceof DateTime ? $dt->format('Y-m-d H:i:s') : null;
 }
+
+function help_qa_action_url(): string
+{
+    $page = help_qa_page_key();
+    $depth = $page === '' ? 0 : substr_count($page, '/');
+    return str_repeat('../', $depth) . 'help_qa_action.php';
+}
+
+function help_user_question_table_ready(PDO $pdo): bool
+{
+    static $ready = null;
+    if ($ready !== null) {
+        return $ready;
+    }
+    try {
+        $st = $pdo->query("SHOW TABLES LIKE 'help_user_question'");
+        $ready = (bool)($st && $st->fetchColumn());
+    } catch (Throwable $e) {
+        $ready = false;
+    }
+    return $ready;
+}
+
+function help_user_question_status_filter(string $raw): string
+{
+    return in_array($raw, ['new', 'answered', 'dismissed', 'all'], true) ? $raw : 'new';
+}
+
+/**
+ * A person may send one question every 30 seconds, and at most 8 in an hour.
+ * The same wording still waiting on this page is not stored again.
+ * Returns an error sentence, or '' when the question may be saved.
+ */
+function help_user_question_rate_error(PDO $pdo, string $email, string $pageKey, string $question): string
+{
+    $recent = $pdo->prepare(
+        "SELECT created_at FROM help_user_question
+         WHERE app = 'payroll' AND asked_by = ?
+         ORDER BY id DESC LIMIT 1"
+    );
+    $recent->execute([$email]);
+    $last = (string)$recent->fetchColumn();
+    if ($last !== '') {
+        $then = strtotime($last);
+        if ($then !== false && (time() - $then) < 30) {
+            return 'Please wait a moment before asking another question.';
+        }
+    }
+    $hour = $pdo->prepare(
+        "SELECT COUNT(*) FROM help_user_question
+         WHERE app = 'payroll' AND asked_by = ? AND created_at >= (NOW() - INTERVAL 1 HOUR)"
+    );
+    $hour->execute([$email]);
+    if ((int)$hour->fetchColumn() >= 8) {
+        return 'You have asked several questions in the last hour. Try again later.';
+    }
+    $dup = $pdo->prepare(
+        "SELECT COUNT(*) FROM help_user_question
+         WHERE app = 'payroll' AND page_key = ? AND asked_by = ? AND question = ? AND status = 'new'"
+    );
+    $dup->execute([$pageKey, $email, $question]);
+    if ((int)$dup->fetchColumn() > 0) {
+        return 'You already asked that on this page. It is still waiting for an answer.';
+    }
+    return '';
+}
+
+function help_user_question_list(PDO $pdo, string $status, string $pageKey = ''): array
+{
+    if (!help_user_question_table_ready($pdo)) {
+        return [];
+    }
+    $status = help_user_question_status_filter($status);
+    $sql = "SELECT * FROM help_user_question WHERE app = 'payroll'";
+    $params = [];
+    if ($pageKey !== '') {
+        $sql .= ' AND page_key = ?';
+        $params[] = $pageKey;
+    }
+    if ($status !== 'all') {
+        $sql .= ' AND status = ?';
+        $params[] = $status;
+    }
+    $sql .= ' ORDER BY id DESC LIMIT 200';
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    return $st->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function help_user_question_export_row(array $row): array
+{
+    $org = $row['org_id'] ?? null;
+    $link = $row['help_qa_id'] ?? null;
+    $handled = $row['handled_by'] ?? null;
+    return [
+        'id' => (int)$row['id'],
+        'app' => (string)$row['app'],
+        'page_key' => (string)$row['page_key'],
+        'org_id' => ($org === null || $org === '') ? null : (int)$org,
+        'question' => (string)$row['question'],
+        'asked_by' => (string)$row['asked_by'],
+        'status' => (string)$row['status'],
+        'help_qa_id' => ($link === null || $link === '') ? null : (int)$link,
+        'handled_by' => ($handled === null || $handled === '') ? null : (string)$handled,
+        'created_at' => (string)($row['created_at'] ?? ''),
+        'updated_at' => (string)($row['updated_at'] ?? ''),
+    ];
+}
