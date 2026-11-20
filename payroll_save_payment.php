@@ -8,6 +8,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'])) {
     
@@ -30,9 +31,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
         $uQuery->execute([$uid]);
         $uName = $uQuery->fetchColumn() ?: "Staff #{$uid}";
 
-        // ✨ THE CRA ENGINE WRITE: Automatically inserts the calculated CRA taxes right into your masters table row!
+        $stored = $pdo->prepare("SELECT COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei, COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(cpp_er),0) cpp_er, COALESCE(SUM(ei_er),0) ei_er, COALESCE(SUM(wcb),0) wcb FROM payroll_finalized WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?");
+        $stored->execute([$uid, $sid, $batch_start, $batch_end]);
+        $got = $stored->fetch(PDO::FETCH_ASSOC) ?: [];
+        $cra_tax_due = (float)$got['cpp'] + (float)$got['ei'] + (float)$got['tax'];
+        $er_due = (float)$got['cpp_er'] + (float)$got['ei_er'] + (float)$got['wcb'];
+        if ($cra_tax_due < 0.01 && (float)$got['g'] > 0) {
+            $pay = pe_line((float)$got['g'], pe_vacation_rate($pdo, $uid, $sid, substr((string)$batch_end, 0, 10)), pe_rates($pdo), [
+                'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $sid, 'work_date' => substr((string)$batch_end, 0, 10),
+            ]);
+            $cra_tax_due = (float)$pay['cpp'] + (float)($pay['cpp2'] ?? 0) + (float)$pay['ei'] + (float)$pay['income_tax'];
+            $er_due = (float)$pay['cpp_er'] + (float)($pay['cpp2_er'] ?? 0) + (float)$pay['ei_er'] + (float)$pay['wcb'];
+        }
         $stmtMaster = $pdo->prepare("INSERT INTO payroll_masters (org_id, site_id, user_id, pay_period_start, pay_period_end, gross_total, er_contributions, cra_deductions, net_payable, status, cra_status, created_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid', CURRENT_TIMESTAMP())");
-        $stmtMaster->execute([$sid, $uid, $batch_start, $batch_end, $total_due, $cra_tax_due * 0.35, $cra_tax_due, $pay_now, $target_status_flag]);
+        $stmtMaster->execute([$sid, $uid, $batch_start, $batch_end, $total_due, $er_due, $cra_tax_due, $pay_now, $target_status_flag]);
         $master_id = $pdo->lastInsertId();
 
         $ref_code = "TXN-" . strtoupper(uniqid());

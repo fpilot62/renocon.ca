@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fence'=>['attendance_id'=>'attendance','id'=>'attendance']]); // org-scope audit Nov 2026
+
 /**
  * Path: /save_split_payroll.php
  * STAGE: A (LIVE — previews, then on confirmation writes to the database)

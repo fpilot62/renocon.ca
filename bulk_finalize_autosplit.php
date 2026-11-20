@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fence'=>['shift_ids'=>'attendance']]); // org-scope audit Nov 2026
+
 /**
  * Path: /bulk_finalize_autosplit.php
  * ACTION: Process 8h Split (Work) OR Travel Costs (Transit)
@@ -31,32 +33,22 @@ function calculateRegionalDeductions($gross_pay, $region) {
         'cpp_er'     => 0.00, // Employer Pension
         'ei_ee'      => 0.00, // Employee Insurance
         'ei_er'      => 0.00, // Employer Insurance
-        'income_tax' => 0.10, // Base Income Tax
-        'vac_pay'    => 0.04, // Vacation Accumulator
-        'wsib'       => 0.02  // Workers Comp baseline
+        'income_tax' => 0.00,
+        'vac_pay'    => 0.00,
+        'wsib'       => 0.00
     ];
 
     switch (strtoupper(trim((string)$region))) {
         case 'AB':
-        case 'ALL_CAN':
-            $rates['cpp_ee']     = 0.0595;
-            $rates['cpp_er']     = 0.0595;
-            $rates['ei_ee']      = 0.0166;
-            $rates['ei_er']      = 0.0166 * 1.4;
-            $rates['income_tax'] = 0.1500;
-            $rates['vac_pay']    = 0.0400;
-            $rates['wsib']       = 0.0175;
-            break;
-
         case 'BC':
-            $rates['cpp_ee']     = 0.0595;
-            $rates['cpp_er']     = 0.0595;
-            $rates['ei_ee']      = 0.0166;
-            $rates['ei_er']      = 0.0166 * 1.4;
-            $rates['income_tax'] = 0.1450;
-            $rates['vac_pay']    = 0.0400;
-            $rates['wsib']       = 0.0210;
-            break;
+        case 'ON':
+        case 'SK':
+        case 'ALL_CAN':
+        case '':
+            return [
+                'gross' => round($gross_pay, 2), 'cpp' => 0.0, 'cpp_er' => 0.0, 'ei' => 0.0, 'ei_er' => 0.0,
+                'income_tax' => 0.0, 'vac' => 0.0, 'wsib' => 0.0, 'net_pay' => round($gross_pay, 2),
+            ];
 
         case 'USA':
             $rates['cpp_ee']     = 0.0620; // FICA EE

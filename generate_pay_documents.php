@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fence'=>['site_id'=>'site','user_id'=>'user']]); // org-scope audit Nov 2026
+
 /**
  * Path: /generate_pay_documents.php
  * Generates cheques and paystubs as separate PDFs for the payroll_finalized

@@ -43,9 +43,9 @@ function pe_rates(PDO $pdo): array {
         $s = $row ? ($row->fetch(PDO::FETCH_ASSOC) ?: []) : [];
     } catch (Exception $e) { $s = []; }
     $cache = [
-        'cpp'    => isset($s['cpp_rate'])           ? (float)$s['cpp_rate']           : 0.0595,
-        'ei'     => isset($s['ei_rate'])            ? (float)$s['ei_rate']            : 0.0163,
-        'fed'    => isset($s['fed_tax_rate'])       ? (float)$s['fed_tax_rate']       : 0.15,
+        'cpp'    => isset($s['cpp_rate'])           ? (float)$s['cpp_rate']           : 0.0,
+        'ei'     => isset($s['ei_rate'])            ? (float)$s['ei_rate']            : 0.0,
+        'fed'    => isset($s['fed_tax_rate'])       ? (float)$s['fed_tax_rate']       : 0.0,
         'wcb'    => isset($s['wcb_rate'])           ? (float)$s['wcb_rate']           : 0.02,
         'ei_mult'=> isset($s['ei_employer_factor']) ? (float)$s['ei_employer_factor'] : 1.4,
     ];
@@ -667,6 +667,20 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
     ];
 }
 
+function pe_sql_employee_cpp(PDO $pdo, string $alias = 'f'): string {
+    $alias = preg_replace('/[^A-Za-z0-9_]/', '', $alias) ?: 'f';
+    $extra = function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2')
+        ? " + IFNULL({$alias}.cpp2,0)" : '';
+    return "({$alias}.cpp{$extra})";
+}
+
+function pe_sql_employer_cpp(PDO $pdo, string $alias = 'f'): string {
+    $alias = preg_replace('/[^A-Za-z0-9_]/', '', $alias) ?: 'f';
+    $extra = function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2_er')
+        ? " + IFNULL({$alias}.cpp2_er,0)" : '';
+    return "({$alias}.cpp_er{$extra})";
+}
+
 function pe_read_period_stats(PDO $pdo, string $from_date, string $to_date, array $user_ids = [], array $site_ids = []): array {
     $sql = "SELECT * FROM payroll_period_stat WHERE period_start <= ? AND period_end >= ?";
     $p = [$to_date, $from_date];
@@ -716,6 +730,15 @@ function pe_line(float $gross, float $vac_rate, array $rates, array $ctx = []): 
         if (is_array($t4127)) {
             return $t4127;
         }
+        $baseOnly = round(max(0.0, $gross), 2);
+        return [
+            'cpp' => 0.0, 'cpp2' => 0.0, 'ei' => 0.0, 'income_tax' => 0.0,
+            'cpp_er' => 0.0, 'cpp2_er' => 0.0, 'ei_er' => 0.0, 'wcb' => 0.0,
+            'vac' => 0.0, 'vac_paid' => 0.0, 'vac_accrued' => 0.0,
+            'pay_gross' => $baseOnly, 'base_gross' => $baseOnly,
+            'ee_total' => 0.0, 'er_total' => 0.0, 'net' => $baseOnly,
+            'edition' => '', 'warnings' => ['No T4127 rate pack for this pay date.'],
+        ];
     }
     $base = round(max(0.0, $gross), 2);
     $vac  = round($base * $vac_rate, 2);

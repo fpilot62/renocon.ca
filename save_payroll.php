@@ -3,6 +3,7 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
     require_once __DIR__ . '/break_waiver_finalize_guard.php';
 }
@@ -45,6 +46,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // --- 1. PROCESS PRIMARY ROW ---
         $h_acc = (float)$_POST['acc_hrs'];
         $r_acc = $profile_rate;
+        $accGross = $h_acc * $r_acc;
+        $acc = pe_line($accGross, pe_vacation_rate($pdo, (int)$orig['user_id'], (int)$orig['site_id'], $as_of), pe_rates($pdo), [
+            'pdo' => $pdo, 'user_id' => (int)$orig['user_id'], 'site_id' => (int)$orig['site_id'], 'org_id' => (int)$orig['org_id'], 'work_date' => $as_of,
+        ]);
         
         $stmtFinal->execute([
             $attendance_id, 
@@ -58,11 +63,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $orig['clock_in'], 
             $h_acc, 
             $r_acc, 
-            ($h_acc * $r_acc),
-            (float)$_POST['acc_ee_cpp'], 
-            (float)$_POST['acc_ee_ei'], 
-            (float)$_POST['acc_wcb'], 
-            (float)$_POST['acc_vac'], 
+            $accGross,
+            (float)$acc['cpp'] + (float)($acc['cpp2'] ?? 0),
+            (float)$acc['ei'],
+            (float)$acc['wcb'],
+            (float)$acc['vac'], 
             $_POST['acc_pay_type'], 
             $_SESSION['user_id']
         ]);
@@ -74,6 +79,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($h <= 0) continue; 
                 $extra_type = strtolower((string)($_POST['extra_pay_type'][$index] ?? $_POST['extra_type'][$index] ?? ''));
                 $r = pe_profile_pay_rate($pdo, (int)$orig['user_id'], $extra_type === 'overtime' ? 'overtime' : 'regular', $as_of);
+                $extraGross = $h * $r;
+                $extra = pe_line($extraGross, pe_vacation_rate($pdo, (int)$orig['user_id'], (int)$orig['site_id'], $as_of), pe_rates($pdo), [
+                    'pdo' => $pdo, 'user_id' => (int)$orig['user_id'], 'site_id' => (int)$orig['site_id'], 'org_id' => (int)$orig['org_id'], 'work_date' => $as_of,
+                ]);
 
                 if ($merge) {
                     $stmtFinal->execute([
@@ -88,18 +97,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $orig['clock_in'], 
                         $h, 
                         $r, 
-                        ($h * $r),
-                        (float)$_POST['extra_ee_cpp'][$index], 
-                        (float)$_POST['extra_ee_ei'][$index], 
-                        (float)$_POST['extra_wcb'][$index], 
-                        (float)$_POST['extra_vac'][$index], 
+                        $extraGross,
+                        (float)$extra['cpp'] + (float)($extra['cpp2'] ?? 0),
+                        (float)$extra['ei'],
+                        (float)$extra['wcb'],
+                        (float)$extra['vac'], 
                         $_POST['extra_pay_type'][$index], 
                         $_SESSION['user_id']
                     ]);
                 } else {
-                    $gross = $h * $r;
-                    // We calculate total burden including the ER side of the taxes
-                    $total_burden = $gross + (float)$_POST['extra_er_cpp'][$index] + (float)$_POST['extra_er_ei'][$index] + (float)$_POST['extra_wcb'][$index] + (float)$_POST['extra_vac'][$index];
+                    $gross = $extraGross;
+                    $total_burden = $gross + (float)$extra['cpp_er'] + (float)($extra['cpp2_er'] ?? 0) + (float)$extra['ei_er'] + (float)$extra['wcb'] + (float)$extra['vac'];
 
                     $stmtBal->execute([
                         $orig['user_id'], 
@@ -117,6 +125,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Update attendance status so it disappears from the audit list
         $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$attendance_id]);
+        sh_after_finalize($pdo, (int)$orig['user_id'], (int)$orig['site_id'], $as_of, (int)($_SESSION['user_id'] ?? 0));
         
         $pdo->commit();
         header("Location: staff_audit.php?msg=Success");

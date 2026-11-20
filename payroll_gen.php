@@ -3,6 +3,8 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 
 // 2. Include the menu generator
 if (file_exists('engine/menu_generator.php')) { 
@@ -69,10 +71,14 @@ if (!$summaries) {
         $sid = $row['site_id'];
         $gross = $row['gross_total'];
 
-        // --- 6. TAX CALCULATIONS ---
-        $cra_deductions = $gross * 0.10; 
-        $er_contribs    = $gross * 0.05; 
-        $net_payable    = $gross - $cra_deductions;
+        $asOf = substr((string)$end_date, 0, 10);
+        sh_after_finalize($pdo, (int)$uid, (int)$sid, $asOf, 0);
+        $gen = pe_line((float)$gross, pe_vacation_rate($pdo, (int)$uid, (int)$sid, $asOf), pe_rates($pdo), [
+            'pdo' => $pdo, 'user_id' => (int)$uid, 'site_id' => (int)$sid, 'org_id' => (int)$row['org_id'], 'work_date' => $asOf,
+        ]);
+        $cra_deductions = (float)$gen['cpp'] + (float)($gen['cpp2'] ?? 0) + (float)$gen['ei'] + (float)$gen['income_tax'];
+        $er_contribs = (float)$gen['cpp_er'] + (float)($gen['cpp2_er'] ?? 0) + (float)$gen['ei_er'] + (float)$gen['wcb'];
+        $net_payable = (float)$gen['net'];
 
         // --- 7. CREATE MASTER ENTRY ---
         $ins = $pdo->prepare("INSERT INTO payrolls (org_id, site_id, user_id, pay_period, gross_total, er_contributions, cra_deductions, net_payable, status) 

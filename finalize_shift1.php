@@ -37,19 +37,20 @@ $bonus_gross   = 0.00;
 // 1. CRA Pensionable & Insurable Gross (Includes wages + travel + cash bonuses)
 $total_taxable_payroll_gross = $regular_gross + $travel_gross + $bonus_gross;
 
-// Stat Deductions Math Matrix Formulas
-$cpp_employee = $total_taxable_payroll_gross * 0.0495; 
-$ei_employee  = $total_taxable_payroll_gross * 0.0166;
-$income_tax   = $total_taxable_payroll_gross * 0.15; // 15% Estimated composite bracket lock
-$net_take_home = $total_taxable_payroll_gross - ($cpp_employee + $ei_employee + $income_tax);
-
-// 2. WCB Assessable Gross Rule: Travel is INCLUDED, Discretionary Bonus is EXCLUDED
-$wcb_assessable_gross = $regular_gross + $travel_gross; 
-$wcb_employer_premium = $wcb_assessable_gross * 0.0155; // 1.55% Corporate WCB Assessment Levy
-
-$cpp_employer_match = $cpp_employee;
-$ei_employer_match  = $ei_employee * 1.4; // Canadian Standard Corporate 1.4x Premium Match Rate
-$total_employer_burden_cost = $total_taxable_payroll_gross + $cpp_employer_match + $ei_employer_match + $wcb_employer_premium;
+$day = !empty($shift_data['clock_in']) ? date('Y-m-d', strtotime($shift_data['clock_in'])) : date('Y-m-d');
+$uid = (int)$shift_data['user_id'];
+$sid = (int)($shift_data['site_id'] ?? 0);
+$fin = pe_line($total_taxable_payroll_gross, pe_vacation_rate($pdo, $uid, $sid, $day), pe_rates($pdo), [
+    'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $sid, 'org_id' => (int)($shift_data['org_id'] ?? 0), 'work_date' => $day,
+]);
+$cpp_employee = (float)$fin['cpp'] + (float)($fin['cpp2'] ?? 0);
+$ei_employee = (float)$fin['ei'];
+$income_tax = (float)$fin['income_tax'];
+$net_take_home = (float)$fin['net'];
+$wcb_employer_premium = (float)$fin['wcb'];
+$cpp_employer_match = (float)$fin['cpp_er'] + (float)($fin['cpp2_er'] ?? 0);
+$ei_employer_match = (float)$fin['ei_er'];
+$total_employer_burden_cost = (float)$fin['pay_gross'] + $cpp_employer_match + $ei_employer_match + $wcb_employer_premium;
 ?>
 <!DOCTYPE html>
 <html>

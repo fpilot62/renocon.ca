@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>10]); // org-scope audit Nov 2026
+
 /** Path: /process_audit.php */
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';

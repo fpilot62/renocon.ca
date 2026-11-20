@@ -7,7 +7,15 @@
  */
 $app = getenv('PAYROLL_APP') ?: '/home/renocon/public_html/payroll';
 $lib = getenv('T4127_LIB') ?: (__DIR__ . '/../payroll_engine/source_deductions_lib.php');
+if (!is_file($lib)) {
+    fwrite(STDERR, "T4127 library not found at $lib\n");
+    exit(1);
+}
 require $lib;
+if (!is_dir(dirname($lib) . '/rates')) {
+    fwrite(STDERR, "Rate packs are not beside the library at " . dirname($lib) . "/rates\n");
+    exit(1);
+}
 require $app . '/db.php';
 if (!isset($pdo) || !$pdo instanceof PDO) {
     fwrite(STDERR, "db.php did not provide a connection\n");
@@ -73,17 +81,35 @@ $nick = isset($s['nick_name']) ? 's.nick_name' : "CONCAT('Site ', s.SId)";
 $sql = "SELECT f.user_id, u.Name AS employee, f.site_id, $nick AS nick_name, $city AS city, $state AS state,
                $prov AS province, $street AS street_address, $zip AS zipcode,
                ROUND(SUM(f.total_gross),2) gross, ROUND(SUM(f.cpp),2) cpp, ROUND(SUM(f.ei),2) ei,
-               ROUND(SUM(f.income_tax),2) tax, ROUND($cpp2,2) cpp2
+               ROUND(SUM(f.income_tax),2) tax, ROUND($cpp2,2) cpp2, MAX(f.$endCol) AS period_end
           FROM payroll_finalized f
           INNER JOIN users u ON u.id=f.user_id AND u.org_id=4
           LEFT JOIN sites s ON s.SId=f.site_id
-         WHERE f.$endCol = ?
          GROUP BY f.user_id, f.site_id, employee, nick_name, city, state, province, street_address, zipcode
-         ORDER BY gross DESC
-         LIMIT 10";
-$st = $pdo->prepare($sql);
-$st->execute([$end]);
+         ORDER BY period_end DESC, gross DESC
+         LIMIT 40";
+$st = $pdo->query($sql);
 $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+$skRows = [];
+$shown = [];
+foreach ($rows as $row) {
+    [$inf] = dry_infer($row);
+    $key = $row['user_id'] . '|' . $row['site_id'];
+    if ($inf === 'SK') {
+        $skRows[$key] = $row;
+    }
+    $shown[$key] = $row;
+}
+$picked = array_values($skRows);
+foreach ($shown as $key => $row) {
+    if (!isset($skRows[$key])) {
+        $picked[] = $row;
+    }
+    if (count($picked) >= 25) {
+        break;
+    }
+}
+$rows = $picked;
 echo "Org 4 dry run. Latest period marker $end. Read only.\n";
 echo str_pad('employee', 22) . str_pad('site', 16) . str_pad('stored prov', 12) . str_pad('inferred', 10) . str_pad('gross', 10) . str_pad('old cpp', 10) . str_pad('old ei', 10) . str_pad('old tax', 10) . str_pad('new cpp', 10) . str_pad('new ei', 10) . "new tax\n";
 foreach ($rows as $row) {
@@ -99,8 +125,9 @@ foreach ($rows as $row) {
             }
         } catch (Throwable $e) {
         }
+        $payDate = substr((string)($row['period_end'] ?: $end), 0, 10);
         $calc = sd_calculate([
-            'pay_date' => substr((string)$end, 0, 10),
+            'pay_date' => $payDate,
             'province' => $inf,
             'periods' => 26,
             'periodic_gross' => (float)$row['gross'],
@@ -110,7 +137,13 @@ foreach ($rows as $row) {
             'ytd_ei' => $ytd['ei'],
         ]);
         if (!empty($calc['ok'])) {
-            $new = ['cpp' => number_format((float)$calc['cpp'] + (float)$calc['cpp2'], 2), 'ei' => number_format((float)$calc['ei'], 2), 'tax' => number_format((float)$calc['income_tax'], 2)];
+            $new = [
+                'cpp' => number_format((float)$calc['cpp'] + (float)$calc['cpp2'], 2),
+                'ei' => number_format((float)$calc['ei'], 2),
+                'tax' => number_format((float)$calc['income_tax'], 2),
+            ];
+        } else {
+            $new = ['cpp' => 'ERR', 'ei' => 'ERR', 'tax' => (string)($calc['error'] ?? 'no pack')];
         }
     }
     echo str_pad(substr((string)$row['employee'], 0, 20), 22)

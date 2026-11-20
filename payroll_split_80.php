@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_cli_only(); // org-scope audit Nov 2026
+
 /**
  * Path: /payroll_split_80.php
  * This page used to print SQL that wrote flat CPP, EI, and tax.

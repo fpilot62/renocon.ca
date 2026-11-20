@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fence'=>['selected_ids'=>'attendance']]); // org-scope audit Nov 2026
+
 include 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
