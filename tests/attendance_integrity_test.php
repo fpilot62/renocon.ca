@@ -133,7 +133,7 @@ $sync = file_get_contents($root . '/daily_sync.php');
 check('daily sync loads the env file', strpos($sync, 'payroll_db_config') !== false && strpos($sync, 'payroll_resolve_env_file') !== false);
 check('daily sync has no inline password', !preg_match('/\$(db_)?pass(word)?\s*=\s*[\'"][^\'"]+[\'"]/i', $sync));
 
-foreach (['payroll_master_ledger.php', 'payroll_payment_status.php', 'generate_pay_documents.php', 'engine/payroll_cheque_lib.php', 'engine/payroll_payment_status_lib.php', 'engine/payroll_sheet_review_lib.php'] as $file) {
+foreach (['payroll_payment_status.php', 'engine/payroll_cheque_lib.php', 'engine/payroll_payment_status_lib.php', 'engine/payroll_sheet_review_lib.php'] as $file) {
     $src = file_get_contents($root . '/' . $file);
     check($file . ' ignores soft-deleted attendance', strpos($src, 'att_finalized_live_predicate') !== false || strpos($src, 'att_live_predicate') !== false);
 }

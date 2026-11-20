@@ -912,6 +912,7 @@ function psr_system_line(array $r, int $orgId): array
     $cpp = array_key_exists('cpp', $r) ? psr_db_amount($r['cpp']) : null;
     $ei = array_key_exists('ei', $r) ? psr_db_amount($r['ei']) : null;
     $tax = array_key_exists('income_tax', $r) ? psr_db_amount($r['income_tax']) : null;
+    $cpp2 = array_key_exists('cpp2', $r) ? (psr_db_amount($r['cpp2']) ?? 0.0) : 0.0;
     $netKnown = $gross !== null && $cpp !== null && $ei !== null && $tax !== null;
     $start = psr_valid_date($r['pay_period'] ?? '') ?: psr_valid_date($r['work_date'] ?? '');
     $end = psr_valid_date($r['pay_period_end'] ?? '') ?: $start;
@@ -927,7 +928,7 @@ function psr_system_line(array $r, int $orgId): array
         'period_end' => $end,
         'work_date' => (string)($r['work_date'] ?? ''),
         'gross' => $gross,
-        'net' => $netKnown ? round($gross - $cpp - $ei - $tax, 2) : null,
+        'net' => $netKnown ? round($gross - $cpp - $cpp2 - $ei - $tax, 2) : null,
         'net_known' => $netKnown,
         'paid' => array_key_exists('paid_amount', $r) ? psr_db_amount($r['paid_amount']) : null,
         'status' => psr_normalize_status($r['payment_status'] ?? ''),
@@ -1005,8 +1006,18 @@ function psr_ensure_menu(PDO $pdo): void
 
 function psr_fetch_system_lines(PDO $pdo, int $orgId, ?int $userId = null): array
 {
+    $cpp2Sql = '';
+    try {
+        $cpp2Col = $pdo->query("SHOW COLUMNS FROM payroll_finalized LIKE 'cpp2'")->fetch(PDO::FETCH_ASSOC);
+        if ($cpp2Col) {
+            $cpp2Sql = ', f.cpp2';
+        }
+    } catch (Throwable $e) {
+        $cpp2Sql = '';
+    }
     $sql = "SELECT f.id, f.user_id, f.site_id, f.work_date, f.pay_period, f.pay_period_end,
-                   f.total_gross, f.cpp, f.ei, f.income_tax, f.paid_amount, f.payment_status,
+                   f.total_gross, f.cpp, f.ei, f.income_tax, f.paid_amount, f.payment_status
+                   $cpp2Sql,
                    u.Name AS employee_name, s.nick_name AS store_name
             FROM payroll_finalized f
             INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?

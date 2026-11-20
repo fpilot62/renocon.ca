@@ -10,6 +10,9 @@
  */
 
 require_once __DIR__ . '/attendance_integrity_lib.php';
+if (is_file(__DIR__ . '/../payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/../payroll_engine/payroll_engine.php';
+}
 
 function pcr_payment_methods(): array
 {
@@ -401,8 +404,8 @@ function pcr_apply_payment(
     $q = $pdo->prepare(
         "SELECT f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id, f.work_date,
                 f.pay_period, f.pay_period_end, f.total_gross, f.paid_amount AS db_paid_amount,
-                f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-                f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
+                " . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . " AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+                " . (function_exists('pe_sql_employer_cpp') ? pe_sql_employer_cpp($pdo, 'f') : 'f.cpp_er') . " AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
          INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
          INNER JOIN sites s ON s.SId=f.site_id AND s.org_id=u.org_id
@@ -637,7 +640,7 @@ function pcr_mark_cheque_paid(PDO $pdo, int $chequeId, int $orgId, int $actorId)
                 $n++;
             } else {
                 $rem = $pdo->prepare(
-                    'SELECT GREATEST(0, total_gross - cpp - ei - income_tax - paid_amount)
+                    'SELECT GREATEST(0, f.total_gross - ' . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . ' - f.ei - f.income_tax - f.paid_amount)
                      FROM payroll_finalized f
                      INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
                      WHERE f.id = ?'
@@ -722,7 +725,7 @@ function pcr_reverse_finalized_payment(PDO $pdo, int $paymentId, int $finalizedI
         return 0.0;
     }
     $q = $pdo->prepare(
-        "SELECT f.id, f.attendance_id, f.paid_amount, f.total_gross, f.cpp, f.ei, f.income_tax
+        "SELECT f.id, f.attendance_id, f.paid_amount, f.total_gross, " . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . " AS cpp, f.ei, f.income_tax
          FROM payroll_finalized f
          INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
          WHERE f.id = ? LIMIT 1"

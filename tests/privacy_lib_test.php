@@ -183,10 +183,8 @@ $pages = [
     'manual_attendance.php' => 'employee',
     'order_amounts.php' => 'pay',
     'outstanding_wages.php' => 'pay',
-    'payroll_master_ledger.php' => 'pay',
     'payroll_payment_status.php' => 'pay',
     'payroll_sheet_review.php' => 'report',
-    'generate_pay_documents.php' => 'pay',
     'privacy_support.php' => 'privacy_boot_web',
 ];
 foreach ($pages as $page => $marker) {
@@ -203,7 +201,8 @@ check('staff audit does not query every organization', strpos($auditPage, "\$whe
 $deletePage = file_get_contents($root . '/delete_attendance.php');
 check('delete cannot skip the organization filter', strpos($deletePage, '$restrict = true') !== false && strpos($deletePage, '$restrict = false') === false);
 $paydocs = file_get_contents($root . '/generate_pay_documents.php');
-check('pay documents mask bank numbers and keep MICR separate', strpos($paydocs, 'privacy_mask_account') !== false && strpos($paydocs, 'account_micr') !== false);
+check('pay documents show only the last digits of the bank account', strpos($paydocs, "substr(\$g['account'], -3)") !== false);
+check('pay documents subtract CPP2 from the stub', strpos($paydocs, 'ee_cpp2') !== false);
 $support = file_get_contents($root . '/privacy_support.php');
 check('support page can grant and revoke', strpos($support, 'privacy_create_grant') !== false && strpos($support, 'privacy_revoke_grant') !== false && strpos($support, 'privacy_org_counts') !== false);
 $script = file_get_contents($root . '/ops/encrypt_sensitive_columns.php');

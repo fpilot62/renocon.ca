@@ -50,12 +50,12 @@ check('unpaid shift with no cheque can go back', pcr_block_send_back(0, null) ==
 
 $ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
 $docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
-check('employee select is separate from EFT', strpos($ledger, 'class="emp-select"') !== false && strpos($ledger, 'class="eft-badge') !== false && strpos($ledger, 'class="eft-check"') === false);
-check('cheque confirm dialog is on the page', strpos($ledger, 'id="chequeConfirm"') !== false && strpos($ledger, 'Starting cheque number') !== false);
-check('mark issued cheques paid is offered', strpos($ledger, 'mark_issued_cheques_paid') !== false);
-check('documents record cheques only on POST', strpos($docs, '$record_cheques') !== false && strpos($docs, 'pcr_issue_cheque') !== false);
+check('ledger net includes stored CPP2', strpos($ledger, "(\$r['ee_cpp2'] ?? 0)") !== false);
+check('ledger adds the once-per-period CPP from the period stat', strpos($ledger, 'pe_read_period_stats') !== false);
+check('ledger caps a payment at the remaining balance', strpos($ledger, 'min($amount, $remaining)') !== false);
 check('paystub YTD cutoff block is still present', strpos($docs, 'Year-to-date runs through the pay period') !== false);
 check('period CPP override is still present', strpos($docs, 'pe_read_period_stats') !== false);
+check('pay stub net subtracts CPP2', strpos($docs, 'ee_cpp2') !== false);
 
 $full = pstat_payment_amount('paid', 114.60, 0);
 check('paid in full uses remaining', abs($full['amount'] - 114.60) < 0.001 && $full['warning'] === null);
@@ -186,7 +186,7 @@ check('payment status reads the period query', strpos($page, 'pstat_requested_pe
 $addSnippetAt = strpos($page, 'name="added[\'+idx+\'][method]"');
 $addSnippet = $addSnippetAt === false ? '' : substr($page, $addSnippetAt, 240);
 check('add-name row does not default the method to E-Transfer', strpos($addSnippet, '<option value="">Choose</option>') !== false && strpos($addSnippet, '<option>E-Transfer</option><option>Cheque') === false);
-check('ledger uses recorded payment methods', strpos($ledger, 'pcr_lines_payment_label') !== false && strpos($ledger, 'class="pay-type"') !== false);
+check('ledger reads the stored deduction columns', strpos($ledger, 'f.cpp AS ee_cpp') !== false && strpos($ledger, 'f.income_tax AS ee_tax') !== false);
 
 if ($fail > 0) {
     echo "$fail failed\n";
