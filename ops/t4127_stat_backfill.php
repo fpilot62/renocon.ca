@@ -184,6 +184,9 @@ function stat_bf_plan(PDO $pdo, int $orgId, string $from, string $to): array {
             foreach ($people->fetchAll(PDO::FETCH_ASSOC) as $person) {
                 $uid = (int)$person['user_id'];
                 $sid = (int)$site['SId'];
+                if (function_exists('sh_stat_excluded') && sh_stat_excluded($pdo, $orgId, $uid, $sid, $h['holiday_date'])) {
+                    continue;
+                }
                 $calc = sh_compute_stat_pay($pdo, $uid, $sid, $h['holiday_date'], $prov);
                 if (!$calc['eligible'] || (float)$calc['amount'] < 0.01) {
                     continue;

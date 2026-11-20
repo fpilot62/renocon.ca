@@ -1045,8 +1045,126 @@ if (!function_exists('sh_bulk_approve_unflagged')) {
     }
 }
 
+if (!function_exists('sh_ensure_stat_exclusions')) {
+    function sh_ensure_stat_exclusions(PDO $pdo): void {
+        $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'sqlite') {
+            $pdo->exec("CREATE TABLE IF NOT EXISTS stat_holiday_exclusions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id INT NOT NULL, user_id INT NOT NULL, site_id INT NOT NULL,
+                holiday_date TEXT NOT NULL, reason TEXT NOT NULL, note TEXT,
+                decided_by INT, decided_at TEXT,
+                UNIQUE (org_id, user_id, site_id, holiday_date))");
+            return;
+        }
+        $pdo->exec("CREATE TABLE IF NOT EXISTS stat_holiday_exclusions (
+            id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            org_id INT NOT NULL, user_id INT NOT NULL, site_id INT NOT NULL,
+            holiday_date DATE NOT NULL, reason VARCHAR(255) NOT NULL, note VARCHAR(255) NULL,
+            decided_by INT NULL, decided_at DATETIME NULL,
+            UNIQUE KEY uq_stat_excl (org_id, user_id, site_id, holiday_date))");
+    }
+}
+
+if (!function_exists('sh_stat_excluded')) {
+    function sh_stat_excluded(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate): ?array {
+        try {
+            sh_ensure_stat_exclusions($pdo);
+            $st = $pdo->prepare('SELECT * FROM stat_holiday_exclusions WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=? LIMIT 1');
+            $st->execute([$orgId, $userId, $siteId, substr($holidayDate, 0, 10)]);
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+            return $row ?: null;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+}
+
+if (!function_exists('sh_record_stat_exclusion')) {
+    function sh_record_stat_exclusion(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $reason, int $byUser = 0, string $note = ''): void {
+        sh_ensure_stat_exclusions($pdo);
+        $holidayDate = substr($holidayDate, 0, 10);
+        $reason = substr(trim($reason), 0, 255);
+        if ($reason === '') {
+            throw new InvalidArgumentException('An exclusion needs a reason.');
+        }
+        $existing = sh_stat_excluded($pdo, $orgId, $userId, $siteId, $holidayDate);
+        $when = date('Y-m-d H:i:s');
+        if ($existing) {
+            $pdo->prepare('UPDATE stat_holiday_exclusions SET reason=?, note=?, decided_by=?, decided_at=? WHERE id=?')
+                ->execute([$reason, $note !== '' ? substr($note, 0, 255) : null, $byUser > 0 ? $byUser : null, $when, (int)$existing['id']]);
+            return;
+        }
+        $pdo->prepare('INSERT INTO stat_holiday_exclusions (org_id, user_id, site_id, holiday_date, reason, note, decided_by, decided_at) VALUES (?,?,?,?,?,?,?,?)')
+            ->execute([$orgId, $userId, $siteId, $holidayDate, $reason, $note !== '' ? substr($note, 0, 255) : null, $byUser > 0 ? $byUser : null, $when]);
+    }
+}
+
+if (!function_exists('sh_drop_unapproved_stat')) {
+    /** Remove an unpaid line that is still waiting for approval. Paid and approved lines stay. */
+    function sh_drop_unapproved_stat(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate): void {
+        $holidayDate = substr($holidayDate, 0, 10);
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        $approval = isset($cols['stat_approval_status']) ? "AND COALESCE(stat_approval_status,'')='pending'" : '';
+        $paid = isset($cols['paid_amount']) ? 'AND COALESCE(paid_amount,0)<=0.02' : '';
+        $pdo->prepare(
+            "DELETE FROM payroll_finalized
+              WHERE org_id=? AND user_id=? AND site_id=? AND work_date=?
+                AND category='Statutory Holiday'
+                AND LOWER(COALESCE(status,'')) NOT IN ('paid','remitted')
+                $approval $paid"
+        )->execute([$orgId, $userId, $siteId, $holidayDate]);
+        try {
+            $pdo->prepare('DELETE FROM statutory_pay_items WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=?')
+                ->execute([$orgId, $userId, $siteId, $holidayDate]);
+        } catch (Throwable $e) {
+        }
+    }
+}
+
+if (!function_exists('sh_decide_stat_line')) {
+    /**
+     * Approve one stat line. A candidate is created and approved in the same step.
+     * Does not mark the line paid. Refuses an exclusion, a paid line, and an amount
+     * change that has no reason.
+     */
+    function sh_decide_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $actorId, ?float $amount, ?float $hours, string $reason, ?string $asOf = null): bool {
+        if (sh_stat_excluded($pdo, $orgId, $userId, $siteId, $holidayDate)) {
+            return false;
+        }
+        $existed = sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate);
+        if (!$existed) {
+            if (!sh_post_stat_line($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, $actorId, null, '', $asOf)) {
+                return false;
+            }
+        }
+        $st = $pdo->prepare(
+            "SELECT id, COALESCE(stat_approval_status,'') AS approval, COALESCE(paid_amount,0) AS paid_amount, LOWER(COALESCE(status,'')) AS pay_status
+               FROM payroll_finalized
+              WHERE user_id=? AND site_id=? AND work_date=? AND category='Statutory Holiday'
+              ORDER BY id DESC LIMIT 1"
+        );
+        $st->execute([$userId, $siteId, substr($holidayDate, 0, 10)]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return false;
+        }
+        if ($row['approval'] === 'approved' || (float)$row['paid_amount'] > 0.02 || in_array($row['pay_status'], ['paid', 'remitted'], true)) {
+            return false;
+        }
+        $ok = sh_approve_stat_line($pdo, $orgId, (int)$row['id'], $actorId, $amount, $hours, $reason);
+        if (!$ok && !$existed) {
+            sh_drop_unapproved_stat($pdo, $orgId, $userId, $siteId, $holidayDate);
+        }
+        return $ok;
+    }
+}
+
 if (!function_exists('sh_post_stat_line')) {
     function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = '', ?string $asOf = null): bool {
+        if (sh_stat_excluded($pdo, $orgId, $userId, $siteId, $holidayDate)) {
+            return false;
+        }
         $calc = sh_compute_stat_pay($pdo, $userId, $siteId, $holidayDate, $province);
         if (!$calc['eligible'] || $calc['amount'] < 0.01) {
             return false;
