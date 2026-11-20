@@ -78,16 +78,18 @@ $prov = isset($s['province']) ? 's.province' : "''";
 $street = isset($s['street_address']) ? 's.street_address' : "''";
 $zip = isset($s['zipcode']) ? 's.zipcode' : "''";
 $nick = isset($s['nick_name']) ? 's.nick_name' : "CONCAT('Site ', s.SId)";
+$periodExpr = isset($f['pay_period_end']) ? "COALESCE(NULLIF(f.pay_period_end,'0000-00-00'), f.work_date)" : 'f.work_date';
 $sql = "SELECT f.user_id, u.Name AS employee, f.site_id, $nick AS nick_name, $city AS city, $state AS state,
                $prov AS province, $street AS street_address, $zip AS zipcode,
+               $periodExpr AS period_end,
                ROUND(SUM(f.total_gross),2) gross, ROUND(SUM(f.cpp),2) cpp, ROUND(SUM(f.ei),2) ei,
-               ROUND(SUM(f.income_tax),2) tax, ROUND($cpp2,2) cpp2, MAX(f.$endCol) AS period_end
+               ROUND(SUM(f.income_tax),2) tax, ROUND($cpp2,2) cpp2
           FROM payroll_finalized f
           INNER JOIN users u ON u.id=f.user_id AND u.org_id=4
           LEFT JOIN sites s ON s.SId=f.site_id
-         GROUP BY f.user_id, f.site_id, employee, nick_name, city, state, province, street_address, zipcode
+         GROUP BY f.user_id, f.site_id, period_end, employee, nick_name, city, state, province, street_address, zipcode
          ORDER BY period_end DESC, gross DESC
-         LIMIT 40";
+         LIMIT 80";
 $st = $pdo->query($sql);
 $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 $skRows = [];
@@ -119,7 +121,7 @@ foreach ($rows as $row) {
         $ytd = ['pensionable' => 0, 'cpp' => 0, 'cpp2' => 0, 'ei' => 0];
         try {
             $ys = $pdo->prepare('SELECT COALESCE(SUM(pensionable),0) p, COALESCE(SUM(cpp),0) c, COALESCE(SUM(cpp2),0) c2, COALESCE(SUM(ei),0) e FROM payroll_period_stat WHERE user_id=? AND site_id=? AND period_end < ?');
-            $ys->execute([(int)$row['user_id'], (int)$row['site_id'], $end]);
+            $ys->execute([(int)$row['user_id'], (int)$row['site_id'], substr((string)$row['period_end'], 0, 10)]);
             if ($yr = $ys->fetch(PDO::FETCH_ASSOC)) {
                 $ytd = ['pensionable' => (float)$yr['p'], 'cpp' => (float)$yr['c'], 'cpp2' => (float)$yr['c2'], 'ei' => (float)$yr['e']];
             }
