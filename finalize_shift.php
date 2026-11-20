@@ -59,7 +59,7 @@ try {
     $ei_mult  = isset($settings['ei_employer_factor']) ? (float)$settings['ei_employer_factor'] : 1.4;
 
     // 5. EXTRACT SHIFT DATA
-    $sql = "SELECT a.id, a.user_id, a.clock_in, a.clock_out, a.approved_hours, a.status, a.transfer_status,
+    $sql = "SELECT a.id, a.user_id, a.site_id, a.clock_in, a.clock_out, a.approved_hours, a.status, a.transfer_status,
                    u.Name, u.hourly_rate, u.official_rate, u.transit_rate, u.ei_exempt, u.employee_type,
                    s.Timezone
             FROM attendance a 
@@ -116,6 +116,45 @@ try {
 } catch (PDOException $e) { 
     die("<div style='padding:20px; font-family:monospace; color:#991b1b; background:#fee2e2;'>Database Core Exception Error: " . htmlspecialchars($e->getMessage()) . "</div>"); 
 }
+
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['preview_deductions'])) {
+    header('Content-Type: application/json');
+    $gross = round((float)($_POST['gross'] ?? 0), 2);
+    $uid = (int)$data['user_id'];
+    $sid = (int)($data['site_id'] ?? 0);
+    $org = (int)($_SESSION['org_id'] ?? 0);
+    $rates = function_exists('pe_rates') ? pe_rates($pdo) : [];
+    $vacRate = function_exists('pe_vacation_rate') ? pe_vacation_rate($pdo, $uid, $sid, $work_as_of) : 0.0;
+    $line = pe_line($gross, $vacRate, $rates, [
+        'pdo' => $pdo,
+        'user_id' => $uid,
+        'site_id' => $sid,
+        'org_id' => $org,
+        'work_date' => $work_as_of,
+        'ei_exempt' => (int)($data['ei_exempt'] ?? 0) === 1,
+        'employee_type' => (string)($data['employee_type'] ?? 'hourly'),
+    ]);
+    $cpp = round((float)($line['cpp'] ?? 0), 2);
+    $cpp2 = round((float)($line['cpp2'] ?? 0), 2);
+    $ei = round((float)($line['ei'] ?? 0), 2);
+    $tax = round((float)($line['income_tax'] ?? 0), 2);
+    $wcb = round((float)($line['wcb'] ?? 0), 2);
+    $cppEr = round((float)($line['cpp_er'] ?? 0) + (float)($line['cpp2_er'] ?? 0), 2);
+    $eiEr = round((float)($line['ei_er'] ?? 0), 2);
+    echo json_encode([
+        'cpp' => $cpp,
+        'cpp2' => $cpp2,
+        'ei' => $ei,
+        'tax' => $tax,
+        'wcb' => $wcb,
+        'cpp_er' => $cppEr,
+        'ei_er' => $eiEr,
+        'net' => round($gross - $cpp - $cpp2 - $ei - $tax, 2),
+        'cost' => round($gross + $cppEr + $eiEr + $wcb, 2),
+        'edition' => (string)($line['edition'] ?? ''),
+    ]);
+    exit;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -162,11 +201,6 @@ try {
     <form action="save_split_payroll.php" method="POST">
         <input type="hidden" name="attendance_id" value="<?= $attendance_id ?>">
         <input type="hidden" name="kind_0" value="<?= $is_transit ? 'transit' : 'regular' ?>">
-        <input type="hidden" id="cpp_rate" value="<?= $cpp_rate ?>">
-        <input type="hidden" id="ei_rate" value="<?= $ei_rate ?>">
-        <input type="hidden" id="fed_rate" value="<?= $fed_rate ?>">
-        <input type="hidden" id="wcb_rate" value="<?= $wcb_rate ?>">
-        <input type="hidden" id="ei_mult" value="<?= $ei_mult ?>">
         <input type="hidden" id="skip_cpp" value="<?= !empty($skip_cpp) ? '1' : '0' ?>">
         <input type="hidden" id="skip_ei" value="<?= !empty($skip_ei) ? '1' : '0' ?>">
         <input type="hidden" id="audit_total_val" value="<?= $net_audit_hrs ?>">
@@ -221,8 +255,9 @@ try {
 
         <div class="tax-container">
             <div class="tax-box">
-                <h4>Employee Deductions Ledger Run <small class="text-muted" style="font-size:10px;">Tax Bracket Baseline: <?= $fed_rate*100 ?>%</small></h4>
+                <h4>Employee Deductions Ledger Run <small class="text-muted" style="font-size:10px;" id="deduction_edition">CRA source deductions</small></h4>
                 <div class="row-item"><span>Canada Pension Plan (CPP):</span> <span id="ee_cpp">-$0.00</span></div>
+                <div class="row-item"><span>Second additional CPP (CPP2):</span> <span id="ee_cpp2">-$0.00</span></div>
                 <div class="row-item"><span>Employment Insurance (EI):</span> <span id="ee_ei">-$0.00</span></div>
                 <div class="row-item"><span>Federal/Provincial Income Tax:</span> <span id="ee_fed" class="text-danger">-$0.00</span></div>
                 <div class="row-item total-row-item"><span>NET WORKER TAKE-HOME PAYOUT:</span> <span id="net_pay" class="text-success">$0.00</span></div>
@@ -231,8 +266,8 @@ try {
             <div class="tax-box">
                 <h4>Employer Corporate Burden Premiums</h4>
                 <div class="row-item"><span>CPP Corporate Match Premium:</span> <span id="er_cpp">+$0.00</span></div>
-                <div class="row-item"><span>EI Corporate Premium Match (<?= $ei_mult ?>x):</span> <span id="er_ei">+$0.00</span></div>
-                <div class="row-item"><span>WCB BC Premium Assessment (<?= $wcb_rate*100 ?>%):</span> <span id="er_wcb">+$0.00</span></div>
+                <div class="row-item"><span>EI employer premium:</span> <span id="er_ei">+$0.00</span></div>
+                <div class="row-item"><span>WCB / WSIB assessment:</span> <span id="er_wcb">+$0.00</span></div>
                 <div class="row-item total-row-item"><span>TOTAL TARGET LABOUR REVENUE COST:</span> <span id="total_cost" class="text-dark">$0.00</span></div>
             </div>
         </div>
@@ -360,23 +395,42 @@ function calculatePayrollMatrix() {
         if (baselineRow.querySelector('.route-checkbox').checked) { taxBasisGross += gBaseline; }
     }
 
-    let cpp = taxBasisGross * parseFloat(document.getElementById('cpp_rate').value);
-    let ei  = taxBasisGross * parseFloat(document.getElementById('ei_rate').value);
-    if (document.getElementById('skip_cpp') && document.getElementById('skip_cpp').value === '1') { cpp = 0; ei = 0; }
-    else if (document.getElementById('skip_ei') && document.getElementById('skip_ei').value === '1') { ei = 0; }
-    const fed = taxBasisGross * parseFloat(document.getElementById('fed_rate').value);
-    const wcb = taxBasisGross * parseFloat(document.getElementById('wcb_rate').value);
-    const eiEr = ei * parseFloat(document.getElementById('ei_mult').value);
+    scheduleDeductionPreview(taxBasisGross);
+}
 
-    document.getElementById('ee_cpp').innerText = '-$' + cpp.toFixed(2);
-    document.getElementById('ee_ei').innerText = '-$' + ei.toFixed(2);
-    document.getElementById('ee_fed').innerText = '-$' + fed.toFixed(2);
-    document.getElementById('net_pay').innerText = '$' + (taxBasisGross - cpp - ei - fed).toFixed(2);
-
-    document.getElementById('er_cpp').innerText = '+$' + cpp.toFixed(2);
-    document.getElementById('er_ei').innerText = '+$' + eiEr.toFixed(2);
-    document.getElementById('er_wcb').innerText = '+$' + wcb.toFixed(2);
-    document.getElementById('total_cost').innerText = '$' + (taxBasisGross + cpp + eiEr + wcb).toFixed(2);
+let deductionPreviewTimer = null;
+function scheduleDeductionPreview(gross) {
+    clearTimeout(deductionPreviewTimer);
+    deductionPreviewTimer = setTimeout(function(){ fetchDeductionPreview(gross); }, 150);
+}
+function moneyLabel(sign, amount) {
+    return sign + '$' + (Number(amount) || 0).toFixed(2);
+}
+function fetchDeductionPreview(gross) {
+    const body = new URLSearchParams();
+    body.set('preview_deductions', '1');
+    body.set('gross', (Number(gross) || 0).toFixed(2));
+    fetch('finalize_shift.php?id=<?= (int)$attendance_id ?>', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+    }).then(function(res){ return res.json(); }).then(function(row){
+        document.getElementById('ee_cpp').innerText = moneyLabel('-', row.cpp);
+        document.getElementById('ee_cpp2').innerText = moneyLabel('-', row.cpp2);
+        document.getElementById('ee_ei').innerText = moneyLabel('-', row.ei);
+        document.getElementById('ee_fed').innerText = moneyLabel('-', row.tax);
+        document.getElementById('net_pay').innerText = moneyLabel('', row.net);
+        document.getElementById('er_cpp').innerText = moneyLabel('+', row.cpp_er);
+        document.getElementById('er_ei').innerText = moneyLabel('+', row.ei_er);
+        document.getElementById('er_wcb').innerText = moneyLabel('+', row.wcb);
+        document.getElementById('total_cost').innerText = moneyLabel('', row.cost);
+        const edition = document.getElementById('deduction_edition');
+        if (edition) edition.innerText = row.edition ? row.edition : 'CRA source deductions';
+    }).catch(function(){
+        const edition = document.getElementById('deduction_edition');
+        if (edition) edition.innerText = 'Deduction preview unavailable';
+    });
 }
 
 window.onload = function() {

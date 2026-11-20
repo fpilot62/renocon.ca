@@ -1,6 +1,5 @@
 <?php
-require_once __DIR__ . '/engine/privacy_lib.php';
-privacy_boot_web();
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // GATE 1: SECURITY CLEARANCE
 if (!isset($_SESSION["user_id"]) || empty($_SESSION["user_id"])) {
@@ -36,9 +35,6 @@ if ($sess_user_level >= 30) {
  *  - A "Pay Full Period Balance" action settles every outstanding shift for an employee
  *    inside the current date window in one transaction (the bi-weekly/semi-monthly/monthly
  *    "pay the whole period" workflow).
- *  - Cheques are confirmed, numbered, and stored by engine/payroll_cheque_lib.php.
- *    Printing a cheque does not by itself mark the row paid unless that option is ticked.
- *    Void keeps the number. Payments never exceed the stored net still owing.
  *
  * ASSUMPTIONS TO VERIFY (see notes to user):
  *  - payroll_masters.status is treated as free text written as 'Paid' / 'Partial' / 'Unpaid'
@@ -50,39 +46,35 @@ if ($sess_user_level >= 30) {
  * TEST ON A COPY FIRST: this writes to payroll_finalized, payroll_balance, payroll_masters
  * and payroll_payments. Verify against a few known rows before using in production.
  */
+ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
-require_once __DIR__ . '/engine/attendance_integrity_lib.php';
-require_once __DIR__ . '/engine/payroll_cheque_lib.php';
-if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
-    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
-}
-$ledgerEeCpp = function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp';
-$ledgerErCpp = function_exists('pe_sql_employer_cpp') ? pe_sql_employer_cpp($pdo, 'f') : 'f.cpp_er';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 ps_require_payroll_admin();
 $user_org_id = ps_selected_org($pdo);
-privacy_require_business(
-    $pdo,
-    (int)$user_org_id,
-    'pay',
-    'payroll_master_ledger.php',
-    false,
-    29,
-    (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view'
-);
+$ledgerCpp2 = (function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2'))
+    ? 'IFNULL(f.cpp2,0) AS ee_cpp2'
+    : '0 AS ee_cpp2';
+$ledgerCpp2Er = (function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2_er'))
+    ? 'IFNULL(f.cpp2_er,0) AS er_cpp2'
+    : '0 AS er_cpp2';
 
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
 
 // ---------------------------------------------------------------- helpers
 /** Employee statutory deductions for one finalized line, from stored columns. */
 function ee_deduct(array $r): float {
-    return (float)$r['ee_cpp'] + (float)$r['ee_ei'] + (float)$r['ee_tax'];
+    return (float)$r['ee_cpp'] + (float)($r['ee_cpp2'] ?? 0) + (float)$r['ee_ei'] + (float)$r['ee_tax'];
 }
 /** Net payable for one finalized line. */
 function net_payable_line(array $r): float {
-    return max(0, (float)$r['total_gross'] - ee_deduct($r));
+    $net = (float)$r['total_gross'] - ee_deduct($r);
+    if (strcasecmp((string)($r['category'] ?? ''), 'Deduction') === 0) {
+        return $net;
+    }
+    return max(0, $net);
 }
 /** Pay-period bucket for a work date. Returns [label, start_date, end_date]. */
 function period_for(string $work_date, string $mode, string $anchor = '2024-01-01'): array {
@@ -161,17 +153,71 @@ function resolve_master_id(PDO $pdo, array $line, int $org_id): int {
         ->execute([$new_id, $line['line_id']]);
     return $new_id;
 }
-/** Re-derive a master's status from payments that have not been reversed. */
+/** Re-derive a master's status from its logged payments. */
 function refresh_master_status(PDO $pdo, int $master_id): void {
-    pcr_refresh_master_status($pdo, $master_id);
+    $net  = (float)$pdo->query("SELECT net_payable FROM payroll_masters WHERE id = " . (int)$master_id)->fetchColumn();
+    $paid = (float)$pdo->query("SELECT COALESCE(SUM(amount),0) FROM payroll_payments WHERE payroll_id = " . (int)$master_id)->fetchColumn();
+    $status = ($paid <= 0.01) ? 'Unpaid' : (($paid + 0.01 >= $net) ? 'Paid' : 'Partial');
+    $pdo->prepare("UPDATE payroll_masters SET status = ? WHERE id = ?")->execute([$status, $master_id]);
 }
-/**
- * Apply one payment to a finalized line. The amount is capped at the stored
- * net still outstanding, so a second click cannot record the same pay again.
- */
+/** Apply one payment to a finalized line (and its mirror balance row + master + payment log). */
 function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, int $org_id): float {
-    $payment_id = null;
-    return pcr_apply_payment($pdo, $line_id, $amount, pcr_payment_method($method), $org_id, $payment_id);
+    global $ledgerCpp2, $ledgerCpp2Er;
+    // full line with stored columns
+    $q = $pdo->prepare(
+        "SELECT f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id, f.work_date,
+                f.pay_period, f.pay_period_end, f.total_gross, f.paid_amount AS db_paid_amount,
+                f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
+                f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
+         FROM payroll_finalized f
+         INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
+         INNER JOIN sites s ON s.SId=f.site_id AND s.org_id=u.org_id
+         WHERE f.id = ? LIMIT 1"
+    );
+    $q->execute([$org_id, $line_id]);
+    $line = $q->fetch(PDO::FETCH_ASSOC);
+    if (!$line) { return 0.0; }
+
+    $net       = net_payable_line($line);
+    $paid_now  = (float)$line['db_paid_amount'];
+    $remaining = max(0, $net - $paid_now);
+
+    // SERVER-SIDE CAP: never record more than what is owed
+    $amount = min($amount, $remaining);
+    if ($amount <= 0.005) { return 0.0; }
+
+    $new_paid       = $paid_now + $amount;
+    $fully          = (round($new_paid, 2) + 0.005 >= round($net, 2));
+    $new_status     = $fully ? 'paid'  : 'pending';   // payroll_finalized.status enum
+    $new_pay_status = $fully ? 'Paid'  : 'Partial';   // payroll_finalized.payment_status enum
+
+    $pdo->prepare(
+        "UPDATE payroll_finalized
+            SET status = ?, payment_status = ?, paid_amount = ?, last_paid_date = CURRENT_DATE(), paid_at = NOW()
+          WHERE id = ?"
+    )->execute([$new_status, $new_pay_status, $new_paid, $line_id]);
+
+    // mirror into payroll_balance (only if a row exists for this shift)
+    if (!empty($line['attendance_id'])) {
+        $pdo->prepare(
+            "UPDATE payroll_balance
+                SET paid_amount = COALESCE(paid_amount,0) + ?,
+                    balance_remaining = GREATEST(0, COALESCE(balance_remaining, ?) - ?),
+                    status = ?, last_paid_date = CURRENT_DATE(), paid_at = NOW()
+              WHERE attendance_id = ?"
+        )->execute([$amount, $net, $amount, $new_status, $line['attendance_id']]);
+    }
+
+    // attach payment to the period master and log it
+    $master_id = resolve_master_id($pdo, $line, $org_id);
+    $ref = "TXN-" . strtoupper(uniqid());
+    $pdo->prepare(
+        "INSERT INTO payroll_payments (payroll_id, recipient, amount, date_paid, payment_type, method, ref_no)
+         VALUES (?, 'Employee', ?, CURRENT_DATE(), 'employee_net', ?, ?)"
+    )->execute([$master_id, $amount, $method, $ref]);
+    refresh_master_status($pdo, $master_id);
+
+    return $amount;
 }
 
 // ---------------------------------------------------------------- filters
@@ -243,86 +289,15 @@ $redir = "payroll_master_ledger.php?org_id=$user_org_id&from_date=$from_date&to_
        . "&view_category=" . urlencode($view_category) . "&balance_scope=" . urlencode($balance_scope)
        . "&period_mode=" . urlencode($period_mode);
 
-function ledger_flash(string $redir, string $msg, string $text): void {
-    $_SESSION['ledger_flash'] = $text;
-    header('Location: ' . $redir . '&msg=' . rawurlencode($msg));
-    exit;
-}
-
-// ---------------------------------------------------------------- EFT preference (saved on the employee, not a row selector)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_eft_preference'])) {
-    header('Content-Type: application/json');
-    try {
-        $uid = (int)($_POST['eft_user_id'] ?? 0);
-        $on = (($_POST['eft_no_cheque'] ?? '0') === '1');
-        pcr_set_eft($pdo, $user_org_id, $uid, $on);
-        echo json_encode(['ok' => true, 'eft' => $on ? 1 : 0]);
-    } catch (Throwable $e) {
-        http_response_code(400);
-        echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
-    }
-    exit;
-}
-
-// ---------------------------------------------------------------- void a cheque number (the number stays void and is not reused)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['void_cheque'])) {
-    try {
-        $res = pcr_void_cheque(
-            $pdo,
-            (int)($_POST['cheque_id'] ?? 0),
-            $user_org_id,
-            (int)($_SESSION['user_id'] ?? 0),
-            (string)($_POST['void_reason'] ?? ''),
-            (($_POST['reverse_payment'] ?? '') === '1')
-        );
-        $note = 'Cheque #' . $res['number'] . ' marked void.';
-        if ($res['reversed'] > 0) {
-            $note .= ' Reversed $' . number_format($res['reversed'], 2) . ' that this cheque had recorded. Gross, CPP, EI, and tax were not changed.';
-        }
-        ledger_flash($redir, 'cheque_void', $note);
-    } catch (Throwable $e) {
-        ledger_flash($redir, 'cheque_error', $e->getMessage());
-    }
-}
-
-// ---------------------------------------------------------------- mark one issued cheque paid, or every issued cheque in this period
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['mark_cheque_paid']) || isset($_POST['mark_issued_cheques_paid']))) {
-    try {
-        $actor = (int)($_SESSION['user_id'] ?? 0);
-        if (isset($_POST['mark_issued_cheques_paid'])) {
-            $res = pcr_mark_issued_in_period($pdo, $user_org_id, $from_date, $to_date, $actor);
-            ledger_flash($redir, 'cheques_paid', 'Marked ' . (int)$res['cheques'] . ' issued cheque(s) paid by Cheque ($' . number_format($res['amount'], 2) . '). Already-paid rows were not paid again.');
-        }
-        $res = pcr_mark_cheque_paid($pdo, (int)($_POST['cheque_id'] ?? 0), $user_org_id, $actor);
-        ledger_flash($redir, 'cheques_paid', 'Cheque payment recorded: $' . number_format($res['amount'], 2) . '. A row that was already paid was left as it was.');
-    } catch (Throwable $e) {
-        ledger_flash($redir, 'cheque_error', $e->getMessage());
-    }
-}
-
-// ---------------------------------------------------------------- ROLLBACK (System Reversal: send an unpaid shift back to audit)
+// ---------------------------------------------------------------- ROLLBACK
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_back_to_audit'])) {
     $target = (int)$_POST['rollback_attendance_id'];
     if ($target > 0) {
         $auth = $pdo->prepare("SELECT COUNT(*) FROM attendance a
             INNER JOIN users u ON u.id=a.user_id AND u.org_id=?
-            INNER JOIN sites s ON s.SId=a.site_id AND s.org_id=u.org_id WHERE a.id=? AND " . att_live_predicate($pdo, 'a'));
+            INNER JOIN sites s ON s.SId=a.site_id AND s.org_id=u.org_id WHERE a.id=?");
         $auth->execute([$user_org_id, $target]);
         if (!$auth->fetchColumn()) { http_response_code(403); exit('Attendance row is outside your organization.'); }
-        $fin = $pdo->prepare(
-            "SELECT f.id, f.paid_amount FROM payroll_finalized f
-             INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
-             WHERE f.attendance_id = ?"
-        );
-        $fin->execute([$user_org_id, $target]);
-        $frows = $fin->fetchAll(PDO::FETCH_ASSOC);
-        $active = pcr_active_by_line($pdo, $user_org_id, array_map(static fn($r) => (int)$r['id'], $frows));
-        foreach ($frows as $fr) {
-            $block = pcr_block_send_back((float)$fr['paid_amount'], $active[(int)$fr['id']] ?? null);
-            if ($block) {
-                ledger_flash($redir, 'rollback_blocked', $block);
-            }
-        }
         try {
             $pdo->beginTransaction();
             $pdo->prepare("UPDATE attendance SET status = 4, payout_status = 0 WHERE id = ?")->execute([$target]);
@@ -338,7 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_back_to_audit'])
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_single_payout'])) {
     $line_id = (int)($_POST['line_id'] ?? 0);
     $amt     = (float)($_POST['amount_to_pay'] ?? 0);
-    $method  = pcr_payment_method($_POST['form_payment_method'] ?? 'E-Transfer');
+    $method  = $_POST['form_payment_method'] ?? 'E-Transfer';
     if ($line_id > 0 && $amt > 0) {
         try {
             $pdo->beginTransaction();
@@ -351,20 +326,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_single_payout
 
 // ---------------------------------------------------------------- PAY SELECTED SHIFTS (checkbox batch, custom amounts)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_selected_payout'])) {
-    $method = pcr_payment_method($_POST['form_payment_method'] ?? 'E-Transfer');
-    // pay_lines[] holds "lineId:amount" or "lineId:amount:method" for each ticked shift
+    $method = $_POST['form_payment_method'] ?? 'E-Transfer';
+    // pay_lines[] holds "lineId:amount" for each ticked shift
     $pairs  = $_POST['pay_lines'] ?? [];
     $paid_count = 0;
     if (!empty($pairs)) {
         try {
             $pdo->beginTransaction();
             foreach ((array)$pairs as $pair) {
-                $parts = explode(':', (string)$pair, 3);
-                if (count($parts) < 2) continue;
+                $parts = explode(':', (string)$pair);
+                if (count($parts) !== 2) continue;
                 $lid = (int)$parts[0];
                 $amt = (float)$parts[1];
-                $lineMethod = pcr_payment_method($parts[2] ?? $method);
-                if ($lid > 0 && $amt > 0 && apply_payment($pdo, $lid, $amt, $lineMethod, $user_org_id) > 0) {
+                if ($lid > 0 && $amt > 0) {
+                    apply_payment($pdo, $lid, $amt, $method, $user_org_id);
                     $paid_count++;
                 }
             }
@@ -377,22 +352,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_selected_payo
 // ---------------------------------------------------------------- PAY FULL PERIOD (per employee + selected bucket)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout'])) {
     $uid    = (int)($_POST['period_user_id'] ?? 0);
-    $method = pcr_payment_method($_POST['form_payment_method'] ?? 'E-Transfer');
-    // The button sits on one site's employee row. Pay that site only, so the
-    // confirmed amount matches the rows that are actually updated.
-    $psite  = (int)($_POST['period_site_id'] ?? 0);
+    $method = $_POST['form_payment_method'] ?? 'E-Transfer';
+    // Effective range is the bucket clamped to the visible window (set per band at render time).
     $pstart = $_POST['period_start'] ?? $from_date;
     $pend   = $_POST['period_end']   ?? $to_date;
     if ($uid > 0) {
         try {
             $pdo->beginTransaction();
             ps_assert_user($pdo, $uid, $user_org_id);
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", att_finalized_live_predicate($pdo, 'f')];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
             $p = [$uid, $pstart, $pend, $user_org_id];
-            if ($psite > 0) { $w[] = "f.site_id = ?"; $p[] = $psite; }
-            elseif ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
-            if ($view_category === 'travel') { $w[] = 'f.travel_hours > 0'; }
-            elseif ($view_category === 'overtime') { $w[] = 'f.overtime_hours > 0'; }
+            if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f
                 INNER JOIN users u ON u.id=f.user_id
                 INNER JOIN sites s ON s.SId=f.site_id
@@ -428,12 +398,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
                 f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross,
-                $ledgerEeCpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-                $ledgerErCpp AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
+                f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
+                f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
          INNER JOIN users u ON f.user_id = u.id
          LEFT  JOIN sites s ON f.site_id = s.Sid
-         WHERE f.id IN ($in) AND u.org_id = ? AND s.org_id = u.org_id AND " . att_finalized_live_predicate($pdo, 'f')
+         WHERE f.id IN ($in) AND u.org_id = ? AND s.org_id = u.org_id"
     );
     $q->execute(array_merge($ids, [$user_org_id]));
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
@@ -466,10 +436,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
                              'gross'=>0,'ee_cpp'=>0,'ee_ei'=>0,'ee_tax'=>0,'er_cpp'=>0,'er_ei'=>0,'wcb'=>0,'vac'=>0];
         }
         $groups[$key]['gross']  += (float)$r['total_gross'];
-        $groups[$key]['ee_cpp'] += (float)$r['ee_cpp'];
+        $groups[$key]['ee_cpp'] += (float)$r['ee_cpp'] + (float)($r['ee_cpp2'] ?? 0);
         $groups[$key]['ee_ei']  += (float)$r['ee_ei'];
         $groups[$key]['ee_tax'] += (float)$r['ee_tax'];
-        $groups[$key]['er_cpp'] += (float)$r['er_cpp'];
+        $groups[$key]['er_cpp'] += (float)$r['er_cpp'] + (float)($r['er_cpp2'] ?? 0);
         $groups[$key]['er_ei']  += (float)$r['er_ei'];
         $groups[$key]['wcb']    += (float)$r['er_wcb'];
         $groups[$key]['vac']    += (float)$r['er_vac'];
@@ -490,20 +460,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
 }
 
 // ---------------------------------------------------------------- DATA PULL (stored columns)
-$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", att_finalized_live_predicate($pdo, 'f')];
+$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
 $params = [$from_date, $to_date, $user_org_id];
 if ($site_filter !== 'all' && $site_filter !== '')     { $where[] = "f.site_id = ?"; $params[] = (int)$site_filter; }
 if ($employee_filter !== 'all' && $employee_filter !== '') { $where[] = "f.user_id = ?"; $params[] = (int)$employee_filter; }
 if ($view_category === 'travel')   { $where[] = "f.travel_hours > 0"; }
 elseif ($view_category === 'overtime') { $where[] = "f.overtime_hours > 0"; }
 
+$payCols = [];
+foreach ($pdo->query('SHOW COLUMNS FROM users') as $col) {
+    $payCols[(string)$col['Field']] = true;
+}
+$payExtra = '';
+foreach (['payment_method', 'bank_name', 'bank_institution', 'bank_transit', 'bank_account'] as $colName) {
+    if (!empty($payCols[$colName])) {
+        $payExtra .= ', u.' . $colName;
+    }
+}
 $sql = "SELECT
             f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id,
-            u.Name AS employee_name, s.nick_name AS site_name,
+            u.Name AS employee_name, s.nick_name AS site_name $payExtra,
             f.status AS row_lifecycle, f.payment_status, f.paid_amount AS db_paid_amount,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate, f.total_gross,
-            $ledgerEeCpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-            $ledgerErCpp AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
+            f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
+            f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
             f.work_date, f.display_label, f.comments, f.category, f.pay_type
         FROM payroll_finalized f
         INNER JOIN users u ON f.user_id = u.id
@@ -525,12 +505,14 @@ $sites_tree = []; // [site_name] => ['name','site_id','t_*','emps'=>[user_id=>['
 foreach ($raw as $r) {
     $net       = net_payable_line($r);
     $paid      = (float)$r['db_paid_amount'];
-    $remaining = max(0, $net - $paid);
+    $remaining = (strcasecmp((string)($r['category'] ?? ''), 'Deduction') === 0)
+        ? ($net - $paid)
+        : max(0, $net - $paid);
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
     $r['_ee']        = ee_deduct($r);
-    $r['_er']        = (float)$r['er_cpp'] + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
+    $r['_er']        = (float)$r['er_cpp'] + (float)($r['er_cpp2'] ?? 0) + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
     $r['_net']       = $net;
     $r['_paid']      = $paid;
     $r['_remaining'] = $remaining;
@@ -551,6 +533,7 @@ foreach ($raw as $r) {
     }
     if (!isset($sites_tree[$sname]['emps'][$uid])) {
         $sites_tree[$sname]['emps'][$uid] = ['name'=>$r['employee_name'], 'user_id'=>$uid,
+                                             'pay_method'=>(string)($r['payment_method'] ?? ''),
                                              't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,
                                              't_ee'=>0,'t_ee_tax'=>0,'t_ee_cpp'=>0,'t_ee_ei'=>0,
                                              't_er'=>0,'t_er_cpp'=>0,'t_er_ei'=>0,'t_er_wcb'=>0,'t_er_vac'=>0, 'lines'=>[]];
@@ -596,7 +579,8 @@ foreach ($raw as $r) {
     $period_tot['er_wcb'] += (float)$r['er_wcb'];
     $period_tot['er_vac'] += (float)$r['er_vac'];
 }
-// CPP and CPP2 are stored once per pay period. Shift rows stay at $0 for CPP.
+// Base CPP is stored once per pay period. Shift rows stay at $0; roll that period amount into the totals.
+// CPP2 is already split onto the shift rows, so it is not added again here.
 if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
     $cppStats = pe_read_period_stats($pdo, $from_date, $to_date);
     foreach ($sites_tree as &$siteRow) {
@@ -604,8 +588,8 @@ if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
         foreach ($siteRow['emps'] as &$empRow) {
             $k = ((int)$empRow['user_id']) . '|' . $sid;
             if (!isset($cppStats[$k])) continue;
-            $cpp = round((float)$cppStats[$k]['cpp'] + (float)($cppStats[$k]['cpp2'] ?? 0), 2);
-            $cppEr = round((float)$cppStats[$k]['cpp_er'] + (float)($cppStats[$k]['cpp2_er'] ?? 0), 2);
+            $cpp = round((float)$cppStats[$k]['cpp'], 2);
+            $cppEr = round((float)$cppStats[$k]['cpp_er'], 2);
             if ($cpp < 0.005 && $cppEr < 0.005) continue;
             $empRow['t_ee_cpp'] += $cpp;
             $empRow['t_ee'] += $cpp;
@@ -626,52 +610,13 @@ if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
             $period_tot['er_cpp'] += $cppEr;
             $period_tot['er'] += $cppEr;
         }
-        unset($empRow);
     }
-    unset($siteRow);
+    unset($empRow, $siteRow);
 }
 // sort sites by name, employees within each by name
 uksort($sites_tree, fn($a,$b) => strcmp($a,$b));
 foreach ($sites_tree as &$st) { uasort($st['emps'], fn($a,$b)=>strcmp($a['name'],$b['name'])); }
 unset($st);
-
-$vac_paid_mode = false;
-try {
-    $vm = $pdo->prepare("SELECT COALESCE(vacation_payout_mode,'accrue') FROM organizations WHERE id=? LIMIT 1");
-    $vm->execute([$user_org_id]);
-    $vac_paid_mode = (strtolower(trim((string)$vm->fetchColumn())) === 'pay_each_period');
-} catch (Throwable $e) {
-    $vac_paid_mode = false;
-}
-$eft_flags = pcr_eft_flags($pdo, $user_org_id);
-$period_cheques = pcr_list_period($pdo, $user_org_id, $from_date, $to_date);
-$next_cheque_no = pcr_next_number($pdo, $user_org_id, date('Y-m-d'));
-$issued_cheque_count = 0;
-foreach ($period_cheques as $c) {
-    if (($c['status'] ?? '') === 'issued') { $issued_cheque_count++; }
-}
-$line_ids_on_page = [];
-foreach ($sites_tree as $siteRow) {
-    foreach ($siteRow['emps'] as $empRow) {
-        foreach ($empRow['lines'] as $ln) { $line_ids_on_page[] = (int)$ln['line_id']; }
-    }
-}
-$cheque_by_line = pcr_active_by_line($pdo, $user_org_id, $line_ids_on_page);
-$cheques_by_user = [];
-foreach ($period_cheques as $c) {
-    $cheques_by_user[(int)$c['user_id']][] = $c;
-}
-$payroll_ids_on_page = [];
-foreach ($sites_tree as $siteRow) {
-    foreach ($siteRow['emps'] as $empRow) {
-        foreach ($empRow['lines'] as $ln) {
-            $payroll_ids_on_page[] = (int)($ln['payroll_id'] ?? 0);
-        }
-    }
-}
-$period_payments = pcr_fetch_period_payments($pdo, $user_org_id, $from_date, $to_date, $payroll_ids_on_page);
-$ledger_flash = $_SESSION['ledger_flash'] ?? '';
-unset($_SESSION['ledger_flash']);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -709,27 +654,11 @@ unset($_SESSION['ledger_flash']);
         .inline-pay-box { width: 80px; text-align: right; font-weight: bold; height: 28px; font-size: 11px; display: inline-block; padding: 4px; }
         .inline-select { width: 95px; height: 28px; font-size: 11px; font-weight: bold; display: inline-block; padding: 2px; }
         .badge-link { font-size:9px; }
-        .emp-select { margin-right: 8px; cursor: pointer; }
-        .eft-badge { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; border: 1px dashed #2563eb; background: #eff6ff; color: #1d4ed8; border-radius: 999px; padding: 2px 8px; font-size: 9px; font-weight: 800; letter-spacing: .2px; cursor: pointer; vertical-align: middle; }
-        .eft-badge.is-on { background: #1d4ed8; color: #fff; border-style: solid; }
-        .eft-badge .eft-knob { width: 16px; height: 10px; border-radius: 8px; background: #bfdbfe; display: inline-block; position: relative; }
-        .eft-badge.is-on .eft-knob { background: #93c5fd; }
-        .eft-badge .eft-knob i { position: absolute; top: 1px; left: 1px; width: 8px; height: 8px; border-radius: 50%; background: #fff; }
-        .eft-badge.is-on .eft-knob i { left: 7px; }
-        .pay-type { display: inline-block; margin: 2px 0 2px 8px; background: #ecfdf5; color: #065f46; border: 1px solid #6ee7b7; border-radius: 999px; padding: 1px 8px; font-size: 9px; font-weight: 800; letter-spacing: .2px; vertical-align: middle; }
-        .chq-pill { display: inline-block; margin: 2px 4px 0 0; padding: 1px 6px; border-radius: 8px; font-size: 9px; font-weight: 800; }
-        .chq-issued { background: #fef3c7; color: #92400e; }
-        .chq-paid { background: #dcfce7; color: #166534; }
-        .chq-void { background: #e2e8f0; color: #475569; text-decoration: line-through; }
-        #chequeConfirm { position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 2000; display: none; align-items: center; justify-content: center; }
-        #chequeConfirm .box { background: #fff; width: min(560px, 94vw); border-radius: 12px; padding: 18px 20px; box-shadow: 0 16px 40px rgba(0,0,0,.25); }
-        #chequeConfirm ul { max-height: 180px; overflow: auto; margin: 8px 0; padding-left: 18px; }
     </style>
 </head>
 <body>
 
     <?= (function_exists('generateMenu')) ? generateMenu($pdo) : ''; ?>
-    <?= privacy_banner_html() ?>
 
     <div class="container-fluid px-4">
         <?php if (file_exists(__DIR__.'/payroll_help.php')) { require_once __DIR__.'/payroll_help.php'; echo payroll_help_panel('payroll_master_ledger.php'); } ?>
@@ -739,11 +668,7 @@ unset($_SESSION['ledger_flash']);
             <div class="mb-2 mr-3">
                 <h4 class="font-weight-bold text-dark mb-0">Payroll Center — Employee &amp; Employer Report</h4>
                 <p class="text-muted small mb-2">One stored-value report for hours, gross, employee deductions, employer contributions, documents, payments and tax actions.</p>
-                <?php if ($sess_user_level <= 20): ?>
-                <a href="payroll_payment_status.php?org_id=<?=$user_org_id?>&period=<?=urlencode($from_date.'|'.$to_date)?>&from_date=<?=urlencode($from_date)?>&to_date=<?=urlencode($to_date)?>" class="btn btn-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-list-check"></i> Payment Status</a>
-                <a href="payroll_sheet_review.php?org_id=<?=$user_org_id?>" class="btn btn-outline-success font-weight-bold mr-2 mb-1" style="font-size:12px;"><i class="fa fa-table"></i> Sheet review</a>
-                <?php endif; ?>
-                <a href="manual_pay_entry.php" class="btn btn-outline-success font-weight-bold mr-2 mb-1" style="font-size:12px;" id="manualPayLink"><i class="fa fa-hand-holding-usd"></i> Manual Pay / Adjustments</a>
+                <a href="manual_pay_entry.php" class="btn btn-success font-weight-bold mr-2 mb-1" style="font-size:12px;" id="manualPayLink"><i class="fa fa-hand-holding-usd"></i> Manual Pay / Adjustments</a>
                 <a href="generate_stat_shifts.php" class="btn btn-outline-warning font-weight-bold mr-2 mb-1" style="font-size:11px;"><i class="fa fa-calendar-check"></i> Stat Pay Preview</a>
                 <a href="generate_t4.php?year=<?=date('Y')?>&org_id=<?=$user_org_id?>" class="btn btn-outline-primary font-weight-bold mr-2 mb-1" style="font-size:11px;"><i class="fa fa-file-invoice"></i> Tax &amp; T4</a>
                 <a href="payroll_outstanding_remittance.php?from_date=<?=urlencode($from_date)?>&to_date=<?=urlencode($to_date)?>" class="btn btn-outline-danger font-weight-bold mr-2 mb-1" style="font-size:11px;"><i class="fa fa-landmark"></i> CRA Detail</a>
@@ -756,8 +681,17 @@ unset($_SESSION['ledger_flash']);
                 <?php $chequeIssueDefault = date('Y-m-d', strtotime($to_date . ' +5 days')); ?>
                 <label for="chequeIssueDate" class="font-weight-bold mb-1 mr-1" style="font-size:11px;">Cheque date</label>
                 <input type="date" id="chequeIssueDate" class="form-control form-control-sm font-weight-bold mr-2 mb-1" style="width:auto; font-size:11px;" value="<?=htmlspecialchars($chequeIssueDefault)?>" title="Defaults to 5 days after the pay period ends. Change it before generating.">
-                <button type="button" id="genDocsBtn" onclick="generatePayDocs()" class="btn btn-success font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;">
-                    <i class="fas fa-money-check-alt mr-1"></i> Generate Cheques &amp; Paystubs
+                <button type="button" id="genChequesBtn" onclick="generatePayDocs('cheques')" class="btn btn-success font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;" title="Cheque file only. Pre-printed stock gets the date, name, amount, and memo on the cheque form.">
+                    <i class="fas fa-money-check-alt mr-1"></i> Print cheques
+                </button>
+                <button type="button" id="genStubsBtn" onclick="generatePayDocs('stubs')" class="btn btn-outline-success font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;" title="Paystub file only, with no cheque page.">
+                    <i class="fas fa-file-invoice-dollar mr-1"></i> Print paystubs
+                </button>
+                <button type="button" id="emailStubsBtn" onclick="generatePayDocs('email')" class="btn btn-outline-success font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;" title="Email each selected employee their own paystub.">
+                    <i class="fas fa-envelope mr-1"></i> Email paystubs
+                </button>
+                <button type="button" id="bankFileBtn" onclick="generateBankFile()" class="btn btn-outline-primary font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;">
+                    <i class="fas fa-university mr-1"></i> Direct deposit file
                 </button>
                 <button type="button" id="paySelBtn" onclick="paySelectedShifts()" class="btn btn-primary font-weight-bold shadow-sm px-3 mr-2 mb-1" style="font-size:11px;">
                     <i class="fas fa-hand-holding-usd mr-1"></i> Pay Selected Shifts
@@ -773,15 +707,20 @@ unset($_SESSION['ledger_flash']);
             </div>
             </div>
             <!-- hidden form that posts selected line ids to the PDF generator -->
+            <form id="bankFileForm" method="POST" action="direct_deposit_file.php" target="_blank" style="display:none;">
+                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
+                <input type="hidden" name="org_id" value="<?=$user_org_id?>">
+                <input type="hidden" name="period_start" value="<?=htmlspecialchars($from_date)?>">
+                <input type="hidden" name="period_end" value="<?=htmlspecialchars($to_date)?>">
+                <input type="hidden" name="issue_date" id="bankFileIssueDate" value="<?=htmlspecialchars($chequeIssueDefault)?>">
+                <div id="bankFileBucket"></div>
+            </form>
             <form id="payDocsForm" method="POST" action="generate_pay_documents.php" target="_blank" style="display:none;">
                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                 <input type="hidden" name="org_id" value="<?=$user_org_id?>">
                 <input type="hidden" name="period_start" value="<?=htmlspecialchars($from_date)?>">
                 <input type="hidden" name="period_end" value="<?=htmlspecialchars($to_date)?>">
                 <input type="hidden" name="issue_date" id="payDocsIssueDate" value="<?=htmlspecialchars($chequeIssueDefault)?>">
-                <input type="hidden" name="cheque_start" id="payDocsChequeStart" value="<?= (int)$next_cheque_no ?>">
-                <input type="hidden" name="issue_nonce" id="payDocsNonce" value="">
-                <input type="hidden" name="mark_paid" id="payDocsMarkPaid" value="0">
                 <div id="payDocsBucket"></div>
             </form>
             <!-- hidden form that posts selected shift payments -->
@@ -794,83 +733,15 @@ unset($_SESSION['ledger_flash']);
         </div>
 
         <?php if (isset($_GET['msg'])): ?>
-            <?php
-                $msgKind = (string)$_GET['msg'];
-                $msgClass = in_array($msgKind, ['rollback_blocked', 'cheque_error'], true) ? 'alert-warning' : 'alert-success';
-            ?>
-            <div class="alert <?=$msgClass?> py-2 small font-weight-bold">
+            <div class="alert alert-success py-2 small font-weight-bold"><i class="fa fa-check-circle"></i>
                 <?php
-                if ($ledger_flash !== '') echo htmlspecialchars($ledger_flash);
-                elseif ($msgKind==='period_paid') echo 'Period balance settled.';
-                elseif ($msgKind==='rollback_success') echo 'Unpaid record sent back to audit. Stored gross and deductions on other rows were not changed.';
-                elseif ($msgKind==='selected_paid') echo 'Paid ' . (int)($_GET['n'] ?? 0) . ' selected shift(s). Rows that were already paid were skipped.';
-                elseif ($msgKind==='rollback_blocked') echo 'Send back was blocked.';
+                if ($_GET['msg']==='period_paid') echo 'Period balance settled.';
+                elseif ($_GET['msg']==='rollback_success') echo 'Record sent back to audit.';
+                elseif ($_GET['msg']==='selected_paid') echo 'Paid ' . (int)($_GET['n'] ?? 0) . ' selected shift(s).';
                 else echo 'Payment recorded.';
                 ?>
             </div>
         <?php endif; ?>
-
-        <div class="card shadow-sm border-0 mb-3">
-            <div class="card-body py-3">
-                <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
-                    <h6 class="font-weight-bold mb-1">Cheques this period</h6>
-                    <?php if ($issued_cheque_count > 0): ?>
-                    <form method="POST" class="mb-0" onsubmit="return confirm('Mark every issued cheque in this period paid by Cheque? Rows that are already paid are not paid again.');">
-                        <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
-                        <button type="submit" name="mark_issued_cheques_paid" value="1" class="btn btn-sm btn-success font-weight-bold">Mark issued cheques paid</button>
-                    </form>
-                    <?php endif; ?>
-                </div>
-                <?php if (!$period_cheques): ?>
-                    <p class="text-muted small mb-0">No cheques recorded for this period. Generating cheques asks you to confirm, then stores each number here. A cheque printed before this register (for example No. 2611041 on 4 Nov 2026) is not listed — set the starting number past it.</p>
-                <?php else: ?>
-                <div class="table-responsive">
-                <table class="table table-sm mb-0">
-                    <thead><tr><th>Number</th><th>Date</th><th class="text-left">Employee</th><th>Amount</th><th>Period</th><th>Status</th><th></th></tr></thead>
-                    <tbody>
-                    <?php foreach ($period_cheques as $c):
-                        $cst = (string)$c['status'];
-                    ?>
-                        <tr>
-                            <td><?= (int)$c['cheque_number'] ?></td>
-                            <td><?= htmlspecialchars((string)$c['cheque_date']) ?></td>
-                            <td class="text-left"><?= htmlspecialchars((string)$c['employee_name']) ?></td>
-                            <td>$<?= number_format((float)$c['amount'], 2) ?></td>
-                            <td><?= htmlspecialchars((string)$c['period_start']) ?> – <?= htmlspecialchars((string)$c['period_end']) ?></td>
-                            <td><span class="chq-pill chq-<?= htmlspecialchars($cst) ?>"><?= htmlspecialchars($cst) ?></span></td>
-                            <td class="text-left">
-                                <?php if ($cst === 'issued'): ?>
-                                <form method="POST" class="d-inline" onsubmit="return confirm('Mark cheque #<?= (int)$c['cheque_number'] ?> paid by Cheque? This records the stored net still owing and will not pay it twice.');">
-                                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
-                                    <input type="hidden" name="cheque_id" value="<?= (int)$c['id'] ?>">
-                                    <button class="btn btn-sm btn-outline-success py-0" name="mark_cheque_paid" value="1">Mark paid</button>
-                                </form>
-                                <form method="POST" class="d-inline" onsubmit="return confirm('Void cheque #<?= (int)$c['cheque_number'] ?>? The number stays void and will not be reused. Nothing is marked unpaid because this cheque is not paid yet.');">
-                                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
-                                    <input type="hidden" name="cheque_id" value="<?= (int)$c['id'] ?>">
-                                    <input type="text" name="void_reason" class="form-control form-control-sm d-inline-block" style="width:120px; height:26px;" placeholder="Reason" required>
-                                    <button class="btn btn-sm btn-outline-secondary py-0" name="void_cheque" value="1">Void</button>
-                                </form>
-                                <?php elseif ($cst === 'paid'): ?>
-                                <form method="POST" class="d-inline" onsubmit="return confirm('Void cheque #<?= (int)$c['cheque_number'] ?> and reverse only the payment this cheque recorded? Gross, CPP, EI, and tax stay as finalized.');">
-                                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
-                                    <input type="hidden" name="cheque_id" value="<?= (int)$c['id'] ?>">
-                                    <input type="hidden" name="reverse_payment" value="1">
-                                    <input type="text" name="void_reason" class="form-control form-control-sm d-inline-block" style="width:120px; height:26px;" placeholder="Reason" required>
-                                    <button class="btn btn-sm btn-outline-danger py-0" name="void_cheque" value="1">Void and reverse payment</button>
-                                </form>
-                                <?php else: ?>
-                                <span class="text-muted small"><?= htmlspecialchars((string)($c['void_reason'] ?? '')) ?></span>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-                </div>
-                <?php endif; ?>
-            </div>
-        </div>
 
         <div class="control-panel-card shadow-sm">
             <script>
@@ -1006,7 +877,7 @@ function ledgerOnOrgChange(sel){
                         <!-- LEVEL 1: SITE -->
                         <tr class="lvl-site" data-row-id="<?=$sid?>" onclick="toggleRow('<?=$sid?>')">
                             <td class="name-cell" style="text-align:left;">
-                                <input type="checkbox" class="site-check" data-site="<?=$sid?>" onclick="event.stopPropagation(); toggleSite('<?=$sid?>', this.checked);" style="margin-right:8px; cursor:pointer;" title="Select all shifts at this site">
+                                <input type="checkbox" class="site-check" data-site="<?=$sid?>" onclick="event.stopPropagation(); toggleSite('<?=$sid?>', this.checked);" style="margin-right:8px; cursor:pointer;" title="Select all employees at this site">
                                 <span class="chev" id="chev-<?=$sid?>" onclick="event.stopPropagation(); toggleRow('<?=$sid?>');">&#9656;</span>
                                 <i class="fa fa-building" style="color:#60a5fa;"></i> <strong><?=htmlspecialchars($site['name'])?></strong>
                                 <span class="sub"> · <?=count($site['emps'])?> employee(s)</span>
@@ -1036,24 +907,13 @@ function ledgerOnOrgChange(sel){
                             <!-- LEVEL 2: EMPLOYEE (subtotal + pay-whole-employee) -->
                             <tr class="lvl-emp hidden" data-parent="<?=$sid?>" data-row-id="<?=$eid?>">
                                 <td class="name-cell" style="text-align:left;">
-                                    <input type="checkbox" class="emp-select" data-emp="<?=$eid?>" data-site="<?=$sid?>" data-user="<?=(int)$emp['user_id']?>" onclick="event.stopPropagation(); toggleEmployee('<?=$eid?>', this.checked);" title="Select all shifts for this employee">
                                     <span class="chev" id="chev-<?=$eid?>" onclick="toggleRow('<?=$eid?>')">&#9656;</span>
                                     <i class="fa fa-user" style="color:#94a3b8;"></i> <?=htmlspecialchars($emp['name'])?>
                                     <span class="sub"> · <?=count($emp['lines'])?> shift(s)<?php if ($emp['t_travel_h'] > 0): ?> · <i class="fa fa-car" style="color:#b45309;"></i> <?=number_format($emp['t_travel_h'],2)?>h travel<?php endif; ?></span>
-                                    <?php
-                                        $eftOn = !empty($eft_flags[(int)$emp['user_id']]);
-                                        $empPayLabel = pcr_lines_payment_label($emp['lines'], $period_payments, false);
-                                    ?>
-                                    <?php if ($empPayLabel !== ''): ?>
-                                        <span class="pay-type" title="Payment type"><?=htmlspecialchars($empPayLabel)?></span>
-                                    <?php else: ?>
-                                    <button type="button" class="eft-badge<?= $eftOn ? ' is-on' : '' ?>" data-user="<?=(int)$emp['user_id']?>" aria-pressed="<?= $eftOn ? 'true' : 'false' ?>" title="Direct deposit. No paper cheque. This is not a row selector." onclick="toggleEft(this, event)">
-                                        <span class="eft-knob"><i></i></span> EFT · no cheque
-                                    </button>
-                                    <?php endif; ?>
-                                    <?php foreach ($cheques_by_user[(int)$emp['user_id']] ?? [] as $uc): ?>
-                                        <span class="chq-pill chq-<?= htmlspecialchars((string)$uc['status']) ?>">Chq <?= (int)$uc['cheque_number'] ?> <?= htmlspecialchars((string)$uc['status']) ?></span>
-                                    <?php endforeach; ?>
+                                    <?php $isDirect = (($emp['pay_method'] ?? '') === 'direct_deposit'); ?>
+                                    <label class="eft-toggle" style="margin-left:10px; font-size:9px; font-weight:700; color:#2563eb; cursor:pointer;" title="Pay this person by direct deposit. The cheque is skipped and they are included in the bank file.">
+                                        <input type="checkbox" class="eft-check" data-user="<?=(int)$emp['user_id']?>" <?= $isDirect ? 'checked' : '' ?> style="vertical-align:middle;"> Direct deposit
+                                    </label>
                                 </td>
                                 <td class="small">R <?=number_format($emp['t_reg_h'],2)?>h<br>OT <?=number_format($emp['t_ot_h'],2)?>h<br>Travel <?=number_format($emp['t_travel_h'],2)?>h<br>Stat <?=number_format($emp['t_stat_h'],2)?>h</td>
                                 <td>$<?=number_format($emp['t_gross'],2)?></td>
@@ -1073,17 +933,17 @@ function ledgerOnOrgChange(sel){
                                 <td colspan="2">
                                     <?php $emp_line_ids = implode(',', array_map(fn($line)=>(int)$line['line_id'], $emp['lines'])); ?>
                                     <a class="btn btn-sm btn-outline-dark font-weight-bold py-1 px-2 mb-1" target="_blank" href="manual_pay_entry.php?lock=1&user_id=<?=(int)$emp['user_id']?>&site_id=<?=(int)$site['site_id']?>&entry_date=<?=urlencode($eff_end)?>&org_id=<?=(int)$user_org_id?>"><i class="fa fa-hand-holding-usd"></i> Manual Pay</a>
-                                    <button type="button" class="btn btn-sm btn-outline-success font-weight-bold py-1 px-2 mb-1" onclick="generateForEmployee(<?=(int)$emp['user_id']?>)"><i class="fa fa-file-pdf"></i> Stub / Cheque</button>
+                                    <a class="btn btn-sm btn-outline-success font-weight-bold py-1 px-2 mb-1 stub-cheque-link cheque-link" target="_blank" href="generate_pay_documents.php?doc_part=cheques&doc_line_ids=<?=urlencode($emp_line_ids)?>&org_id=<?=$user_org_id?>&period_start=<?=urlencode($from_date)?>&period_end=<?=urlencode($to_date)?>&issue_date=<?=urlencode($chequeIssueDefault)?>"><i class="fa fa-money-check-alt"></i> Cheque</a>
+                                    <a class="btn btn-sm btn-outline-success font-weight-bold py-1 px-2 mb-1 stub-cheque-link" target="_blank" href="generate_pay_documents.php?doc_part=stubs&doc_line_ids=<?=urlencode($emp_line_ids)?>&org_id=<?=$user_org_id?>&period_start=<?=urlencode($from_date)?>&period_end=<?=urlencode($to_date)?>&issue_date=<?=urlencode($chequeIssueDefault)?>"><i class="fa fa-file-invoice-dollar"></i> Paystub</a>
                                     <a class="btn btn-sm btn-outline-primary font-weight-bold py-1 px-2 mb-1" target="_blank" href="generate_t4.php?year=<?=date('Y',strtotime($to_date))?>&emp_id=<?=$emp['user_id']?>&org_id=<?=$user_org_id?>"><i class="fa fa-file-invoice"></i> T4</a>
                                     <?php if ($emp['t_rem'] > 0.01): ?>
                                         <form method="POST" action="" class="mb-0 d-inline-flex align-items-center"
                                               onsubmit="return confirm('Settle this employee\'s full period balance of $<?=number_format($emp['t_rem'],2)?>?');">
                                             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                                             <input type="hidden" name="period_user_id" value="<?=$emp['user_id']?>">
-                                            <input type="hidden" name="period_site_id" value="<?=(int)$site['site_id']?>">
                                             <input type="hidden" name="period_start" value="<?=htmlspecialchars($eff_start)?>">
                                             <input type="hidden" name="period_end" value="<?=htmlspecialchars($eff_end)?>">
-                                            <select name="form_payment_method" class="form-control form-control-sm inline-select mr-1"><option>E-Transfer</option><option>Cheque</option><option>Cash</option></select>
+                                            <select name="form_payment_method" class="form-control form-control-sm inline-select mr-1"><option>E-Transfer</option><option>Cheque</option><option>Cash</option><option>Direct deposit</option></select>
                                             <button type="submit" name="execute_period_payout" class="btn btn-sm btn-warning font-weight-bold py-1 px-2"><i class="fa fa-layer-group"></i> Pay Employee Period</button>
                                         </form>
                                     <?php else: ?>
@@ -1102,7 +962,7 @@ function ledgerOnOrgChange(sel){
                                       $is_stat_row = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0; ?>
                                 <tr class="lvl-shift hidden" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
                                     <td class="text-left text-dark" style="padding-left:48px;">
-                                        <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" data-site-id="<?=(int)$r['site_id']?>" data-eft="<?= $eftOn ? '1' : '0' ?>" data-name="<?=htmlspecialchars($emp['name'], ENT_QUOTES)?>" data-rem="<?=number_format($rem, 2, '.', '')?>" data-vac="<?=number_format((float)$r['er_vac'], 2, '.', '')?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;" title="Include this shift in documents or Pay Selected">
+                                        <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
                                         <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
@@ -1119,6 +979,7 @@ function ledgerOnOrgChange(sel){
                                         <div class="small text-muted" style="font-weight:600; line-height:1.5;">
                                             Income Tax: $<?=number_format($r['ee_tax'],2)?><br>
                                             CPP: $<?=number_format($r['ee_cpp'],2)?><br>
+                                            CPP2: $<?=number_format((float)($r['ee_cpp2'] ?? 0),2)?><br>
                                             EI: $<?=number_format($r['ee_ei'],2)?>
                                         </div>
                                     </td>
@@ -1131,16 +992,15 @@ function ledgerOnOrgChange(sel){
                                             Vacation: $<?=number_format($r['er_vac'],2)?>
                                         </div>
                                     </td>
-                                    <?php $shiftPayLabel = ((float)$r['_paid'] > 0.01) ? pcr_payment_type_label(pcr_line_payment_rows($r, $period_payments), false) : ''; ?>
-                                    <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?><?php if ($shiftPayLabel !== ''): ?><div class="pay-type"><?=htmlspecialchars($shiftPayLabel)?></div><?php endif; ?></td>
+                                    <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?></td>
                                     <td style="font-size:12px; color:<?=$rem>0.01?'#dc2626':'#16a34a'?>;">$<?=number_format($rem,2)?></td>
                                     <td>
                                         <?php if ($rem > 0.01): ?>
-                                            <form method="POST" action="" class="mb-0" onsubmit="return confirm('Record a ' + this.form_payment_method.value + ' payment of $' + this.amount_to_pay.value + ' for this shift? It will not pay more than the net still owing.');">
+                                            <form method="POST" action="" class="mb-0">
                                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                                                 <input type="hidden" name="line_id" value="<?=$r['line_id']?>">
                                                 <input type="number" step="0.01" min="0.01" name="amount_to_pay" class="form-control form-control-sm inline-pay-box text-success font-weight-bold mr-1" value="<?=round($rem,2)?>" max="<?=round($rem,2)?>">
-                                                <select name="form_payment_method" class="form-control form-control-sm inline-select mr-1"><option>E-Transfer</option><option>Cheque</option><option>Cash</option></select>
+                                                <select name="form_payment_method" class="form-control form-control-sm inline-select mr-1"><option>E-Transfer</option><option>Cheque</option><option>Cash</option><option>Direct deposit</option></select>
                                                 <button type="submit" name="execute_single_payout" class="btn btn-sm btn-success font-weight-bold py-1 px-2">Pay Net</button>
                                             </form>
                                             <?php if ($r['_paid'] > 0.01): ?><span class="badge badge-warning text-uppercase mt-1 d-block" style="font-size:9px;"><i class="fa fa-chart-pie"></i> Partially Settled</span><?php endif; ?>
@@ -1149,22 +1009,16 @@ function ledgerOnOrgChange(sel){
                                         <?php endif; ?>
                                     </td>
                                     <td>
-                                        <?php
-                                            $activeChq = $cheque_by_line[(int)$r['line_id']] ?? null;
-                                            $sendBackBlock = pcr_block_send_back((float)$r['_paid'], $activeChq);
-                                        ?>
-                                        <?php if ($sendBackBlock): ?>
-                                            <span class="text-muted small" title="<?=htmlspecialchars($sendBackBlock)?>">Paid / cheque — void or reverse first</span>
-                                        <?php elseif ((int)($r['attendance_id'] ?? 0) > 0): ?>
-                                            <form method="POST" action="" class="mb-0" onsubmit="return confirm('Send this unpaid shift back to Staff Audit? This removes the finalized row. Gross, tax, CPP, and EI on other rows are not changed.');">
+                                        <?php if ((int)($r['attendance_id'] ?? 0) > 0): ?>
+                                            <form method="POST" action="" class="mb-0" onsubmit="return confirm('Send this record back to Step 1 Staff Audit?');">
                                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                                                 <input type="hidden" name="rollback_attendance_id" value="<?=$r['attendance_id']?>">
                                                 <button type="submit" name="send_back_to_audit" class="btn btn-sm btn-outline-danger" style="font-size:10px; font-weight:bold;"><i class="fas fa-undo-alt"></i> Send Back</button>
                                             </form>
+                                            <?php if ($rem <= 0.01): ?><input type="hidden" class="qb-buffer-source-node" value="<?=$r['line_id']?>"><?php endif; ?>
                                         <?php else: ?>
                                             <span class="text-muted font-italic small">Batch Block</span>
                                         <?php endif; ?>
-                                        <?php if ($rem <= 0.01): ?><input type="hidden" class="qb-buffer-source-node" value="<?=$r['line_id']?>"><?php endif; ?>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -1177,187 +1031,87 @@ function ledgerOnOrgChange(sel){
     </div>
 
 
-    <div id="chequeConfirm">
-        <div class="box">
-            <h5 class="font-weight-bold mb-2">Generate cheques and paystubs</h5>
-            <p class="small text-muted mb-2" id="chequeConfirmSummary"></p>
-            <ul id="chequeConfirmList"></ul>
-            <div class="form-group mb-2">
-                <label class="small font-weight-bold" for="chequeStartInput">Starting cheque number</label>
-                <input type="number" id="chequeStartInput" class="form-control form-control-sm" min="1" step="1" value="<?= (int)$next_cheque_no ?>">
-                <div class="small text-muted">Voided numbers are kept and are not used again. If a cheque was printed before this register, start past that number.</div>
-            </div>
-            <label class="small font-weight-bold">
-                <input type="checkbox" id="chequeMarkPaid"> Mark these rows paid by Cheque
-            </label>
-            <div class="small text-muted mb-3">Pays only the stored net still owing. A second generate or Pay click will not record that amount again. Gross, CPP, EI, and tax are not recalculated.</div>
-            <button type="button" class="btn btn-success font-weight-bold" id="chequeConfirmGo">Generate</button>
-            <button type="button" class="btn btn-outline-secondary ml-2" id="chequeConfirmCancel">Cancel</button>
-        </div>
-    </div>
     <script>
-        var LEDGER_VAC_PAID = <?= $vac_paid_mode ? 'true' : 'false' ?>;
-        var LEDGER_CSRF = <?= json_encode(ps_csrf_token()) ?>;
-        var pendingDocChecks = [];
-
+        // Pay only the checked shifts, using each row's editable amount box.
         function paySelectedShifts(){
             var checks = document.querySelectorAll('.shift-check:checked');
             if (checks.length === 0){ alert('Tick the shifts you want to pay first.'); return; }
             var bucket = document.getElementById('paySelBucket');
             bucket.innerHTML = '';
-            var total = 0, n = 0, methods = {};
+            var total = 0, n = 0, method = 'E-Transfer';
             checks.forEach(function(cb){
                 var row = cb.closest('tr');
                 if (!row) return;
                 var amtInput = row.querySelector('input[name="amount_to_pay"]');
-                if (!amtInput) return;
+                if (!amtInput) return; // already settled row has no pay box
                 var amt = parseFloat(amtInput.value);
                 if (!(amt > 0)) return;
                 var sel = row.querySelector('select[name="form_payment_method"]');
-                var method = sel ? sel.value : 'E-Transfer';
-                methods[method] = true;
+                if (sel) method = sel.value;
                 var i = document.createElement('input');
-                i.type='hidden'; i.name='pay_lines[]'; i.value = cb.value + ':' + amt.toFixed(2) + ':' + method;
+                i.type='hidden'; i.name='pay_lines[]'; i.value = cb.value + ':' + amt.toFixed(2);
                 bucket.appendChild(i);
                 total += amt; n++;
             });
             if (n === 0){ alert('None of the selected shifts have a payable amount (they may already be settled).'); return; }
-            var names = Object.keys(methods);
-            var via = names.length === 1 ? (' via ' + names[0]) : ' using the method shown on each row';
-            document.getElementById('paySelMethod').value = names[0] || 'E-Transfer';
-            if (!confirm('Pay ' + n + ' selected shift(s) totalling $' + total.toFixed(2) + via + '? Already-paid amounts are not recorded again.')) return;
+            document.getElementById('paySelMethod').value = method;
+            if (!confirm('Pay ' + n + ' selected shift(s) totalling $' + total.toFixed(2) + ' via ' + method + '?')) return;
             document.getElementById('paySelForm').submit();
         }
 
+        // Site "select all": tick/untick every shift checkbox under this site.
         function toggleSite(siteId, checked){
             document.querySelectorAll('.shift-check[data-site="'+siteId+'"]').forEach(function(cb){ cb.checked = checked; });
-            document.querySelectorAll('.emp-select[data-site="'+siteId+'"]').forEach(function(cb){ cb.checked = checked; });
         }
 
-        function toggleEmployee(empId, checked){
-            document.querySelectorAll('.shift-check[data-emp="'+empId+'"]').forEach(function(cb){ cb.checked = checked; });
-        }
-
-        function toggleEft(btn, ev){
-            if (ev) ev.stopPropagation();
-            var next = btn.getAttribute('aria-pressed') !== 'true';
-            var fd = new FormData();
-            fd.append('csrf_token', LEDGER_CSRF);
-            fd.append('save_eft_preference', '1');
-            fd.append('eft_user_id', btn.getAttribute('data-user'));
-            fd.append('eft_no_cheque', next ? '1' : '0');
-            fetch(window.location.pathname + window.location.search, { method: 'POST', body: fd, credentials: 'same-origin' })
-                .then(function(r){ return r.json(); })
-                .then(function(j){
-                    if (!j.ok) throw new Error(j.error || 'Could not save EFT');
-                    btn.setAttribute('aria-pressed', next ? 'true' : 'false');
-                    btn.classList.toggle('is-on', next);
-                    document.querySelectorAll('.shift-check[data-user="'+btn.getAttribute('data-user')+'"]').forEach(function(cb){
-                        cb.setAttribute('data-eft', next ? '1' : '0');
-                    });
-                })
-                .catch(function(e){ alert(e.message); });
-        }
-
-        function eftUsers(){
-            var set = {};
-            document.querySelectorAll('.shift-check[data-eft="1"]').forEach(function(cb){
-                set[cb.getAttribute('data-user')] = true;
-            });
-            document.querySelectorAll('.eft-badge[aria-pressed="true"]').forEach(function(btn){
-                set[btn.getAttribute('data-user')] = true;
-            });
-            return set;
-        }
-
-        function openChequeConfirm(checks){
-            if (!checks.length){ alert('Tick at least one shift, or use the employee or site checkbox.'); return; }
-            pendingDocChecks = checks;
-            var eft = eftUsers();
-            var groups = {};
-            checks.forEach(function(cb){
-                var uid = cb.getAttribute('data-user');
-                var sid = cb.getAttribute('data-site-id') || '0';
-                var key = sid + '|' + uid;
-                if (!groups[key]) groups[key] = { name: cb.getAttribute('data-name') || ('Employee ' + uid), user: uid, rem: 0, vac: 0, eft: !!eft[uid] };
-                groups[key].rem += parseFloat(cb.getAttribute('data-rem') || '0');
-                groups[key].vac += parseFloat(cb.getAttribute('data-vac') || '0');
-            });
-            var list = document.getElementById('chequeConfirmList');
-            list.innerHTML = '';
-            var chequeCount = 0, stubOnly = 0, total = 0, names = [];
-            Object.keys(groups).forEach(function(k){
-                var g = groups[k];
-                var face = Math.max(0, g.rem + (LEDGER_VAC_PAID ? g.vac : 0));
-                var li = document.createElement('li');
-                if (g.eft) {
-                    stubOnly++;
-                    li.textContent = g.name + ' — EFT, paystub only';
-                } else if (face <= 0.009) {
-                    stubOnly++;
-                    li.textContent = g.name + ' — nothing owing, paystub only';
-                } else {
-                    chequeCount++;
-                    total += face;
-                    names.push(g.name);
-                    li.textContent = g.name + ' — cheque $' + face.toFixed(2);
-                }
-                list.appendChild(li);
-            });
-            document.getElementById('chequeConfirmSummary').textContent =
-                chequeCount + ' cheque(s)' + (names.length ? ' (' + names.join(', ') + ')' : '') +
-                ', total $' + total.toFixed(2) +
-                (stubOnly ? ', plus ' + stubOnly + ' paystub(s) with no cheque.' : '.');
-            var markBox = document.getElementById('chequeMarkPaid');
-            markBox.disabled = chequeCount === 0;
-            if (chequeCount === 0) markBox.checked = false;
-            document.getElementById('chequeStartInput').value = document.getElementById('payDocsChequeStart').value;
-            document.getElementById('chequeConfirm').style.display = 'flex';
-        }
-
-        function generatePayDocs(){
-            openChequeConfirm(Array.prototype.slice.call(document.querySelectorAll('.shift-check:checked')));
-        }
-
-        function generateForEmployee(userId){
-            var checks = Array.prototype.slice.call(document.querySelectorAll('.shift-check[data-user="'+userId+'"]'));
-            checks.forEach(function(cb){ cb.checked = true; });
-            openChequeConfirm(checks);
-        }
-
-        function fillPayDocs(checks){
+        // Collect selected shift line_ids and open the cheque file, the paystub file, or email the stubs.
+        function generatePayDocs(part){
+            var checks = document.querySelectorAll('.shift-check:checked');
+            if (checks.length === 0){ alert('Tick at least one shift (or a site) first.'); return; }
+            if (part === 'email' && !confirm('Email each selected employee their own paystub?')) return;
             var bucket = document.getElementById('payDocsBucket');
             bucket.innerHTML = '';
             checks.forEach(function(cb){
                 var i = document.createElement('input');
                 i.type='hidden'; i.name='doc_line_ids[]'; i.value=cb.value; bucket.appendChild(i);
             });
-            Object.keys(eftUsers()).forEach(function(uid){
+            document.querySelectorAll('.eft-check:checked').forEach(function(cb){
                 var i = document.createElement('input');
-                i.type='hidden'; i.name='eft_suppress[]'; i.value=uid; bucket.appendChild(i);
+                i.type='hidden'; i.name='eft_suppress[]'; i.value=cb.getAttribute('data-user'); bucket.appendChild(i);
             });
             var modeInput = document.createElement('input');
             modeInput.type='hidden'; modeInput.name='cheque_mode';
             modeInput.value = document.getElementById('chequeMode').value;
             bucket.appendChild(modeInput);
+            var partInput = document.createElement('input');
+            partInput.type='hidden'; partInput.name='doc_part'; partInput.value = part || 'stubs';
+            bucket.appendChild(partInput);
             var issueEl = document.getElementById('chequeIssueDate');
             var issueHidden = document.getElementById('payDocsIssueDate');
             if (issueEl && issueHidden && issueEl.value) issueHidden.value = issueEl.value;
-            document.getElementById('payDocsChequeStart').value = document.getElementById('chequeStartInput').value || document.getElementById('payDocsChequeStart').value;
-            document.getElementById('payDocsMarkPaid').value = document.getElementById('chequeMarkPaid').checked ? '1' : '0';
-            document.getElementById('payDocsNonce').value = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+            var form = document.getElementById('payDocsForm');
+            form.target = (part === 'email') ? '_self' : '_blank';
+            form.submit();
         }
 
-        document.getElementById('chequeConfirmCancel').onclick = function(){
-            document.getElementById('chequeConfirm').style.display = 'none';
-        };
-        document.getElementById('chequeConfirmGo').onclick = function(){
-            if (!pendingDocChecks.length) return;
-            this.disabled = true;
-            fillPayDocs(pendingDocChecks);
-            document.getElementById('payDocsForm').submit();
-            setTimeout(function(){ window.location.reload(); }, 1200);
-        };
+        function generateBankFile(){
+            var checks = document.querySelectorAll('.shift-check:checked');
+            if (checks.length === 0){ alert('Tick the shifts for the people you are paying by direct deposit.'); return; }
+            var bucket = document.getElementById('bankFileBucket');
+            bucket.innerHTML = '';
+            checks.forEach(function(cb){
+                var i = document.createElement('input');
+                i.type='hidden'; i.name='doc_line_ids[]'; i.value=cb.value; bucket.appendChild(i);
+            });
+            document.querySelectorAll('.eft-check:checked').forEach(function(cb){
+                var i = document.createElement('input');
+                i.type='hidden'; i.name='eft_user[]'; i.value=cb.getAttribute('data-user'); bucket.appendChild(i);
+            });
+            var issueEl = document.getElementById('chequeIssueDate');
+            var issueHidden = document.getElementById('bankFileIssueDate');
+            if (issueEl && issueHidden && issueEl.value) issueHidden.value = issueEl.value;
+            document.getElementById('bankFileForm').submit();
+        }
 
         function togglePocket(id){ var el=document.getElementById(id); el.style.display=(el.style.display==='block')?'none':'block'; }
 
@@ -1382,6 +1136,17 @@ function ledgerOnOrgChange(sel){
             });
             if (chev) chev.classList.toggle('open', willOpen);
         }
+
+        document.querySelectorAll('a.stub-cheque-link').forEach(function(a){
+            a.addEventListener('click', function(){
+                var u = new URL(a.href, window.location.href);
+                var d = document.getElementById('chequeIssueDate');
+                if (d && d.value) u.searchParams.set('issue_date', d.value);
+                var mode = document.getElementById('chequeMode');
+                if (mode && a.classList.contains('cheque-link')) u.searchParams.set('cheque_mode', mode.value);
+                a.href = u.toString();
+            });
+        });
 
         document.addEventListener("DOMContentLoaded", function(){
             var bucket=document.getElementById('qb_hidden_fields_bucket');

@@ -359,3 +359,54 @@ function pe_t4127_allocate(float $total, array $weights): array
 {
     return sd_allocate_money($total, $weights);
 }
+
+/**
+ * Annual Ontario EHT from stored period gross on Ontario sites.
+ * This is the report figure. It does not file anything.
+ */
+function pe_eht_annual(PDO $pdo, int $orgId, int $year): array
+{
+    $rules = ['eligible' => true, 'exemption' => 1000000.0, 'group_over_cap' => false];
+    if (pe_t4127_col($pdo, 'organizations', 'eht_eligible')) {
+        try {
+            $st = $pdo->prepare('SELECT eht_eligible, eht_exemption_amount, eht_group_over_cap FROM organizations WHERE id=?');
+            $st->execute([$orgId]);
+            if ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                $rules['eligible'] = (int)$row['eht_eligible'] === 1;
+                $rules['exemption'] = (float)$row['eht_exemption_amount'];
+                $rules['group_over_cap'] = (int)$row['eht_group_over_cap'] === 1;
+            }
+        } catch (Throwable $e) {
+        }
+    }
+    $sites = [];
+    $total = 0.0;
+    $from = sprintf('%04d-01-01', $year);
+    $to = sprintf('%04d-12-31', $year);
+    try {
+        $prov = pe_t4127_col($pdo, 'sites', 'province')
+            ? "UPPER(TRIM(s.province)) IN ('ON','ONTARIO')"
+            : '0';
+        $name = pe_t4127_col($pdo, 'sites', 'nick_name') ? 's.nick_name' : "CONCAT('Site ', s.SId)";
+        $st = $pdo->prepare(
+            "SELECT s.SId AS site_id, $name AS nick_name, COALESCE(SUM(p.gross),0) AS pay
+             FROM sites s
+             LEFT JOIN payroll_period_stat p ON p.site_id = s.SId AND p.period_end BETWEEN ? AND ?
+             WHERE s.org_id = ? AND $prov
+             GROUP BY s.SId, nick_name"
+        );
+        $st->execute([$from, $to, $orgId]);
+        foreach ($st as $row) {
+            $pay = round((float)$row['pay'], 2);
+            $sites[] = ['nick_name' => (string)$row['nick_name'], 'pay' => $pay];
+            $total += $pay;
+        }
+    } catch (Throwable $e) {
+    }
+    $calc = sd_ontario_eht($total, $rules['exemption'], $rules['eligible'], $rules['group_over_cap']);
+    $calc['sites'] = $sites;
+    $calc['eligible_configured'] = $rules['eligible'];
+    $calc['exemption_configured'] = $rules['exemption'];
+    $calc['group_over_cap'] = $rules['group_over_cap'];
+    return $calc;
+}

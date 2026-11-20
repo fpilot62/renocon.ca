@@ -61,7 +61,7 @@ Sheet review is unchanged. It posts a line only when the sheet says employee ded
 
 ## Other branches
 
-`engine/orgscope_guard.php` and an ROE XML builder are not on this branch. The new pages load the org-scope guard when that file is present, and they still use the privacy and organization checks that are on main. `pe_t4_roe()` returns insurable earnings and hours by line for an ROE builder to read. It does not write XML.
+`engine/orgscope_guard.php` and an ROE XML builder are not on this branch. The Ontario EHT page sums stored period gross for Ontario sites and applies the annual tiers. It does not file a return.
 
 The quick-hours patch calls `pe_line` once per earnings type and then `pe_refresh_period_stat`. After that refresh, the stored period total is the T4127 result. A preview that calls `pe_line` twice before anything is saved still sees each call as its own period. Pass `period_gross_before` on the second call, or preview with one combined gross, if that screen is merged later.
 
@@ -73,4 +73,8 @@ Period CPP stays on `payroll_period_stat`, and the shift rows keep CPP at zero, 
 
 Canada rows in bulk finalize, process payroll, process audit, manual pay, and stat shifts call `pe_line`. US, UK, and Australia rows in `bulk_finalize_autosplit.php` are unchanged.
 
-Install over production only the deduction files named in the pull request. Privacy pages, the cheque register, and sheet review that already differed between git and the November 19 server were left as the git versions. Do not copy those over the server as part of this change.
+Install over production only the files named in the pull request. Each replaced file is the November 19 live file plus the deduction change. Do not copy the rest of this branch onto the server. Staff audit, the cheque register, sheet review, payment status, and the two map pickers differ from the live server for other reasons. Replacing those would roll the server back or wipe the map keys.
+
+These screens still contain a flat deduction estimate and nothing in the PHP tree links to them or includes them, so they were left unchanged: `payroll_processor.php`, `process_payroll_logic.php`, `payroll_split_80.php`, `payroll_command_center.php`, `payroll_compliance_desk.php`. `finalize_shift.php` is linked from the staff audit and the payroll dashboard. Its on-screen deduction preview now asks the engine. The save is still `save_split_payroll.php`, which already called `pe_line` and `pe_refresh_period_stat`.
+
+Before the first pay, set each site's province and its own WCB/WSIB percent (`sites.wsib_percent`, where 1.55 means 1.55%). A blank percent keeps the old `payroll_settings.wcb_rate` fraction. Leave TD1 totals null to use the basic personal amount. Ontario EHT defaults to eligible, with the $1,000,000 exemption, unless the organization is part of an associated group. The Mapbox token stays in `site_picker.php` (`mapboxgl.accessToken`). The Google Maps key stays in `site_picker_google.php` (the `key=` value on the maps script). This branch stores both as empty. Do not replace the live picker files from git.

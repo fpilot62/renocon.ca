@@ -100,13 +100,19 @@ CREATE TABLE IF NOT EXISTS payroll_deduction_openings (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- The live table is payroll_period_stat (one row per employee, site, and period).
--- These columns are added only when that table already exists. Nothing is rewritten.
+-- MySQL 5.7 has no ADD COLUMN IF NOT EXISTS. Look the column up first, and skip
+-- the ALTER when the table is missing or the column is already there.
+-- Nothing already stored is rewritten.
 
-SET @sql := (SELECT IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat')=0, 'SELECT 1', IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='cpp2')=0, 'ALTER TABLE payroll_period_stat ADD COLUMN cpp2 DECIMAL(12,2) NOT NULL DEFAULT 0', 'SELECT 1')));
+SET @stat_table := (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat');
+SET @stat_col := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='cpp2');
+SET @sql := IF(@stat_table = 0 OR @stat_col > 0, 'SELECT 1', 'ALTER TABLE payroll_period_stat ADD COLUMN cpp2 DECIMAL(12,2) NOT NULL DEFAULT 0');
 PREPARE pe_mig FROM @sql; EXECUTE pe_mig; DEALLOCATE PREPARE pe_mig;
 
-SET @sql := (SELECT IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat')=0, 'SELECT 1', IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='cpp2_er')=0, 'ALTER TABLE payroll_period_stat ADD COLUMN cpp2_er DECIMAL(12,2) NOT NULL DEFAULT 0', 'SELECT 1')));
+SET @stat_col := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='cpp2_er');
+SET @sql := IF(@stat_table = 0 OR @stat_col > 0, 'SELECT 1', 'ALTER TABLE payroll_period_stat ADD COLUMN cpp2_er DECIMAL(12,2) NOT NULL DEFAULT 0');
 PREPARE pe_mig FROM @sql; EXECUTE pe_mig; DEALLOCATE PREPARE pe_mig;
 
-SET @sql := (SELECT IF((SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat')=0, 'SELECT 1', IF((SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='deduction_edition')=0, 'ALTER TABLE payroll_period_stat ADD COLUMN deduction_edition VARCHAR(80) NULL', 'SELECT 1')));
+SET @stat_col := (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=@db AND TABLE_NAME='payroll_period_stat' AND COLUMN_NAME='deduction_edition');
+SET @sql := IF(@stat_table = 0 OR @stat_col > 0, 'SELECT 1', 'ALTER TABLE payroll_period_stat ADD COLUMN deduction_edition VARCHAR(80) NULL');
 PREPARE pe_mig FROM @sql; EXECUTE pe_mig; DEALLOCATE PREPARE pe_mig;

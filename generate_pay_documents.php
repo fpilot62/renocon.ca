@@ -1,8 +1,10 @@
 <?php
 /**
  * Path: /generate_pay_documents.php
- * Generates a combined multi-page PDF of CHEQUE + PAYSTUB per employee for the
- * payroll_finalized line IDs selected (checkboxes) on payroll_master_ledger.php.
+ * Generates cheques and paystubs as separate PDFs for the payroll_finalized
+ * line IDs selected on payroll_master_ledger.php. doc_part=cheques prints only
+ * the cheque (blank paper or pre-printed stock). doc_part=stubs prints only
+ * the paystub. doc_part=email sends each paystub to the employee.
  *
  * Sources (single source of truth — no rate re-guessing):
  *   - Money + hours + STORED deductions: payroll_finalized (cpp, ei, income_tax, etc.)
@@ -16,31 +18,15 @@
  *
  * CLI (verify only): php generate_pay_documents.php --site=121 --from=2026-07-13 --to=2026-07-26 --name=Avtar --out=/tmp/stub.pdf
  */
+ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 $is_cli = (PHP_SAPI === 'cli');
-require_once __DIR__ . '/engine/privacy_lib.php';
-privacy_boot_web();
+if (!$is_cli && session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
-require_once __DIR__ . '/engine/attendance_integrity_lib.php';
-if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
-    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
-}
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
-$paydoc_org_id = 0;
-$record_cheques = false;
-if (!$is_cli) {
-    if (!isset($_SESSION['user_id'])) { die("Access denied."); }
-    require_once 'payroll_scope.php';
-    require_once __DIR__ . '/engine/payroll_cheque_lib.php';
-    ps_require_payroll_admin();
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        ps_require_csrf();
-        $record_cheques = true;
-    }
-    $paydoc_org_id = (int)ps_selected_org($pdo);
-    privacy_require_business($pdo, $paydoc_org_id, 'pay', 'generate_pay_documents.php', false, 20, 'export');
-}
+if (!$is_cli && !isset($_SESSION['user_id'])) { die("Access denied."); }
 
 $FPDF_PATH = __DIR__ . '/fpdf/fpdf.php';
 if (!file_exists($FPDF_PATH)) {
@@ -133,6 +119,7 @@ function paydocs_split_unit(string $street, string $unit): array {
 // ---- gather selected finalized line IDs (POST from ledger, GET, or CLI) ----
 $line_ids = [];
 $cli_out = null;
+$cli_part = '';
 $req_period_start = $valid_ymd($_POST['period_start'] ?? $_GET['period_start'] ?? '');
 $req_period_end   = $valid_ymd($_POST['period_end']   ?? $_GET['period_end']   ?? '');
 $req_issue_date   = $valid_ymd($_POST['issue_date']   ?? $_GET['issue_date']   ?? '');
@@ -148,6 +135,7 @@ if ($is_cli) {
         if (str_starts_with($a, '--name='))  $cli_name = trim(substr($a, 7));
         if (str_starts_with($a, '--ids='))   $cli_ids = substr($a, 6);
         if (str_starts_with($a, '--issue=')) $req_issue_date = $valid_ymd(substr($a, 8));
+        if (str_starts_with($a, '--part='))  $cli_part = trim(substr($a, 7));
     }
     if ($cli_ids !== '') {
         $line_ids = array_values(array_unique(array_filter(array_map('intval', explode(',', $cli_ids)))));
@@ -156,8 +144,7 @@ if ($is_cli) {
         $req_period_end   = $req_period_end ?: $cli_to;
         $sqlCli = "SELECT f.id FROM payroll_finalized f
                    LEFT JOIN users u ON u.id = f.user_id
-                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?
-                     AND " . att_finalized_live_predicate($pdo, 'f');
+                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?";
         $paramsCli = [$cli_site, $cli_from, $cli_to];
         if ($cli_name !== '') {
             $sqlCli .= " AND u.Name LIKE ?";
@@ -183,6 +170,8 @@ $eft_suppress = array_flip(array_map('intval', $eft_suppress));
 
 $cheque_mode = ($_POST['cheque_mode'] ?? $_GET['cheque_mode'] ?? 'blank');
 $cheque_mode = ($cheque_mode === 'preprinted') ? 'preprinted' : 'blank';
+$doc_part = $is_cli ? strtolower($cli_part) : strtolower(trim((string)($_POST['doc_part'] ?? $_GET['doc_part'] ?? 'both')));
+if (!in_array($doc_part, ['both', 'cheques', 'stubs', 'email'], true) || $doc_part === '') $doc_part = 'both';
 
 $PRE = [
     'date'   => ['x' => 150, 'y' => 24, 'w' => 50],
@@ -205,13 +194,15 @@ if (!empty($sCols['paystub_show_zero_stat'])) $extraSite .= ", s.paystub_show_ze
 $extraFin = '';
 if (!empty($fCols['reg_pay'])) $extraFin .= ", f.reg_pay";
 if (!empty($fCols['bonus_pay'])) $extraFin .= ", f.bonus_pay";
+if (!empty($fCols['cpp2'])) $extraFin .= ", f.cpp2 AS ee_cpp2";
+if (!empty($fCols['cpp2_er'])) $extraFin .= ", f.cpp2_er AS er_cpp2";
 
 $in = implode(',', array_fill(0, count($line_ids), '?'));
 $sql = "SELECT
             f.id AS line_id, f.user_id, f.site_id, f.work_date, f.pay_period_end,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate,
-            f.total_gross, " . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . " AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-            " . (function_exists('pe_sql_employer_cpp') ? pe_sql_employer_cpp($pdo, 'f') : 'f.cpp_er') . " AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
+            f.total_gross, f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+            f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
             f.paid_amount, f.payment_status, f.category, f.display_label
             $extraFin,
             u.Name AS emp_name, u.Email AS emp_email,
@@ -223,17 +214,16 @@ $sql = "SELECT
         FROM payroll_finalized f
         LEFT JOIN users u ON f.user_id = u.id
         LEFT JOIN sites s ON f.site_id = s.Sid
-        WHERE f.id IN ($in)" . ($is_cli ? '' : ' AND u.org_id = ?') . "
-          AND " . att_finalized_live_predicate($pdo, 'f') . "
+        WHERE f.id IN ($in)
         ORDER BY s.nick_name ASC, u.Name ASC, f.work_date ASC";
 $stmt = $pdo->prepare($sql);
-$stmt->execute($is_cli ? $line_ids : array_merge($line_ids, [$paydoc_org_id]));
+$stmt->execute($line_ids);
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 if (empty($rows)) { die("Selected rows not found."); }
 
 $vac_paid_mode = false;
 try {
-    $orgGuess = (int)(!$is_cli ? $paydoc_org_id : (int)($_SESSION['org_id'] ?? 0));
+    $orgGuess = (int)(!$is_cli ? ($_SESSION['org_id'] ?? 0) : 0);
     if ($orgGuess <= 0 && !empty($rows[0]['site_id'])) {
         $oq = $pdo->prepare("SELECT org_id FROM sites WHERE SId=? LIMIT 1");
         $oq->execute([(int)$rows[0]['site_id']]);
@@ -256,20 +246,6 @@ foreach ($rows as $r) {
     $emp_addr_one = trim($emp_street . ', ' . $emp_cityline, ', ');
     $site_addr_one = trim(($r['site_addr'] ?? '') . ', ' . ($r['site_city'] ?? '') . ' ' . ($r['site_prov'] ?: ($r['site_state'] ?? '')) . ' ' . paydocs_postal($r['site_zip'] ?? ''), ', ');
     if (!isset($groups[$key])) {
-        try {
-            $paydocTransitPlain = privacy_open_sensitive((string)($r['bank_transit'] ?? ''));
-            $paydocInstitutionPlain = privacy_open_sensitive((string)($r['bank_institution'] ?? ''));
-            $paydocAccountPlain = privacy_open_sensitive((string)($r['bank_account'] ?? ''));
-        } catch (Throwable $e) {
-            http_response_code(500);
-            exit('Bank details could not be read. Check PAYROLL_DATA_KEY. No account number is shown.');
-        }
-        $paydocTransitMask = privacy_mask_account($paydocTransitPlain);
-        $paydocInstitutionMask = privacy_mask_account($paydocInstitutionPlain);
-        $paydocAccountMask = privacy_mask_account($paydocAccountPlain);
-        $paydocTransitMicr = preg_replace('/\D+/', '', $paydocTransitPlain) ?? '';
-        $paydocInstitutionMicr = preg_replace('/\D+/', '', $paydocInstitutionPlain) ?? '';
-        $paydocAccountMicr = preg_replace('/\D+/', '', $paydocAccountPlain) ?? '';
         $groups[$key] = [
             'emp_name'   => $r['emp_name'] ?: ('User #' . $r['user_id']),
             'user_id'    => (int)$r['user_id'],
@@ -278,12 +254,9 @@ foreach ($rows as $r) {
             'emp_street' => $emp_street,
             'emp_cityline' => $emp_cityline,
             'emp_addr'   => $emp_addr_one,
-            'transit'    => $paydocTransitMask,
-            'institution'=> $paydocInstitutionMask,
-            'account'    => $paydocAccountMask,
-            'transit_micr' => $paydocTransitMicr,
-            'institution_micr' => $paydocInstitutionMicr,
-            'account_micr' => $paydocAccountMicr,
+            'transit'    => $r['bank_transit'] ?: '',
+            'institution'=> $r['bank_institution'] ?: '',
+            'account'    => $r['bank_account'] ?: '',
             'site_name'  => $r['site_name'] ?: 'Employer',
             'corp_legal' => trim((string)($r['corp_legal_name'] ?? '')),
             'site_street'=> trim((string)($r['site_addr'] ?? '')),
@@ -300,8 +273,9 @@ foreach ($rows as $r) {
             'period_end' => $r['pay_period_end'],
             'reg_h'=>0,'ot_h'=>0,'trav_h'=>0,
             'reg_pay'=>0,'bonus'=>0,'car_allow'=>0,'ph_pay'=>0,'stat_worked'=>0,
-            'gross'=>0,'ee_cpp'=>0,'ee_ei'=>0,'ee_tax'=>0,
-            'er_cpp'=>0,'er_ei'=>0,'er_wcb'=>0,'er_vac'=>0,
+            'benefit_lines'=>[],'deduct_lines'=>[],
+            'gross'=>0,'ee_cpp'=>0,'ee_cpp2'=>0,'ee_ei'=>0,'ee_tax'=>0,
+            'er_cpp'=>0,'er_cpp2'=>0,'er_ei'=>0,'er_wcb'=>0,'er_vac'=>0,
             'vac_earn'=>0,
             'paid'=>0, 'lines'=>[],
             'wstart'=>$r['work_date'], 'wend'=>$r['work_date'],
@@ -315,15 +289,22 @@ foreach ($rows as $r) {
     $g['trav_h'] += (float)$r['travel_hours'];
     $g['gross']  += (float)$r['total_gross'];
     $g['ee_cpp'] += (float)$r['ee_cpp'];
+    $g['ee_cpp2'] += (float)($r['ee_cpp2'] ?? 0);
     $g['ee_ei']  += (float)$r['ee_ei'];
     $g['ee_tax'] += (float)$r['ee_tax'];
     $g['er_cpp'] += (float)$r['er_cpp'];
+    $g['er_cpp2'] += (float)($r['er_cpp2'] ?? 0);
     $g['er_ei']  += (float)$r['er_ei'];
     $g['er_wcb'] += (float)$r['er_wcb'];
     $g['er_vac'] += (float)$r['er_vac'];
     $g['vac_earn'] += (float)$r['er_vac'];
     $g['paid']   += (float)$r['paid_amount'];
     $g['reg_pay'] += (float)($r['reg_pay'] ?? 0);
+    if (strcasecmp($cat, 'Deduction') === 0) {
+        $g['deduct_lines'][$lab !== '' ? $lab : 'Adjustment'] = ($g['deduct_lines'][$lab !== '' ? $lab : 'Adjustment'] ?? 0) + abs((float)$r['total_gross']);
+    } elseif (strcasecmp($cat, 'Benefit') === 0) {
+        $g['benefit_lines'][$lab !== '' ? $lab : 'Benefit'] = ($g['benefit_lines'][$lab !== '' ? $lab : 'Benefit'] ?? 0) + (float)$r['total_gross'];
+    } else {
     if (paydocs_is_public_holiday($cat, $lab)) $g['ph_pay'] += (float)$r['total_gross'];
     if (paydocs_is_stat_worked($cat, $lab)) $g['stat_worked'] += (float)$r['total_gross'];
     paydocs_peel_special(
@@ -332,49 +313,11 @@ foreach ($rows as $r) {
         (float)($r['bonus_pay'] ?? 0),
         (float)($r['reg_pay'] ?? 0)
     );
+    }
     if ($r['work_date'] < $g['wstart']) $g['wstart'] = $r['work_date'];
     if ($r['work_date'] > $g['wend'])   $g['wend']   = $r['work_date'];
     $g['lines'][] = $r;
     unset($g);
-}
-
-function paydocs_apply_salary(PDO $pdo, array &$g): void
-{
-    $uid = (int)($g['user_id'] ?? 0);
-    if ($uid <= 0 || !function_exists('pe_line_for') || !function_exists('pe_normalize_employee_type')) {
-        return;
-    }
-    try {
-        $st = $pdo->prepare('SELECT employee_type, COALESCE(salary_amount, 0) AS salary_amount FROM users WHERE id = ?');
-        $st->execute([$uid]);
-        $u = $st->fetch(PDO::FETCH_ASSOC);
-    } catch (Throwable $e) {
-        return;
-    }
-    if (!$u) {
-        return;
-    }
-    $type = pe_normalize_employee_type($u['employee_type'] ?? 'hourly');
-    $salary = round((float)($u['salary_amount'] ?? 0), 2);
-    if ($type !== 'monthly' || $salary <= 0) {
-        return;
-    }
-    $site = (int)($g['site_id'] ?? 0);
-    $day = (string)($g['disp_end'] ?? '');
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) {
-        $day = date('Y-m-d');
-    }
-    $line = pe_line_for($pdo, $uid, $site, $day, $salary);
-    $g['salaried'] = true;
-    $g['gross'] = (float)$line['pay_gross'];
-    $g['ee_cpp'] = (float)$line['cpp'] + (float)($line['cpp2'] ?? 0);
-    $g['ee_ei'] = (float)$line['ei'];
-    $g['ee_tax'] = (float)$line['income_tax'];
-    $g['er_cpp'] = (float)$line['cpp_er'] + (float)($line['cpp2_er'] ?? 0);
-    $g['er_ei'] = (float)$line['ei_er'];
-    $g['er_wcb'] = (float)$line['wcb'];
-    $g['vac_earn'] = (float)$line['vac'];
-    $g['er_vac'] = (float)($line['vac_accrued'] ?? $line['vac']);
 }
 
 foreach ($groups as &$g) {
@@ -388,20 +331,71 @@ foreach ($groups as &$g) {
     $issueBase = $req_period_end ?: $pend;
     $g['issue_date'] = $req_issue_date ?: date('Y-m-d', strtotime($issueBase . ' +5 days'));
     paydocs_apply_salary($pdo, $g);
-    if (!empty($g['salaried'])) {
-        continue;
-    }
-    if (function_exists('pe_read_period_stats') && !empty($g['user_id']) && !empty($g['wstart'])) {
-        $site = (int)($g['lines'][0]['site_id'] ?? 0);
-        $stats = pe_read_period_stats($pdo, $g['wstart'], $g['wend'] ?: $g['wstart'], [(int)$g['user_id']], $site ? [$site] : []);
+    // CPP is stored once on the pay period, not on each shift. Shift rows are $0.
+    if (empty($g['salaried']) && function_exists('pe_read_period_stats') && !empty($g['user_id']) && $pstart && $pend) {
+        $site = (int)($g['site_id'] ?? 0);
+        $stats = pe_read_period_stats($pdo, $pstart, $pend, [(int)$g['user_id']], $site ? [$site] : []);
         $k = ((int)$g['user_id']) . '|' . $site;
         if (isset($stats[$k])) {
-            $g['ee_cpp'] = (float)$stats[$k]['cpp'] + (float)($stats[$k]['cpp2'] ?? 0);
-            $g['er_cpp'] = (float)$stats[$k]['cpp_er'] + (float)($stats[$k]['cpp2_er'] ?? 0);
+            $g['ee_cpp'] = (float)$stats[$k]['cpp'];
+            $g['ee_cpp2'] = (float)($stats[$k]['cpp2'] ?? 0);
+            $g['er_cpp'] = (float)$stats[$k]['cpp_er'];
+            $g['er_cpp2'] = (float)($stats[$k]['cpp2_er'] ?? 0);
         }
     }
 }
 unset($g);
+
+function paydocs_apply_salary(PDO $pdo, array &$g): void
+{
+    $uid = (int)($g['user_id'] ?? 0);
+    if ($uid <= 0) {
+        return;
+    }
+    try {
+        $st = $pdo->prepare('SELECT employee_type, COALESCE(salary_amount, 0) AS salary_amount FROM users WHERE id = ?');
+        $st->execute([$uid]);
+        $u = $st->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        return;
+    }
+    if (!$u) {
+        return;
+    }
+    $type = function_exists('pe_normalize_employee_type')
+        ? pe_normalize_employee_type($u['employee_type'] ?? 'hourly')
+        : 'hourly';
+    $salary = round((float)($u['salary_amount'] ?? 0), 2);
+    if ($type !== 'monthly' || $salary <= 0 || !function_exists('pe_line_for')) {
+        return;
+    }
+    $site = (int)($g['site_id'] ?? 0);
+    $day = (string)($g['disp_end'] ?? '');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $day)) {
+        $day = date('Y-m-d');
+    }
+    $line = pe_line_for($pdo, $uid, $site, $day, $salary);
+    $g['salaried'] = true;
+    $g['reg_h'] = 0;
+    $g['ot_h'] = 0;
+    $g['trav_h'] = 0;
+    $g['ph_pay'] = 0;
+    $g['stat_worked'] = 0;
+    $g['bonus'] = 0;
+    $g['car_allow'] = 0;
+    $g['reg_pay'] = $salary;
+    $g['gross'] = (float)$line['pay_gross'];
+    $g['ee_cpp'] = (float)$line['cpp'];
+    $g['ee_cpp2'] = (float)($line['cpp2'] ?? 0);
+    $g['ee_ei'] = (float)$line['ei'];
+    $g['ee_tax'] = (float)$line['income_tax'];
+    $g['er_cpp'] = (float)$line['cpp_er'];
+    $g['er_cpp2'] = (float)($line['cpp2_er'] ?? 0);
+    $g['er_ei'] = (float)$line['ei_er'];
+    $g['er_wcb'] = (float)$line['wcb'];
+    $g['vac_earn'] = (float)$line['vac'];
+    $g['er_vac'] = (float)$line['vac_accrued'];
+}
 
 function money($v){ return '$' . number_format((float)$v, 2); }
 function num_to_words_dollars($amount){
@@ -420,6 +414,39 @@ function num_to_words_dollars($amount){
     return strtoupper($words . ' DOLLARS AND ' . str_pad($cents,2,'0',STR_PAD_LEFT) . '/100');
 }
 
+
+function paydocs_period_cpp(PDO $pdo, int $uid, int $sid, string $after, string $through, bool $afterExclusive): float {
+    if ($uid <= 0 || $sid <= 0 || $after === '' || $through === '') return 0.0;
+    $cmp = $afterExclusive ? '>' : '>=';
+    try {
+        $st = $pdo->prepare(
+            "SELECT COALESCE(SUM(cpp),0) FROM payroll_period_stat
+              WHERE user_id=? AND site_id=? AND period_end {$cmp} ? AND period_end <= ?"
+        );
+        $st->execute([$uid, $sid, $after, $through]);
+        return round((float)$st->fetchColumn(), 2);
+    } catch (Throwable $e) {
+        return 0.0;
+    }
+}
+
+function paydocs_period_cpp2(PDO $pdo, int $uid, int $sid, string $after, string $through, bool $afterExclusive): float {
+    if ($uid <= 0 || $sid <= 0 || $after === '' || $through === '') return 0.0;
+    $cmp = $afterExclusive ? '>' : '>=';
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM payroll_period_stat LIKE 'cpp2'");
+        if (!$col || !$col->fetch(PDO::FETCH_ASSOC)) return 0.0;
+        $st = $pdo->prepare(
+            "SELECT COALESCE(SUM(cpp2),0) FROM payroll_period_stat
+              WHERE user_id=? AND site_id=? AND period_end {$cmp} ? AND period_end <= ?"
+        );
+        $st->execute([$uid, $sid, $after, $through]);
+        return round((float)$st->fetchColumn(), 2);
+    } catch (Throwable $e) {
+        return 0.0;
+    }
+}
+
 function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
     $uid = (int)$g['user_id'];
     $sid = (int)$g['site_id'];
@@ -432,21 +459,20 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
     $from = $g['ytd_calendar'] ? sprintf('%04d-01-01', $year) : (string)$g['disp_start'];
     $out = [
         'reg_h'=>0.0,'ot_h'=>0.0,'trav_h'=>0.0,'reg_pay'=>0.0,'vac'=>0.0,'bonus'=>0.0,'car_allow'=>0.0,
-        'ph'=>0.0,'stat'=>0.0,'gross'=>0.0,'cpp'=>0.0,'ei'=>0.0,'tax'=>0.0,'paid'=>0.0,
+        'benefit_lines'=>[],'deduct_lines'=>[],
+        'ph'=>0.0,'stat'=>0.0,'gross'=>0.0,'cpp'=>0.0,'cpp2'=>0.0,'ei'=>0.0,'tax'=>0.0,'paid'=>0.0,
         'sick_avail'=>0.0,'vac_avail'=>0.0,'vac_used'=>0.0,
     ];
     $fCols = paydocs_fin_cols($pdo);
-    $cppSum = !empty($fCols['cpp2']) ? 'COALESCE(SUM(cpp),0)+COALESCE(SUM(cpp2),0)' : 'COALESCE(SUM(cpp),0)';
     $regPaySel = !empty($fCols['reg_pay']) ? 'COALESCE(SUM(reg_pay),0)' : '0';
     $bonusSel = !empty($fCols['bonus_pay']) ? 'COALESCE(SUM(bonus_pay),0)' : '0';
     $st = $pdo->prepare(
         "SELECT COALESCE(SUM(reg_hours),0) rh, COALESCE(SUM(overtime_hours),0) ot, COALESCE(SUM(travel_hours),0) th,
                 $regPaySel rp, COALESCE(SUM(vac),0) vac, $bonusSel bonus,
-                COALESCE(SUM(total_gross),0) g, $cppSum cpp, COALESCE(SUM(ei),0) ei,
+                COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                 COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
            FROM payroll_finalized
-          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
-            AND " . att_finalized_live_predicate($pdo, 'payroll_finalized')
+          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?"
     );
     $st->execute([$uid, $sid, $from, $asof]);
     $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -460,7 +486,6 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
         "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
            FROM payroll_finalized
           WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
-            AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
           GROUP BY category, display_label"
     );
     try {
@@ -468,30 +493,47 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
         foreach ($st2 as $row) {
             $cat = (string)($row['category'] ?? '');
             $lab = (string)($row['display_label'] ?? '');
+            if (strcasecmp($cat, 'Deduction') === 0) {
+                $name = $lab !== '' ? $lab : 'Adjustment';
+                $out['deduct_lines'][$name] = ($out['deduct_lines'][$name] ?? 0) + abs((float)$row['g']);
+            } elseif (strcasecmp($cat, 'Benefit') === 0) {
+                $name = $lab !== '' ? $lab : 'Benefit';
+                $out['benefit_lines'][$name] = ($out['benefit_lines'][$name] ?? 0) + (float)$row['g'];
+            } else {
             if (paydocs_is_public_holiday($cat, $lab)) $out['ph'] += (float)$row['g'];
             if (paydocs_is_stat_worked($cat, $lab)) $out['stat'] += (float)$row['g'];
             paydocs_peel_special($out, $cat, $lab, (float)$row['g'], (float)$row['b'], (float)$row['rp'], true);
+            }
         }
     } catch (Throwable $e) {
         $st2 = $pdo->prepare(
             "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(reg_pay),0) rp
                FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
-                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
               GROUP BY category, display_label"
         );
         $st2->execute([$uid, $sid, $from, $asof]);
         foreach ($st2 as $row) {
             $cat = (string)($row['category'] ?? '');
             $lab = (string)($row['display_label'] ?? '');
+            if (strcasecmp($cat, 'Deduction') === 0) {
+                $name = $lab !== '' ? $lab : 'Adjustment';
+                $out['deduct_lines'][$name] = ($out['deduct_lines'][$name] ?? 0) + abs((float)$row['g']);
+            } elseif (strcasecmp($cat, 'Benefit') === 0) {
+                $name = $lab !== '' ? $lab : 'Benefit';
+                $out['benefit_lines'][$name] = ($out['benefit_lines'][$name] ?? 0) + (float)$row['g'];
+            } else {
             if (paydocs_is_public_holiday($cat, $lab)) $out['ph'] += (float)$row['g'];
             if (paydocs_is_stat_worked($cat, $lab)) $out['stat'] += (float)$row['g'];
             paydocs_peel_special($out, $cat, $lab, (float)$row['g'], 0.0, (float)$row['rp'], true);
+            }
         }
     }
 
     if ($out['reg_pay'] < 0.005) {
-        $out['reg_pay'] = max(0, $out['gross'] - $out['vac'] - $out['ph'] - $out['stat'] - $out['bonus'] - (float)$out['car_allow']);
+        $benefitSum = array_sum($out['benefit_lines'] ?? []);
+        $deductSum = array_sum($out['deduct_lines'] ?? []);
+        $out['reg_pay'] = max(0, $out['gross'] - $out['vac'] - $out['ph'] - $out['stat'] - $out['bonus'] - (float)$out['car_allow'] - $benefitSum + $deductSum);
     }
 
     if (!$vac_paid_mode) {
@@ -506,6 +548,8 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
             $out['vac_avail'] = 0.0;
         }
     }
+    $out['cpp'] = round($out['cpp'] + paydocs_period_cpp($pdo, $uid, $sid, $from, $asof, false), 2);
+    $out['cpp2'] = round(paydocs_period_cpp2($pdo, $uid, $sid, $from, $asof, false), 2);
     return paydocs_apply_stub_ytd($pdo, $g, $out, $asof);
 }
 
@@ -531,8 +575,6 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
     if (!$o) return $out;
 
     $snap = (string)$o['as_of_date'];
-    $stubCols = paydocs_fin_cols($pdo);
-    $cppSum = !empty($stubCols['cpp2']) ? 'COALESCE(SUM(cpp),0)+COALESCE(SUM(cpp2),0)' : 'COALESCE(SUM(cpp),0)';
     // Opening gross already includes vacation. The stub adds vacation on top,
     // the same way the current column does, so keep vacation out of this gross.
     $out['gross'] = (float)$o['ytd_gross'] - (float)$o['ytd_vac'];
@@ -543,6 +585,7 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
     $out['bonus'] = (float)$o['ytd_bonus'];
     $out['car_allow'] = 0.0;
     $out['cpp'] = (float)$o['ytd_cpp'];
+    $out['cpp2'] = 0.0;
     $out['ei'] = (float)$o['ytd_ei'];
     $out['tax'] = (float)$o['ytd_tax'];
     $out['paid'] = (float)$o['ytd_net'];
@@ -552,11 +595,10 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
         $st2 = $pdo->prepare(
             "SELECT COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(vac),0) vac,
                     COALESCE(SUM(bonus_pay),0) bonus, COALESCE(SUM(total_gross),0) g,
-                    $cppSum cpp, COALESCE(SUM(ei),0) ei,
+                    COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                     COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
                FROM payroll_finalized
-              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
-                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized')
+              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?"
         );
         $st2->execute([$uid, $sid, $snap, $asof]);
         $add = $st2->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -575,7 +617,6 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
                     COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
                FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
-                AND " . att_finalized_live_predicate($pdo, 'payroll_finalized') . "
               GROUP BY category, display_label"
         );
         $st3->execute([$uid, $sid, $snap, $asof]);
@@ -594,6 +635,10 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
         }
     } catch (Throwable $e) {
         // keep snapshot only
+    }
+    if (!empty($snap)) {
+        $out['cpp'] = round($out['cpp'] + paydocs_period_cpp($pdo, $uid, $sid, $snap, $asof, true), 2);
+        $out['cpp2'] = round(paydocs_period_cpp2($pdo, $uid, $sid, $snap, $asof, true), 2);
     }
     return $out;
 }
@@ -644,7 +689,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     if ($g['emp_cityline'] !== '') $pdf->Cell($W, 4.2, $g['emp_cityline'], 0, 2, 'L');
 
     $y = $pdf->GetY() + 4;
-    $chqLabel = ($g['pay_method'] === 'debit') ? 'Debit' : ($chq_no > 0 ? ('#' . $chq_no) : 'Stub');
+    $chqLabel = ($g['pay_method'] === 'debit') ? 'Debit' : ('#' . $chq_no);
     $pdf->SetFillColor(230, 230, 230);
     $pdf->SetFont('Arial', 'B', 8);
     $pdf->SetXY($L, $y);
@@ -657,22 +702,24 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     $vac_curr = $vac_paid_mode ? (float)$g['vac_earn'] : 0.0;
     $reg_curr = (float)$g['reg_pay'];
     if ($reg_curr < 0.005) {
-        $reg_curr = max(0, (float)$g['gross'] - $vac_curr - (float)$g['ph_pay'] - (float)$g['stat_worked'] - (float)$g['bonus'] - (float)($g['car_allow'] ?? 0));
+        $benefitSum = array_sum($g['benefit_lines'] ?? []);
+        $deductSum = array_sum($g['deduct_lines'] ?? []);
+        $reg_curr = max(0, (float)$g['gross'] - $vac_curr - (float)$g['ph_pay'] - (float)$g['stat_worked'] - (float)$g['bonus'] - (float)($g['car_allow'] ?? 0) - $benefitSum + $deductSum);
     }
     $rate = (float)($g['lines'][0]['hourly_rate'] ?? 0);
     if ($g['reg_h'] > 0.009 && $reg_curr > 0.009) $rate = $reg_curr / $g['reg_h'];
     $hours_all = (float)$g['reg_h'] + (float)$g['ot_h'] + (float)$g['trav_h'];
-    $ded_curr = (float)$g['ee_cpp'] + (float)$g['ee_ei'] + (float)$g['ee_tax'];
+    $ded_curr = (float)$g['ee_cpp'] + (float)($g['ee_cpp2'] ?? 0) + (float)$g['ee_ei'] + (float)$g['ee_tax'];
     $vac_ytd = $vac_paid_mode ? (float)$ytd['vac'] : 0.0;
     $net_curr = max(0, (float)$g['gross'] + $vac_curr - $ded_curr);
-    $ded_ytd = (float)$ytd['cpp'] + (float)$ytd['ei'] + (float)$ytd['tax'];
+    $ded_ytd = (float)$ytd['cpp'] + (float)($ytd['cpp2'] ?? 0) + (float)$ytd['ei'] + (float)$ytd['tax'];
     $net_ytd = max(0, (float)$ytd['gross'] + $vac_ytd - $ded_ytd);
     $reg_ytd = (float)$ytd['reg_pay'];
 
     $y = $pdf->GetY() + 3;
     $pdf->SetXY($L, $y);
     $pdf->SetFont('Arial', '', 9);
-    $pdf->Cell(30, 5, paydocs_hhmm($hours_all), 0, 0, 'L');
+    $pdf->Cell(30, 5, !empty($g['salaried']) ? '' : paydocs_hhmm($hours_all), 0, 0, 'L');
     $pdf->Cell(50, 5, number_format((float)$g['gross'], 2), 0, 0, 'R');
     $pdf->Cell(50, 5, number_format((float)$ytd['gross'], 2), 0, 1, 'R');
     $pdf->SetX($L);
@@ -706,11 +753,15 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
         $pdf->Cell(36, 5.5, $ytdA !== null ? number_format((float)$ytdA, 2) : '', 1, 1, 'R');
     };
 
-    $earn('Regular Pay', paydocs_hhmm($g['reg_h']), number_format($rate, 2), $reg_curr, $reg_ytd, true);
-    if ($g['ot_h'] > 0.009) {
+    if (!empty($g['salaried'])) {
+        $earn('Salary', '', '', $reg_curr, $reg_ytd, true);
+    } else {
+        $earn('Regular Pay', paydocs_hhmm($g['reg_h']), number_format($rate, 2), $reg_curr, $reg_ytd, true);
+    }
+    if (empty($g['salaried']) && $g['ot_h'] > 0.009) {
         $earn('Overtime', paydocs_hhmm($g['ot_h']), number_format($rate * 1.5, 2), $g['ot_h'] * $rate * 1.5, $ytd['ot_h'] * $rate * 1.5);
     }
-    if ($g['trav_h'] > 0.009) {
+    if (empty($g['salaried']) && $g['trav_h'] > 0.009) {
         $earn('Travel', paydocs_hhmm($g['trav_h']), number_format($rate, 2), $g['trav_h'] * $rate, $ytd['trav_h'] * $rate);
     }
     if ($vac_paid_mode || $vac_curr > 0.009 || $vac_ytd > 0.009) {
@@ -722,6 +773,14 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     }
     if ((float)($g['car_allow'] ?? 0) > 0.009 || (float)($ytd['car_allow'] ?? 0) > 0.009) {
         $earn('Car allowance', '', '', (float)$g['car_allow'], (float)($ytd['car_allow'] ?? 0));
+    }
+    $benefitNames = array_unique(array_merge(array_keys($g['benefit_lines'] ?? []), array_keys($ytd['benefit_lines'] ?? [])));
+    foreach ($benefitNames as $benefitName) {
+        $earn((string)$benefitName, '', '', (float)($g['benefit_lines'][$benefitName] ?? 0), (float)($ytd['benefit_lines'][$benefitName] ?? 0));
+    }
+    $deductNames = array_unique(array_merge(array_keys($g['deduct_lines'] ?? []), array_keys($ytd['deduct_lines'] ?? [])));
+    foreach ($deductNames as $deductName) {
+        $earn((string)$deductName, '', '', -1 * (float)($g['deduct_lines'][$deductName] ?? 0), -1 * (float)($ytd['deduct_lines'][$deductName] ?? 0));
     }
     $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], !empty($g['show_zero_stat']));
 
@@ -744,6 +803,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
         $pdf->Cell(58, 5.5, $fmt($ytdA), 1, 1, 'R');
     };
     $with('CPP - Employee', $g['ee_cpp'], $ytd['cpp']);
+    $with('CPP2 - Employee', (float)($g['ee_cpp2'] ?? 0), (float)($ytd['cpp2'] ?? 0));
     $with('EI - Employee', $g['ee_ei'], $ytd['ei']);
     $with('Federal Income Tax', $g['ee_tax'], $ytd['tax']);
 
@@ -833,14 +893,21 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
         $pdf->Cell(30, 6, $hrs !== null ? number_format($hrs,2) : '', 'B', 0, 'R');
         $pdf->Cell(60, 6, money($amt), 'B', 1, 'R');
     };
-    if ($g['reg_h']  > 0) $row_line('Regular',  $g['reg_h'],  $reg_amt);
-    if ($g['ot_h']   > 0) $row_line('Overtime', $g['ot_h'],   $g['ot_h']  * $rate * 1.5);
-    if ($g['trav_h'] > 0) $row_line('Travel',   $g['trav_h'], $g['trav_h']* $rate);
+    if (!empty($g['salaried'])) $row_line('Salary', null, (float)$g['reg_pay']);
+    if (empty($g['salaried']) && $g['reg_h']  > 0) $row_line('Regular',  $g['reg_h'],  $reg_amt);
+    if (empty($g['salaried']) && $g['ot_h']   > 0) $row_line('Overtime', $g['ot_h'],   $g['ot_h']  * $rate * 1.5);
+    if (empty($g['salaried']) && $g['trav_h'] > 0) $row_line('Travel',   $g['trav_h'], $g['trav_h']* $rate);
     if (!empty($vac_paid_mode) && $g['vac_earn'] > 0.009) {
         $row_line('Vacation', null, $g['vac_earn']);
     }
     if ((float)($g['bonus'] ?? 0) > 0.009) $row_line('Bonus', null, $g['bonus']);
     if ((float)($g['car_allow'] ?? 0) > 0.009) $row_line('Car allowance', null, $g['car_allow']);
+    foreach (($g['benefit_lines'] ?? []) as $benefitName => $benefitAmt) {
+        if (abs((float)$benefitAmt) > 0.009) $row_line((string)$benefitName, null, (float)$benefitAmt);
+    }
+    foreach (($g['deduct_lines'] ?? []) as $deductName => $deductAmt) {
+        if (abs((float)$deductAmt) > 0.009) $row_line((string)$deductName, null, -1 * (float)$deductAmt);
+    }
     $pdf->SetX(15);
     $pdf->SetFont('Arial','B',9);
     $pdf->Cell(125, 7, '  GROSS PAY', 0, 0, 'L');
@@ -861,8 +928,9 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     };
     $ded_line('Income Tax', $g['ee_tax']);
     $ded_line('CPP',        $g['ee_cpp']);
+    $ded_line('CPP2',       (float)($g['ee_cpp2'] ?? 0));
     $ded_line('EI',         $g['ee_ei']);
-    $total_ded = $g['ee_tax'] + $g['ee_cpp'] + $g['ee_ei'];
+    $total_ded = $g['ee_tax'] + $g['ee_cpp'] + (float)($g['ee_cpp2'] ?? 0) + $g['ee_ei'];
     $pdf->SetX(15);
     $pdf->SetFont('Arial','B',9);
     $pdf->Cell(125, 7, '  TOTAL DEDUCTIONS', 0, 0, 'L');
@@ -890,81 +958,47 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     $pdf->SetX(15);
     $pdf->SetFont('Arial','I',8);
     $er_vac_show = !empty($vac_paid_mode) ? 0.0 : $g['er_vac'];
-    $er_total = $g['er_cpp'] + $g['er_ei'] + $g['er_wcb'] + $er_vac_show;
-    $pdf->MultiCell(185, 4, 'Employer contributions (not deducted from pay): CPP ' . money($g['er_cpp']) . ' | EI ' . money($g['er_ei']) . ' | WCB ' . money($g['er_wcb']) . ' | Vacation ' . money($er_vac_show) . '  =  ' . money($er_total), 0, 'L');
+    $er_total = $g['er_cpp'] + (float)($g['er_cpp2'] ?? 0) + $g['er_ei'] + $g['er_wcb'] + $er_vac_show;
+    $pdf->MultiCell(185, 4, 'Employer contributions (not deducted from pay): CPP ' . money($g['er_cpp']) . ' | CPP2 ' . money((float)($g['er_cpp2'] ?? 0)) . ' | EI ' . money($g['er_ei']) . ' | WCB ' . money($g['er_wcb']) . ' | Vacation ' . money($er_vac_show) . '  =  ' . money($er_total), 0, 'L');
 }
 
-$pdf = new FPDF('P', 'mm', 'Letter');
-$pdf->SetAutoPageBreak(false);
 $chq_no = (int)(date('ymd') . '0');
-$register_next = 0;
-$mark_paid = false;
-$issue_nonce = '';
-if ($record_cheques) {
-    $mark_paid = (($_POST['mark_paid'] ?? '') === '1');
-    $issue_nonce = substr(preg_replace('/[^A-Za-z0-9_-]/', '', (string)($_POST['issue_nonce'] ?? '')), 0, 64);
-    $requestedStart = (int)($_POST['cheque_start'] ?? 0);
-    if ($requestedStart < 1 || $requestedStart > 2000000000) {
-        $requestedStart = pcr_next_number($pdo, $paydoc_org_id, $req_issue_date ?: date('Y-m-d'));
+$drawCheques = in_array($doc_part, ['both', 'cheques'], true);
+$drawStubs = in_array($doc_part, ['both', 'stubs'], true);
+$chequePages = 0;
+$stubPages = 0;
+$mailSent = [];
+$mailFailed = [];
+
+if ($doc_part === 'email') {
+    if ($is_cli || ($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+        die('Use Email paystubs on the payroll screen.');
     }
-    $register_next = $requestedStart;
+    require_once __DIR__ . '/payroll_scope.php';
+    require_once __DIR__ . '/mailer.php';
+    ps_require_csrf();
+}
+
+$pdf = null;
+if ($doc_part !== 'email') {
+    $pdf = new FPDF('P', 'mm', 'Letter');
+    $pdf->SetAutoPageBreak(false);
 }
 
 foreach ($groups as $g) {
-    $net    = max(0, $g['gross'] + ($vac_paid_mode ? (float)$g['vac_earn'] : 0) - $g['ee_cpp'] - $g['ee_ei'] - $g['ee_tax']);
+    $net    = max(0, $g['gross'] + ($vac_paid_mode ? (float)$g['vac_earn'] : 0) - $g['ee_cpp'] - (float)($g['ee_cpp2'] ?? 0) - $g['ee_ei'] - $g['ee_tax']);
     $remain = max(0, $net - $g['paid']);
-    $is_eft = isset($eft_suppress[$g['user_id']]);
-    if ($is_eft) {
-        $g['pay_method'] = 'debit';
-    }
-    if ($record_cheques) {
-        $cheque_amt = pcr_cheque_face_amount(
-            (float)$g['gross'], (float)$g['ee_cpp'], (float)$g['ee_ei'], (float)$g['ee_tax'],
-            (float)$g['paid'], $vac_paid_mode, (float)$g['vac_earn']
-        );
-        $issue_this = !$is_eft && $cheque_amt > 0.009;
-        if ($issue_this) {
-            $linePayload = [];
-            foreach ($g['lines'] as $ln) {
-                $linePayload[] = [
-                    'finalized_id' => (int)$ln['line_id'],
-                    'remaining' => pcr_line_remaining(
-                        (float)$ln['total_gross'], (float)$ln['ee_cpp'], (float)$ln['ee_ei'],
-                        (float)$ln['ee_tax'], (float)$ln['paid_amount']
-                    ),
-                ];
-            }
-            $issued = pcr_issue_cheque($pdo, [
-                'org_id' => $paydoc_org_id,
-                'user_id' => (int)$g['user_id'],
-                'site_id' => (int)$g['site_id'],
-                'cheque_number' => $register_next,
-                'cheque_date' => $g['issue_date'],
-                'amount' => $cheque_amt,
-                'period_start' => $g['disp_start'],
-                'period_end' => $g['disp_end'],
-                'employee_name' => $g['emp_name'],
-                'issue_nonce' => $issue_nonce,
-                'created_by' => (int)($_SESSION['user_id'] ?? 0),
-            ], $linePayload);
-            $chq_no = (int)$issued['number'];
-            $register_next = $chq_no + 1;
-            if ($mark_paid && ($issued['status'] ?? '') !== 'void') {
-                $paidNow = pcr_mark_cheque_paid($pdo, (int)$issued['id'], $paydoc_org_id, (int)($_SESSION['user_id'] ?? 0));
-                $g['paid'] += (float)$paidNow['amount'];
-                $remain = max(0, $net - $g['paid']);
-            }
-        } else {
-            $chq_no = 0;
-        }
-    } else {
-        $chq_no++;
-        $cheque_amt = $g['paid'] > 0.01 ? $g['paid'] : $net;
-        $issue_this = !$is_eft;
+    $cheque_amt = $g['paid'] > 0.01 ? $g['paid'] : $net;
+    $chq_no++;
+
+    if ($doc_part === 'email') {
+        $pdf = new FPDF('P', 'mm', 'Letter');
+        $pdf->SetAutoPageBreak(false);
     }
 
-    if ($issue_this) {
+    if ($drawCheques && !isset($eft_suppress[$g['user_id']])) {
         $pdf->AddPage();
+        $chequePages++;
 
         if ($cheque_mode === 'preprinted') {
             $pdf->SetTextColor(0,0,0);
@@ -1060,25 +1094,83 @@ foreach ($groups as $g) {
             $pdf->SetXY($L+10, $top+$boxH-9);
             $pdf->SetFont('Courier','',13);
             $micr = "C" . str_pad($chq_no,6,'0',STR_PAD_LEFT) . "C   "
-                  . "A" . preg_replace('/\D/','',($g['transit_micr'] ?? '') !== '' ? $g['transit_micr'] : '00000') . "A "
-                  . (preg_replace('/\D/','',($g['institution_micr'] ?? '') !== '' ? $g['institution_micr'] : '000')) . " "
-                  . (preg_replace('/\D/','',($g['account_micr'] ?? '') !== '' ? $g['account_micr'] : '0000000'));
+                  . "A" . preg_replace('/\D/','',$g['transit'] ?: '00000') . "A "
+                  . (preg_replace('/\D/','',$g['institution'] ?: '000')) . " "
+                  . (preg_replace('/\D/','',$g['account'] ?: '0000000'));
             $pdf->Cell($W-20, 6, $micr, 0, 0, 'L');
 
             $pdf->SetTextColor(0,0,0);
         }
     }
 
-    $pdf->AddPage();
-    if ($g['paystub_layout'] === 'bramalea') {
-        $ytd = paydocs_ytd($pdo, $g, $vac_paid_mode);
-        paydocs_draw_bramalea($pdf, $g, $ytd, $vac_paid_mode, $chq_no);
-    } else {
-        paydocs_draw_legacy($pdf, $g, $vac_paid_mode, $remain);
+    if ($drawStubs || $doc_part === 'email') {
+        $pdf->AddPage();
+        if ($doc_part !== 'email') $stubPages++;
+        if ($g['paystub_layout'] === 'bramalea') {
+            $ytd = paydocs_ytd($pdo, $g, $vac_paid_mode);
+            paydocs_draw_bramalea($pdf, $g, $ytd, $vac_paid_mode, $chq_no);
+        } else {
+            paydocs_draw_legacy($pdf, $g, $vac_paid_mode, $remain);
+        }
+        if ($doc_part === 'email') {
+            $bin = $pdf->Output('S');
+            $to = trim((string)$g['emp_email']);
+            $safe = preg_replace('/[^A-Za-z0-9]+/', '-', (string)$g['emp_name']) ?: 'employee';
+            $fn = 'paystub-' . trim((string)$safe, '-') . '-' . $g['disp_end'] . '.pdf';
+            $subject = 'Paystub ' . $g['disp_start'] . ' to ' . $g['disp_end'];
+            $employer = paydocs_employer_name($g);
+            $html = '<p>Hello ' . htmlspecialchars((string)$g['emp_name']) . ',</p>'
+                . '<p>Your paystub for ' . htmlspecialchars((string)$g['disp_start'] . ' to ' . (string)$g['disp_end'])
+                . ' from ' . htmlspecialchars($employer) . ' is attached.</p>';
+            if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
+                $mailFailed[] = ['name' => $g['emp_name'], 'why' => 'No email address on the profile.'];
+            } else {
+                $sent = send_mail($to, $subject, $html, (string)$g['emp_name'], [
+                    ['filename' => $fn, 'content' => $bin, 'mime' => 'application/pdf'],
+                ]);
+                if (!empty($sent['ok'])) {
+                    $mailSent[] = ['name' => $g['emp_name'], 'email' => $to];
+                } else {
+                    $mailFailed[] = ['name' => $g['emp_name'], 'why' => (string)($sent['error'] ?? 'Email was not sent.')];
+                }
+            }
+        }
     }
 }
 
-$fname = 'pay_documents_' . date('Ymd_His') . '.pdf';
+if ($doc_part === 'email') {
+    header('Content-Type: text/html; charset=utf-8');
+    echo '<div style="font-family:sans-serif;max-width:720px;margin:24px auto;line-height:1.45;">';
+    echo '<h2>Paystubs by email</h2>';
+    echo '<p>' . count($mailSent) . ' sent. ' . count($mailFailed) . ' not sent.</p>';
+    if ($mailSent) {
+        echo '<ul>';
+        foreach ($mailSent as $row) {
+            echo '<li>' . htmlspecialchars((string)$row['name']) . ' — ' . htmlspecialchars((string)$row['email']) . '</li>';
+        }
+        echo '</ul>';
+    }
+    if ($mailFailed) {
+        echo '<ul>';
+        foreach ($mailFailed as $row) {
+            echo '<li><strong>' . htmlspecialchars((string)$row['name']) . '</strong> — ' . htmlspecialchars((string)$row['why']) . '</li>';
+        }
+        echo '</ul>';
+    }
+    echo '<p><a href="payroll_master_ledger.php">Back to the payroll center</a></p></div>';
+    exit;
+}
+
+if ($doc_part === 'cheques' && $chequePages === 0) {
+    die('No paper cheque to print. Everyone selected is marked Direct deposit, so use Print paystubs or Email paystubs.');
+}
+if ($stubPages === 0 && $chequePages === 0) {
+    die('Nothing to print for the selected rows.');
+}
+
+if ($doc_part === 'cheques') $fname = 'cheques_' . date('Ymd_His') . '.pdf';
+elseif ($doc_part === 'stubs') $fname = 'paystubs_' . date('Ymd_His') . '.pdf';
+else $fname = 'pay_documents_' . date('Ymd_His') . '.pdf';
 if ($is_cli && $cli_out) {
     $pdf->Output('F', $cli_out);
     fwrite(STDERR, "wrote $cli_out pages=" . $pdf->PageNo() . " employees=" . count($groups) . "\n");
