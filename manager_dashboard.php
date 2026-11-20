@@ -3,7 +3,8 @@
 date_default_timezone_set('America/Edmonton'); 
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'engine/menu_generator.php'; 
 
 // 1. STRICT SECURITY GATE (Level 29 and below ONLY)
@@ -29,16 +30,7 @@ function getDistance($lat1, $lon1, $lat2, $lon2) {
     return $earth_radius * $c;
 }
 
-// 3. FETCH GLOBAL TAX RATES
-try {
-    $settings = $pdo->query("SELECT * FROM payroll_settings LIMIT 1")->fetch();
-    $cpp_r    = floatval($settings['cpp_rule'] ?? 0.0595);
-    $ei_r     = 0.0163; 
-    $ei_er_m  = 1.4;    
-    $wcb_r    = floatval($settings['wcb_rate'] ?? 0.0155);
-} catch (Exception $e) { 
-    $cpp_r = 0.0595; $ei_r = 0.0163; $ei_er_m = 1.4; $wcb_r = 0.0155; 
-}
+// Employer cost on each row comes from pe_line.
 
 $grouped_sites = [];
 
@@ -127,9 +119,18 @@ try {
                     $in_t = strtotime($r['clock_in']);
                     $out_t = ($r['clock_out'] && $r['clock_out'] != '0000-00-00 00:00:00') ? strtotime($r['clock_out']) : time();
                     $net_hrs = max(0, ($out_t - $in_t) / 3600);
-                    $gross = $net_hrs * floatval($r['official_rate'] ?? 0);
-                    $vac_pay = $gross * (floatval($r['vac_pay_percent'] ?? 4) / 100);
-                    $total_liability = $gross + ($gross * $cpp_r) + ($gross * $ei_r * $ei_er_m) + $vac_pay + ($gross * $wcb_r);
+                    $day = date('Y-m-d', $in_t);
+                    $uid = (int)($r['user_id'] ?? 0);
+                    $sid = (int)($r['site_id'] ?? 0);
+                    $gross = $net_hrs * pe_profile_hourly_rate($pdo, $uid, $day);
+                    $mgr = pe_line($gross, pe_vacation_rate($pdo, $uid, $sid, $day), pe_rates($pdo), [
+                        'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $sid, 'org_id' => (int)($r['org_id'] ?? 0), 'work_date' => $day,
+                    ]);
+                    $vac_pay = (float)$mgr['vac'];
+                    $er_cpp = (float)$mgr['cpp_er'] + (float)($mgr['cpp2_er'] ?? 0);
+                    $er_ei = (float)$mgr['ei_er'];
+                    $er_wcb = (float)$mgr['wcb'];
+                    $total_liability = (float)$mgr['pay_gross'] + $er_cpp + $er_ei + $er_wcb;
                 ?>
                 <tr>
                     <td><strong><?= htmlspecialchars($r['emp_name']) ?></strong></td>
@@ -145,9 +146,9 @@ try {
                         <b>Employer Burden Breakdown:</b><br>
                         Gross: $<?= number_format($gross, 2) ?> | 
                         Vacation (<?= $r['vac_pay_percent'] ?>%): $<?= number_format($vac_pay, 2) ?> | 
-                        CPP: $<?= number_format($gross * $cpp_r, 2) ?> | 
-                        EI: $<?= number_format($gross * $ei_r * $ei_er_m, 2) ?> | 
-                        WCB: $<?= number_format($gross * $wcb_r, 2) ?>
+                        CPP: $<?= number_format($er_cpp, 2) ?> | 
+                        EI: $<?= number_format($er_ei, 2) ?> | 
+                        WCB: $<?= number_format($er_wcb, 2) ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>

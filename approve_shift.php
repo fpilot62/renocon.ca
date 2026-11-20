@@ -4,6 +4,8 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 
 // 1. COLLECT DATA
 $shift_id    = $_POST['shift_id'] ?? null; // This is the ID from the attendance table
@@ -26,10 +28,15 @@ try {
     $gross_pay = $final_hours * $rate;
 
     // 3. GET SITE ID FROM ATTENDANCE
-    $a_stmt = $pdo->prepare("SELECT site_id FROM attendance WHERE id = ?");
+    $a_stmt = $pdo->prepare("SELECT site_id, clock_in FROM attendance WHERE id = ?");
     $a_stmt->execute([$shift_id]);
     $att_data = $a_stmt->fetch();
     $site_id = $att_data['site_id'] ?? 0;
+    $day = !empty($att_data['clock_in']) ? date('Y-m-d', strtotime($att_data['clock_in'])) : date('Y-m-d');
+    pe_line($gross_pay, pe_vacation_rate($pdo, (int)$user_id, (int)$site_id, $day), pe_rates($pdo), [
+        'pdo' => $pdo, 'user_id' => (int)$user_id, 'site_id' => (int)$site_id, 'org_id' => (int)$org_id, 'work_date' => $day,
+    ]);
+    sh_after_finalize($pdo, (int)$user_id, (int)$site_id, $day, (int)($_SESSION['user_id'] ?? 0));
 
     // 4. INSERT INTO payroll_records 
     // Uses fields: user_id, org_id, site_id, total_hours, rate_used, gross_pay, date_processed

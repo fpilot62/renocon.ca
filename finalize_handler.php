@@ -9,39 +9,23 @@ $site_info = $site_stmt->fetch(PDO::FETCH_ASSOC);
 $province = $site_info['state'] ?? 'AB';
 $country  = $site_info['country'] ?? 'CA';
 
-// 2. SET LABELS & RATES ON THE FLY
 $tax_label = "EI/CPP";
-$safety_label = "WCB"; // Default
-$safety_rate = 0.0155; // Default (AB)
+$safety_label = "WCB";
+if ($country === 'CA' && $province === 'ON') { $safety_label = "WSIB"; }
+if ($country === 'CA' && $province === 'BC') { $safety_label = "WorkSafeBC"; }
+if ($country === 'CA' && $province === 'QC') { $tax_label = "QPP/QPIP"; $safety_label = "CNESST"; }
+if ($country === 'US') { $tax_label = "FICA/FUTA"; $safety_label = "Workers Comp"; }
+if ($country === 'AU') { $tax_label = "PAYG"; $safety_label = "WorkCover"; }
 
-if ($country === 'CA') {
-    switch ($province) {
-        case 'ON':
-            $safety_label = "WSIB";
-            $safety_rate  = 0.0165; // Example Ontario rate
-            break;
-        case 'BC':
-            $safety_label = "WorkSafeBC";
-            $safety_rate  = 0.0225; // Example BC rate
-            break;
-        case 'QC':
-            $safety_label = "CNESST";
-            $tax_label    = "QPP/QPIP";
-            break;
-    }
-} elseif ($country === 'US') {
-    $tax_label = "FICA/FUTA";
-    $safety_label = "Workers Comp";
-    $safety_rate = 0.0300; // US Average Placeholder
-} elseif ($country === 'AU') {
-    $tax_label = "PAYG";
-    $safety_label = "WorkCover";
-    $safety_rate = 0.0140;
-}
-
-// 3. DO THE MATH
+if (!function_exists('pe_line')) { require_once __DIR__ . '/payroll_engine/payroll_engine.php'; }
+if (!function_exists('sh_after_finalize')) { require_once __DIR__ . '/payroll_engine/stat_holidays.php'; }
 $gross_pay = $total_hours * $hourly_rate;
-$employer_safety_cost = round($gross_pay * $safety_rate, 2);
+$day = substr((string)$work_date, 0, 10);
+$fin = pe_line($gross_pay, pe_vacation_rate($pdo, (int)$user_id, (int)$site_id, $day), pe_rates($pdo), [
+    'pdo' => $pdo, 'user_id' => (int)$user_id, 'site_id' => (int)$site_id, 'org_id' => (int)($shift['org_id'] ?? 0), 'work_date' => $day,
+]);
+$employer_safety_cost = (float)$fin['wcb'];
+sh_after_finalize($pdo, (int)$user_id, (int)$site_id, $day, 0);
 
 // 4. SAVE TO payroll_finalized
 // We now save the specific label so the Pay Stub is 100% accurate

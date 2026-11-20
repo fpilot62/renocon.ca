@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>20,'fence'=>['id'=>'attendance']]); // org-scope audit Nov 2026
+
 /** * Path: /finalize_shift.php
  * STATUS: Patched so the split rows actually POST.
  * CHANGE LOG (this revision):

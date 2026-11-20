@@ -3,7 +3,8 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // 1. DATABASE & MENU (Using db.php only)
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'engine/menu_generator.php';
 
 // 2. SECURITY CHECK
@@ -12,11 +13,7 @@ if (!isset($_SESSION['user_id'])) {
     exit; 
 }
 
-// 3. DEFINE CONSTANTS (Matching your other payroll files)
-$VAC_RATE = 0.04; 
-$CPP_RATE = 0.0595; 
-$EI_RATE  = 0.0163; 
-$WCB_RATE = 0.018;
+// Deductions are not estimated on this lifetime total. The pay ledger shows the engine amounts.
 
 // 4. FETCH LEDGER DATA
 $selected_site = $_GET['site_filter'] ?? '';
@@ -113,8 +110,8 @@ $is_super = $__fence['is_super']; $selected_org = $__fence['selected_org']; $org
                 <th>Employee</th>
                 <th>Total Hours</th>
                 <th>Gross Wages</th>
-                <th>Vacation (4%)</th>
-                <th>ER Taxes (CPP/EI/WCB)</th>
+                <th>Vacation</th>
+                <th>ER taxes (see pay ledger)</th>
                 <th>Total Liability</th>
             </tr>
         </thead>
@@ -126,9 +123,9 @@ $is_super = $__fence['is_super']; $selected_org = $__fence['selected_org']; $org
                 $g_hours = 0; $g_gross = 0; $g_total = 0;
                 foreach ($ledger_data as $row): 
                     $gross = floatval($row['gross']);
-                    $vac   = $gross * $VAC_RATE;
-                    $taxes = ($gross * $CPP_RATE) + ($gross * $EI_RATE * 1.4) + ($gross * $WCB_RATE);
-                    $total = $gross + $vac + $taxes;
+                    $vac   = 0.0;
+                    $taxes = 0.0;
+                    $total = $gross;
                     
                     $g_hours += $row['paid_hrs'];
                     $g_gross += $gross;

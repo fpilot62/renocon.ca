@@ -3,6 +3,7 @@
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'engine/menu_generator.php';
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
@@ -48,7 +49,7 @@ $is_super = $__fence['is_super']; $selected_org = $__fence['selected_org']; $org
     $q_final = "SELECT COALESCE(u.Name, 'Unresolved Profile ID: ' + p.user_id) as Name, u.hourly_rate as profile_rate, 
                 COALESCE(DATE(a.clock_in), p.work_date) as work_date, 
                 GREATEST(COALESCE(p.reg_hours, 0), COALESCE(p.balance_hours, 0)) as hrs, 
-                p.hourly_rate as line_rate, p.reg_pay, s.nick_name as site, 'FINALIZED' as src 
+                p.user_id, p.site_id, p.hourly_rate as line_rate, p.reg_pay, s.nick_name as site, 'FINALIZED' as src 
                 FROM payroll_finalized p 
                 LEFT JOIN attendance a ON p.attendance_id = a.id
                 LEFT JOIN users u ON p.user_id = u.id 
@@ -58,7 +59,7 @@ $is_super = $__fence['is_super']; $selected_org = $__fence['selected_org']; $org
     $q_bal = "SELECT COALESCE(u.Name, 'Unresolved Profile ID: ' + p.user_id) as Name, u.hourly_rate as profile_rate, 
               COALESCE(DATE(a.clock_in), p.work_date) as work_date, 
               GREATEST(COALESCE(p.reg_hours, 0), COALESCE(p.balance_hours, 0)) as hrs, 
-              0 as line_rate, 0 as reg_pay, s.nick_name as site, 'BALANCE' as src 
+              p.user_id, p.site_id, 0 as line_rate, 0 as reg_pay, s.nick_name as site, 'BALANCE' as src 
               FROM payroll_balance p 
               LEFT JOIN attendance a ON p.attendance_id = a.id
               LEFT JOIN users u ON p.user_id = u.id 
@@ -168,11 +169,15 @@ $current_period = "";
         
         // Dynamic deduction computations matches payout manager engine formulas exactly
         $gross = (float)$r['reg_pay'] > 0 ? (float)$r['reg_pay'] : ($hrs * $rate);
-        $tax_withheld = $gross * 0.12;
-        $cpp_withheld = $gross * 0.0595;
-        $ei_withheld  = $gross * 0.0166;
+        $day = substr((string)$r['work_date'], 0, 10);
+        $grp = pe_line($gross, pe_vacation_rate($pdo, (int)($r['user_id'] ?? 0), (int)($r['site_id'] ?? 0), $day), pe_rates($pdo), [
+            'pdo' => $pdo, 'user_id' => (int)($r['user_id'] ?? 0), 'site_id' => (int)($r['site_id'] ?? 0), 'org_id' => $org_id, 'work_date' => $day,
+        ]);
+        $tax_withheld = (float)$grp['income_tax'];
+        $cpp_withheld = (float)$grp['cpp'] + (float)($grp['cpp2'] ?? 0);
+        $ei_withheld = (float)$grp['ei'];
         $total_deductions = $tax_withheld + $cpp_withheld + $ei_withheld;
-        $net_payout = $gross - $total_deductions;
+        $net_payout = (float)$grp['net'];
 
         if ($current_period !== "" && $current_period !== $biweek): ?>
             <tr class="subtotal-row">

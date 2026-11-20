@@ -23,12 +23,7 @@ if (!$current_user_id || $user_lvl >= 30) {
 $is_restricted = ($_SESSION['access_scope'] === 'restricted');
 $assigned_sites = preg_replace('/[^0-9,]/', '', $_SESSION['assigned_site_ids'] ?? '');
 
-// SHARED TAX CONSTANTS
-$CPP_RATE   = 0.0595; 
-$EI_RATE    = 0.0163; 
-$EI_ER_MULT = 1.4; 
-$WCB_RATE   = 0.018; 
-$VAC_RATE   = 0.04;
+// Employer cost on this screen comes from pe_line.
 
 // 2. CAPTURE FILTERS
 $view       = $_GET['view'] ?? 'audit'; 
@@ -177,11 +172,17 @@ try {
                     
                     // Calculation logic
                     $net_hrs = ($out - $in) / 3600;
-                    $rate = pe_profile_hourly_rate($pdo, (int)$r['user_id']);
+                    $day = date('Y-m-d', $in);
+                    $uid = (int)$r['user_id'];
+                    $sid = (int)($r['site_id'] ?? 0);
+                    $rate = pe_profile_hourly_rate($pdo, $uid, $day);
                     $gross = $net_hrs * $rate;
-                    $vac = $gross * $VAC_RATE;
-                    $taxes = ($gross * $CPP_RATE) + ($gross * $EI_RATE * $EI_ER_MULT) + ($gross * $WCB_RATE);
-                    $total_liability = $gross + $vac + $taxes;
+                    $hub = pe_line($gross, pe_vacation_rate($pdo, $uid, $sid, $day), pe_rates($pdo), [
+                        'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $sid, 'org_id' => (int)($r['org_id'] ?? $current_org_id), 'work_date' => $day,
+                    ]);
+                    $vac = (float)$hub['vac'];
+                    $taxes = (float)$hub['cpp_er'] + (float)($hub['cpp2_er'] ?? 0) + (float)$hub['ei_er'] + (float)$hub['wcb'];
+                    $total_liability = (float)$hub['pay_gross'] + $taxes;
 
                     $eid = $r['user_id'];
                     if(!isset($grand_totals[$eid])) { $grand_totals[$eid] = ['name'=>$r['Name'], 'hrs'=>0, 'gross'=>0, 'total'=>0]; }

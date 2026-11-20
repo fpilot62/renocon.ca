@@ -1,6 +1,8 @@
 <?php
 /** Path: /process_finalize.php */
 require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 
 if (isset($_GET['id'])) {
     $id = (int)$_GET['id'];
@@ -29,6 +31,11 @@ if (isset($_GET['id'])) {
         $pay_this_shift = min($shift_audit, $remaining_cap);
         $bank_adjustment = max(0, $shift_audit - $pay_this_shift);
         $gross_pay = $pay_this_shift * $data['Wage'];
+        $day = !empty($data['clock_in']) ? date('Y-m-d', strtotime($data['clock_in'])) : date('Y-m-d');
+        pe_line($gross_pay, pe_vacation_rate($pdo, (int)$data['user_id'], (int)$data['site_id'], $day), pe_rates($pdo), [
+            'pdo' => $pdo, 'user_id' => (int)$data['user_id'], 'site_id' => (int)$data['site_id'], 'org_id' => (int)($data['org_id'] ?? 0), 'work_date' => $day,
+        ]);
+        sh_after_finalize($pdo, (int)$data['user_id'], (int)$data['site_id'], $day, 0);
 
         $pdo->beginTransaction();
 

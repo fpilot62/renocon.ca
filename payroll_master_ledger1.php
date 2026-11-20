@@ -56,7 +56,7 @@ if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_genera
 // ---------------------------------------------------------------- helpers
 /** Employee statutory deductions for one finalized line, from stored columns. */
 function ee_deduct(array $r): float {
-    return (float)$r['ee_cpp'] + (float)$r['ee_ei'] + (float)$r['ee_tax'];
+    return (float)$r['ee_cpp'] + (float)($r['ee_cpp2'] ?? 0) + (float)$r['ee_ei'] + (float)$r['ee_tax'];
 }
 /** Net payable for one finalized line. */
 function net_payable_line(array $r): float {

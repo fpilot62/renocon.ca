@@ -2,7 +2,8 @@
 /** Path: /daily_report.php */
 ob_start();
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
-require_once 'db.php'; // Swapped to your verified database file
+require_once 'db.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 // 1. SECURITY (Verified Level 10 for Admin Access)
 $my_rank = $_SESSION['user_level'] ?? 99;
@@ -11,12 +12,7 @@ if (intval($my_rank) > 15) {
     exit; 
 }
 
-// 2. FETCH GLOBAL SETTINGS
-$settings = $pdo->query("SELECT * FROM payroll_settings LIMIT 1")->fetch();
-$cpp_r    = $settings['cpp_rule'] ?? 0.0595; 
-$ei_er    = $settings['ei_rate_er'] ?? 0.0228; 
-$wcb_r    = $settings['wcb_rate'] ?? 0.0155;
-$ei_ee_r  = 0.0163; // Standard Employee EI portion
+// Deductions on each row come from pe_line.
 
 // 3. CAPTURE FILTERS
 // Opening the page with no date used to load every punch, including selfie
@@ -37,7 +33,7 @@ if($f_site) { $where[] = "a.site_id = ?"; $params[] = $f_site; }
 $where_clause = "WHERE " . implode(" AND ", $where);
 
 // 4. MAIN QUERY — clock times and rates only. Do not select selfie columns.
-$sql = "SELECT a.clock_in,
+$sql = "SELECT a.user_id, a.site_id, a.org_id, a.clock_in,
                a.clock_out,
                u.Name as emp_name, 
                u.official_rate, 
@@ -141,14 +137,18 @@ if (function_exists('generateMenu')) {
                     $gross = $hours * ($row['official_rate'] ?? 0); 
                 }
                 
-                $cpp_ee = $gross * $cpp_r;
-                $ei_ee  = $gross * $ei_ee_r;
-                $tax_est = $gross * 0.12; 
-                $net_pay = $gross - $cpp_ee - $ei_ee - $tax_est;
-
-                $vac_rate = ($row['vac_pay_percent'] ?? 4) / 100; 
-                $vac_val = $gross * $vac_rate;
-                $er_extras = ($gross * $cpp_r) + ($gross * $ei_er) + ($gross * $wcb_r);
+                $day = substr((string)$row['clock_in'], 0, 10);
+                $uid = (int)($row['user_id'] ?? 0);
+                $sid = (int)($row['site_id'] ?? 0);
+                $rep = pe_line($gross, pe_vacation_rate($pdo, $uid, $sid, $day), pe_rates($pdo), [
+                    'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $sid, 'org_id' => (int)($row['org_id'] ?? 0), 'work_date' => $day,
+                ]);
+                $cpp_ee = (float)$rep['cpp'] + (float)($rep['cpp2'] ?? 0);
+                $ei_ee = (float)$rep['ei'];
+                $tax_est = (float)$rep['income_tax'];
+                $net_pay = (float)$rep['net'];
+                $vac_val = (float)$rep['vac'];
+                $er_extras = (float)$rep['cpp_er'] + (float)($rep['cpp2_er'] ?? 0) + (float)$rep['ei_er'] + (float)$rep['wcb'];
                 
                 $total_row_cost = $gross + $vac_val + $er_extras;
                 $grand_cost += $total_row_cost;

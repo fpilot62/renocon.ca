@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fence'=>['attendance_id'=>'attendance']]); // org-scope audit Nov 2026
+
 /** Path: /payroll_processor.php */
 ob_start(); 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }

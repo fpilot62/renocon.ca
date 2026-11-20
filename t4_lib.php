@@ -35,7 +35,7 @@ function t4_year_caps(int $year): array {
             'cpp_max' => 4230.45,
             'cpp2_max' => 416.00,
             'ei_max' => 1123.07,
-            'ei_rate' => 0.0163,
+            'ei_rate' => 0.0163, // published 2026 employee EI rate for the annual maximum, not a pay-cheque estimate
         ],
     ];
     if (!isset($caps[$year])) {

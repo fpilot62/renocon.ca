@@ -37,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
         
         $stmtMasterAnchor = $pdo->prepare("INSERT INTO payroll_masters 
             (org_id, site_id, user_id, pay_period_start, pay_period_end, gross_total, er_contributions, cra_deductions, net_payable, status, created_at) 
-            VALUES (1, 1, ?, ?, ?, ?, 0.00, 0.00, ?, 'processed', CURRENT_TIMESTAMP())");
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'processed', CURRENT_TIMESTAMP())");
         
         $stmtInsertPay = $pdo->prepare("INSERT INTO payroll_payments 
             (payroll_id, recipient, amount, date_paid, payment_type, method, ref_no) 
@@ -88,9 +88,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
 
             // 5. Document permanently inside historical logs
             if ($total_distribution_gross > 0) {
-                $approx_net_payable = $total_distribution_gross * 0.7742; 
+            $sitePick = $pdo->prepare("SELECT site_id FROM payroll_finalized WHERE user_id=? AND work_date BETWEEN ? AND ? AND site_id>0 ORDER BY work_date DESC LIMIT 1");
+            $sitePick->execute([$uid, $batch_start, $batch_end]);
+            $paySite = (int)($sitePick->fetchColumn() ?: 0);
+            $payLine = pe_line($total_distribution_gross, pe_vacation_rate($pdo, $uid, $paySite, substr((string)$batch_end, 0, 10)), pe_rates($pdo), [
+                'pdo' => $pdo, 'user_id' => $uid, 'site_id' => $paySite, 'work_date' => substr((string)$batch_end, 0, 10),
+            ]);
+            $net_payable = (float)$payLine['net'];
 
-                $stmtMasterAnchor->execute([$uid, $batch_start, $batch_end, $total_distribution_gross, $approx_net_payable]);
+            $stmtMasterAnchor->execute([
+                $paySite, $uid, $batch_start, $batch_end, $total_distribution_gross,
+                (float)$payLine['cpp_er'] + (float)($payLine['cpp2_er'] ?? 0) + (float)$payLine['ei_er'] + (float)$payLine['wcb'],
+                (float)$payLine['cpp'] + (float)($payLine['cpp2'] ?? 0) + (float)$payLine['ei'] + (float)$payLine['income_tax'],
+                $net_payable,
+            ]);
                 $parent_master_id = $pdo->lastInsertId();
 
                 $ref_code = "TXN-" . strtoupper(uniqid());
