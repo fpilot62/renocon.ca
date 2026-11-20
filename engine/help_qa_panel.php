@@ -21,20 +21,17 @@ function help_qa_panel(PDO $pdo): string
     $level = (int)($_SESSION['user_level'] ?? 99);
     $editor = help_qa_is_superadmin();
     $orgId = help_qa_session_org();
-    if (!help_qa_table_ready($pdo)) {
-        if (!$editor) {
-            return '';
-        }
-        return '<div class="help-qa" id="helpQaPanel"><p class="help-qa-note">Questions &amp; answers are not set up yet. After a database backup, run migrations/20261120_help_qa.sql.</p></div>';
-    }
-    $rows = help_qa_rows_for_page($pdo, $pageKey);
+    $qaReady = help_qa_table_ready($pdo);
+    $askReady = help_user_question_table_ready($pdo);
+    $rows = $qaReady ? help_qa_rows_for_page($pdo, $pageKey) : [];
     $visible = [];
     foreach ($rows as $row) {
         if ($editor || help_qa_reader_can_see($row, $level, $orgId)) {
             $visible[] = $row;
         }
     }
-    if (!$editor && !$visible) {
+    $showList = $qaReady && ($editor || $visible);
+    if (!$showList && !$askReady && !$editor) {
         return '';
     }
     if (!function_exists('ps_csrf_token')) {
@@ -45,6 +42,11 @@ function help_qa_panel(PDO $pdo): string
     }
     $csrf = function_exists('ps_csrf_token') ? ps_csrf_token() : '';
     $h = 'help_qa_h';
+    $actionUrl = help_qa_action_url();
+    $askNotice = trim((string)($_SESSION['help_ask_notice'] ?? ''));
+    unset($_SESSION['help_ask_notice']);
+    $uqStatus = help_user_question_status_filter((string)($_GET['uq_status'] ?? 'new'));
+    $userQuestions = ($editor && $askReady) ? help_user_question_list($pdo, $uqStatus, $pageKey) : [];
     $html = '<div class="help-qa" id="helpQaPanel">';
     $html .= '<style>'
         . '.help-qa{max-width:1550px;margin:8px auto 0;padding:0 16px;font-family:Inter,Segoe UI,sans-serif;font-size:13px;color:#1e293b}'
@@ -61,7 +63,14 @@ function help_qa_panel(PDO $pdo): string
         . '.help-qa-edit.is-open{display:block}'
         . '.help-qa input,.help-qa textarea,.help-qa select{width:100%;box-sizing:border-box;margin:2px 0 6px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:6px}'
         . '.help-qa-note{color:#64748b;margin:6px 0 0}'
+        . '.help-qa-ask{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;margin-top:6px}'
+        . '.help-qa-ask form{display:flex;gap:8px;align-items:center;flex-wrap:wrap}'
+        . '.help-qa-ask input[name=question]{flex:1;min-width:220px}'
         . '</style>';
+    if (!$qaReady && $editor) {
+        $html .= '<p class="help-qa-note">Questions &amp; answers are not set up yet. After a database backup, run migrations/20261120_help_qa.sql.</p>';
+    }
+    if ($showList) {
     $html .= '<button type="button" class="help-qa-toggle" aria-expanded="false" aria-controls="helpQaBody" onclick="helpQaToggle(this)">Questions &amp; answers</button>';
     $html .= '<div class="help-qa-body" id="helpQaBody" hidden>';
     if (!$visible) {
@@ -84,7 +93,7 @@ function help_qa_panel(PDO $pdo): string
         $html .= '<p class="help-qa-a">' . $h($row['answer']) . '</p>';
         if ($editor) {
             $html .= '<div class="help-qa-tools">';
-            $html .= '<form method="post" action="help_qa_action.php" style="display:inline">';
+            $html .= '<form method="post" action="' . $h($actionUrl) . '" style="display:inline">';
             $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
             $html .= '<input type="hidden" name="id" value="' . $id . '">';
             $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
@@ -92,14 +101,14 @@ function help_qa_panel(PDO $pdo): string
             $html .= '<button name="action" value="down" type="submit">Down</button>';
             $html .= '</form>';
             $html .= '<button type="button" onclick="this.parentNode.parentNode.querySelector(\'.help-qa-edit\').classList.toggle(\'is-open\')">Edit</button>';
-            $html .= '<form method="post" action="help_qa_action.php" style="display:inline" onsubmit="return confirm(\'Delete this question?\')">';
+            $html .= '<form method="post" action="' . $h($actionUrl) . '" style="display:inline" onsubmit="return confirm(\'Delete this question?\')">';
             $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
             $html .= '<input type="hidden" name="id" value="' . $id . '">';
             $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
             $html .= '<button name="action" value="delete" type="submit">Delete</button>';
             $html .= '</form>';
             $html .= '</div>';
-            $html .= '<form class="help-qa-edit" method="post" action="help_qa_action.php">';
+            $html .= '<form class="help-qa-edit" method="post" action="' . $h($actionUrl) . '">';
             $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
             $html .= '<input type="hidden" name="action" value="save">';
             $html .= '<input type="hidden" name="id" value="' . $id . '">';
@@ -117,7 +126,7 @@ function help_qa_panel(PDO $pdo): string
         $html .= '</div>';
     }
     if ($editor) {
-        $html .= '<form class="help-qa-add" method="post" action="help_qa_action.php">';
+        $html .= '<form class="help-qa-add" method="post" action="' . $h($actionUrl) . '">';
         $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
         $html .= '<input type="hidden" name="action" value="add">';
         $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
@@ -132,8 +141,16 @@ function help_qa_panel(PDO $pdo): string
         $html .= '<button type="submit">Add</button>';
         $html .= '</form>';
         $html .= '<p class="help-qa-note">Drag a question onto another to reorder, or use Up and Down. Saves are marked edited in the app, so the seed will not overwrite them. <a href="help_qa.php">All questions</a></p>';
+    }
+        $html .= '</div>';
+    }
+    if ($showList) {
         $html .= '<script>
-function helpQaToggle(b){var p=document.getElementById("helpQaBody");var open=p.hasAttribute("hidden");if(open){p.removeAttribute("hidden");}else{p.setAttribute("hidden","");}b.setAttribute("aria-expanded",open?"true":"false");}
+function helpQaToggle(b){var p=document.getElementById("helpQaBody");if(!p)return;var open=p.hasAttribute("hidden");if(open){p.removeAttribute("hidden");}else{p.setAttribute("hidden","");}b.setAttribute("aria-expanded",open?"true":"false");}
+</script>';
+    }
+    if ($editor && $showList) {
+        $html .= '<script>
 (function(){
   var box=document.getElementById("helpQaBody"); if(!box) return;
   var drag=null;
@@ -149,7 +166,7 @@ function helpQaToggle(b){var p=document.getElementById("helpQaBody");var open=p.
       if(from<to) el.after(drag); else el.before(drag);
       var ids=[].map.call(box.querySelectorAll(".help-qa-item"), function(n){ return n.getAttribute("data-id"); });
       var f=document.createElement("form");
-      f.method="post"; f.action="help_qa_action.php";
+      f.method="post"; f.action=' . json_encode($actionUrl) . ';
       function hid(n,v){ var i=document.createElement("input"); i.type="hidden"; i.name=n; i.value=v; f.appendChild(i); }
       hid("csrf_token", ' . json_encode($csrf) . ');
       hid("action","reorder");
@@ -160,9 +177,93 @@ function helpQaToggle(b){var p=document.getElementById("helpQaBody");var open=p.
   });
 })();
 </script>';
-    } else {
-        $html .= '<script>function helpQaToggle(b){var p=document.getElementById("helpQaBody");var open=p.hasAttribute("hidden");if(open){p.removeAttribute("hidden");}else{p.setAttribute("hidden","");}b.setAttribute("aria-expanded",open?"true":"false");}</script>';
     }
-    $html .= '</div></div>';
+    $html .= help_qa_ask_box($actionUrl, $csrf, $pageKey, $askNotice, $askReady);
+    if ($editor) {
+        $html .= help_qa_user_queue($userQuestions, $uqStatus, $actionUrl, $csrf, $pageKey, true, $askReady);
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+function help_qa_ask_box(string $actionUrl, string $csrf, string $pageKey, string $notice, bool $ready): string
+{
+    $h = 'help_qa_h';
+    $html = '<div class="help-qa-ask">';
+    $html .= '<form method="post" action="' . $h($actionUrl) . '">';
+    $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
+    $html .= '<input type="hidden" name="action" value="ask_question">';
+    $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
+    $html .= '<label for="helpAskQuestion"><b>Ask a question</b></label>';
+    $html .= '<input id="helpAskQuestion" name="question" maxlength="500" required placeholder="What do you want to know about this page?"' . ($ready ? '' : ' disabled') . '>';
+    $html .= '<button type="submit"' . ($ready ? '' : ' disabled') . '>Send</button>';
+    $html .= '</form>';
+    if (!$ready) {
+        $html .= '<p class="help-qa-note">Asking a question is not set up yet.</p>';
+    } elseif ($notice !== '') {
+        $html .= '<p class="help-qa-note">' . $h($notice) . '</p>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+function help_qa_user_queue(array $rows, string $status, string $actionUrl, string $csrf, string $pageKey, bool $thisPageOnly, bool $ready): string
+{
+    $h = 'help_qa_h';
+    $html = '<div class="help-qa-ask">';
+    $html .= '<b>User questions</b>';
+    if (!$ready) {
+        $html .= '<p class="help-qa-note">Run migrations/20261120_help_user_question.sql after a backup.</p></div>';
+        return $html;
+    }
+    $html .= '<form method="get" style="margin:6px 0">';
+    foreach ($_GET as $key => $value) {
+        if ($key === 'uq_status' || is_array($value)) {
+            continue;
+        }
+        $html .= '<input type="hidden" name="' . $h($key) . '" value="' . $h($value) . '">';
+    }
+    $html .= '<label>Status <select name="uq_status" onchange="this.form.submit()">';
+    foreach (['new' => 'New', 'answered' => 'Answered', 'dismissed' => 'Dismissed', 'all' => 'All'] as $value => $label) {
+        $html .= '<option value="' . $value . '"' . ($status === $value ? ' selected' : '') . '>' . $label . '</option>';
+    }
+    $html .= '</select></label></form>';
+    if (!$rows) {
+        $html .= '<p class="help-qa-note">No questions with that status' . ($thisPageOnly ? ' on this page' : '') . '.</p></div>';
+        return $html;
+    }
+    foreach ($rows as $row) {
+        $html .= '<div class="help-qa-item">';
+        $html .= '<div class="help-qa-q">' . $h($row['question']) . ' <span class="help-qa-flag">' . $h($row['status']) . '</span></div>';
+        $html .= '<p class="help-qa-note">' . $h($row['asked_by']);
+        if (!$thisPageOnly) {
+            $html .= ' · ' . $h($row['page_key']);
+        }
+        if ($row['org_id'] !== null && $row['org_id'] !== '') {
+            $html .= ' · org ' . (int)$row['org_id'];
+        }
+        $html .= '</p>';
+        if ((string)$row['status'] === 'new') {
+            $html .= '<form method="post" action="' . $h($actionUrl) . '">';
+            $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
+            $html .= '<input type="hidden" name="action" value="answer_user_question">';
+            $html .= '<input type="hidden" name="user_question_id" value="' . (int)$row['id'] . '">';
+            $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
+            $html .= '<label>Answer</label><textarea name="answer" rows="3" required></textarea>';
+            $html .= '<button type="submit">Save answer</button>';
+            $html .= '</form>';
+            $html .= '<form method="post" action="' . $h($actionUrl) . '" style="margin-top:6px">';
+            $html .= '<input type="hidden" name="csrf_token" value="' . $h($csrf) . '">';
+            $html .= '<input type="hidden" name="action" value="dismiss_user_question">';
+            $html .= '<input type="hidden" name="user_question_id" value="' . (int)$row['id'] . '">';
+            $html .= '<input type="hidden" name="page_key" value="' . $h($pageKey) . '">';
+            $html .= '<button type="submit">Dismiss</button>';
+            $html .= '</form>';
+        } elseif ((string)$row['status'] === 'answered' && (int)($row['help_qa_id'] ?? 0) > 0) {
+            $html .= '<p class="help-qa-note">Saved as hidden question #' . (int)$row['help_qa_id'] . '. Make it live from the list above when you want people to see it.</p>';
+        }
+        $html .= '</div>';
+    }
+    $html .= '</div>';
     return $html;
 }
