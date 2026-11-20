@@ -28,7 +28,7 @@ function fresh(): PDO {
         overtime_hours REAL, vac REAL, cpp REAL, ei REAL, income_tax REAL, cpp_er REAL, ei_er REAL, wcb REAL,
         status TEXT, finalized_by INT, comments TEXT, paid_amount REAL DEFAULT 0,
         stat_calculated_amount REAL, stat_approved_amount REAL, stat_approved_by INT, stat_approved_at TEXT,
-        stat_edited_by INT, stat_edit_reason TEXT, stat_flag TEXT)");
+        stat_edited_by INT, stat_edit_reason TEXT, stat_flag TEXT, stat_approval_status TEXT)");
     $pdo->exec('CREATE TABLE attendance (id INTEGER PRIMARY KEY, user_id INT, site_id INT, clock_in TEXT, status TEXT)');
     return $pdo;
 }
@@ -41,6 +41,9 @@ function wage(PDO $pdo, int $id, int $org, string $day, float $gross): void {
     $pdo->prepare("INSERT INTO payroll_finalized (user_id, org_id, site_id, work_date, category, total_gross, reg_pay, hourly_rate, status) VALUES (?,?,?,?, 'Regular', ?, ?, 20, 'pending')")
         ->execute([$id, $org, $id * 10, $day, $gross, $gross]);
 }
+
+check('a normal unpaid line stays payable', sh_stat_payable(['status' => 'pending', 'stat_approval_status' => null, 'category' => 'Regular']));
+check('approval pending blocks pay while status stays unpaid', !sh_stat_payable(['status' => 'pending', 'stat_approval_status' => 'pending']));
 
 $pdo = fresh();
 person($pdo, 1, 4, 'ON', '2026-09-18');
@@ -57,8 +60,8 @@ check('changing the amount without a reason is refused', sh_approve_stat_line($p
 check('the refused edit leaves the amount alone', (float)$pdo->query('SELECT total_gross FROM payroll_finalized WHERE user_id=2 AND category=\'Statutory Holiday\'')->fetchColumn() === (float)$row['total_gross']);
 check('another org cannot approve it', sh_approve_stat_line($pdo, 9, (int)$row['id'], 9, null, null, '') === false);
 check('zero with a reason is approved and still unpaid', sh_approve_stat_line($pdo, 4, (int)$row['id'], 9, 0.0, 0.0, 'quit') === true);
-$edited = $pdo->query("SELECT status, total_gross, paid_amount, stat_edit_reason, stat_edited_by, stat_approved_by FROM payroll_finalized WHERE id=" . (int)$row['id'])->fetch(PDO::FETCH_ASSOC);
-check('the audit trail records the editor and approver', $edited['status'] === 'pending' && (float)$edited['total_gross'] == 0.0 && (float)$edited['paid_amount'] == 0.0 && $edited['stat_edit_reason'] === 'quit' && (int)$edited['stat_edited_by'] === 9 && (int)$edited['stat_approved_by'] === 9);
+$edited = $pdo->query("SELECT status, stat_approval_status, total_gross, paid_amount, stat_edit_reason, stat_edited_by, stat_approved_by FROM payroll_finalized WHERE id=" . (int)$row['id'])->fetch(PDO::FETCH_ASSOC);
+check('the audit trail records the editor and approver', $edited['status'] === 'pending' && $edited['stat_approval_status'] === 'approved' && (float)$edited['total_gross'] == 0.0 && (float)$edited['paid_amount'] == 0.0 && $edited['stat_edit_reason'] === 'quit' && (int)$edited['stat_edited_by'] === 9 && (int)$edited['stat_approved_by'] === 9);
 
 person($pdo, 6, 4, 'ON');
 wage($pdo, 6, 4, '2026-09-18', 1000);
@@ -69,7 +72,7 @@ $pdo->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) V
 sh_post_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving', 'ON', 1, null, '', '2026-10-20');
 $plain = $pdo->query("SELECT * FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
 check('an unflagged line can be bulk approved', ($plain['stat_flag'] === null || $plain['stat_flag'] === '') && sh_bulk_approve_unflagged($pdo, 4, 7) === 1);
-check('a flagged line still waiting is not bulk approved', $pdo->query("SELECT status FROM payroll_finalized WHERE user_id=6 AND category='Statutory Holiday'")->fetchColumn() === 'needs approval');
+check('a flagged line still waiting is not bulk approved', $pdo->query("SELECT stat_approval_status FROM payroll_finalized WHERE user_id=6 AND category='Statutory Holiday'")->fetchColumn() === 'pending' && $pdo->query("SELECT status FROM payroll_finalized WHERE user_id=6 AND category='Statutory Holiday'")->fetchColumn() === 'pending');
 
 person($pdo, 4, 4, 'SK');
 wage($pdo, 4, 4, '2026-08-20', 1000);
@@ -89,17 +92,17 @@ sh_post_stat_line($pdo, 4, 5, 50, '2026-10-12', 'Thanksgiving', 'ON', 1, null, '
 $pending = $pdo->query("SELECT id, total_gross FROM payroll_finalized WHERE user_id=5 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
 wage($pdo, 5, 4, '2026-09-16', 400);
 sh_post_stat_line($pdo, 4, 5, 50, '2026-10-12', 'Thanksgiving', 'ON', 1, null, '', '2026-11-20');
-$refreshed = $pdo->query("SELECT total_gross, stat_calculated_amount, status FROM payroll_finalized WHERE id=" . (int)$pending['id'])->fetch(PDO::FETCH_ASSOC);
-check('an untouched pending line refreshes the calculated amount', (float)$refreshed['total_gross'] > (float)$pending['total_gross'] && (float)$refreshed['stat_calculated_amount'] === (float)$refreshed['total_gross'] && $refreshed['status'] === 'needs approval');
+$refreshed = $pdo->query("SELECT total_gross, stat_calculated_amount, status, stat_approval_status FROM payroll_finalized WHERE id=" . (int)$pending['id'])->fetch(PDO::FETCH_ASSOC);
+check('an untouched pending line refreshes the calculated amount', (float)$refreshed['total_gross'] > (float)$pending['total_gross'] && (float)$refreshed['stat_calculated_amount'] === (float)$refreshed['total_gross'] && $refreshed['status'] === 'pending' && $refreshed['stat_approval_status'] === 'pending');
 
 $ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
 $docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
-check('the ledger refuses to pay a needs-approval line', strpos($ledger, "needs approval") !== false && strpos($ledger, 'Open the approval list') !== false);
-check('pay documents skip needs-approval lines', strpos($docs, "COALESCE(f.status,'') <> 'needs approval'") !== false);
+check('the ledger refuses to pay a line waiting for approval', strpos($ledger, "stat_approval_status") !== false && strpos($ledger, 'Open the approval list') !== false);
+check('pay documents skip lines waiting for approval', strpos($docs, "stat_approval_status") !== false && strpos($docs, "<> 'pending'") !== false);
 $ledger1 = file_get_contents(__DIR__ . '/../payroll_master_ledger1.php');
-check('the other ledger also refuses a needs-approval line', strpos($ledger1, "needs approval") !== false);
+check('the other ledger also refuses a line waiting for approval', strpos($ledger1, "stat_approval_status") !== false);
 $migration = file_get_contents(__DIR__ . '/../migrations/20261121_stat_approval.sql');
-check('the migration has a dry-run count and does not auto-approve', strpos($migration, 'unpaid_stat_to_pending') !== false && strpos($migration, "status = 'needs approval'") !== false && strpos($migration, 'stat_calculated_amount = total_gross') !== false);
+check('the migration keeps status and uses its own approval column', strpos($migration, 'unpaid_stat_to_pending') !== false && strpos($migration, "stat_approval_status = 'pending'") !== false && strpos($migration, "status = 'needs approval'") === false && strpos($migration, 'information_schema.COLUMNS') !== false && strpos($migration, 'ADD COLUMN stat_approval_status VARCHAR(20)') !== false);
 
 if ($fail > 0) { echo $fail . " failed\n"; exit(1); }
 echo "all passed\n";

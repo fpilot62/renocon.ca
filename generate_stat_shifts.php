@@ -277,7 +277,7 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
         (attendance_id,category,display_label,user_id,country_code,org_id,site_id,work_date,pay_period_end,
          reg_hours,balance_hours,overtime_hours,travel_hours,hourly_rate,reg_pay,bonus_pay,bal_pay,total_gross,
          cpp,ei,wcb,vac,status,finalized_by,pay_type,comments,income_tax,cpp_er,ei_er)
-        VALUES (NULL,'Statutory Holiday',?,?,?,?,?,?,?,?,0,0,0,?,?,0,0,?,?,?,?,?,'needs approval',?,'Statutory',?,?,?,?)");
+        VALUES (NULL,'Statutory Holiday',?,?,?,?,?,?,?,?,0,0,0,?,?,0,0,?,?,?,?,?,'pending',?,'Statutory',?,?,?,?)");
     $ins->execute([
         $holidayName.' — Statutory Holiday Pay', $userId, 'CA', $orgId, $siteId, $holidayDate, $holidayDate,
         $row['equiv_hours'], $row['hourly_rate'], $row['amount'], $row['amount'],
@@ -285,6 +285,22 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
         $ded['income_tax'], $ded['cpp_er'], $ded['ei_er'],
     ]);
     $finalizedId = (int)$pdo->lastInsertId();
+    if (function_exists('sh_table_cols')) {
+        $statCols = sh_table_cols($pdo, 'payroll_finalized');
+        $statSets = [];
+        $statParams = [];
+        if (isset($statCols['stat_approval_status'])) {
+            $statSets[] = "stat_approval_status='pending'";
+        }
+        if (isset($statCols['stat_calculated_amount'])) {
+            $statSets[] = 'stat_calculated_amount=?';
+            $statParams[] = round((float)$row['amount'], 2);
+        }
+        if ($statSets) {
+            $statParams[] = $finalizedId;
+            $pdo->prepare('UPDATE payroll_finalized SET ' . implode(', ', $statSets) . ' WHERE id=?')->execute($statParams);
+        }
+    }
     $item = $pdo->prepare("INSERT INTO statutory_pay_items
         (org_id,user_id,site_id,holiday_date,holiday_name,province,lookback_start,lookback_end,formula_code,
          eligible_wages,vacation_pay,stat_pay_amount,equivalent_hours,worked_holiday,status,finalized_id,approved_by,approved_at)

@@ -890,9 +890,16 @@ if (!function_exists('sh_stat_flag_text')) {
     }
 }
 
+if (!function_exists('sh_needs_approval')) {
+    /** Approval lives in stat_approval_status so payroll_finalized.status can stay an enum. */
+    function sh_needs_approval(array $row): bool {
+        return strcasecmp(trim((string)($row['stat_approval_status'] ?? '')), 'pending') === 0;
+    }
+}
+
 if (!function_exists('sh_stat_payable')) {
     function sh_stat_payable(array $row): bool {
-        return strcasecmp(trim((string)($row['status'] ?? '')), 'needs approval') !== 0;
+        return !sh_needs_approval($row);
     }
 }
 
@@ -908,6 +915,9 @@ if (!function_exists('sh_store_stat_meta')) {
         if (isset($cols['stat_flag'])) {
             $sets[] = 'stat_flag=?';
             $params[] = $flag !== '' ? $flag : null;
+        }
+        if (isset($cols['stat_approval_status'])) {
+            $sets[] = "stat_approval_status='pending'";
         }
         if (!$sets) {
             return;
@@ -930,13 +940,16 @@ if (!function_exists('sh_refresh_pending_stat')) {
         if (isset($cols['stat_edit_reason'])) {
             $extra .= ', stat_edit_reason';
         }
+        if (isset($cols['stat_approval_status'])) {
+            $extra .= ', stat_approval_status';
+        }
         $st = $pdo->prepare(
             "SELECT id, status, total_gross, comments $extra FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date=? AND category='Statutory Holiday' LIMIT 1"
         );
         $st->execute([$userId, $siteId, substr($holidayDate, 0, 10)]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
-        if (!$row || strcasecmp((string)$row['status'], 'needs approval') !== 0) {
+        if (!$row || !sh_needs_approval($row)) {
             return;
         }
         if (!empty($row['stat_approved_at']) || (int)($row['stat_edited_by'] ?? 0) > 0 || trim((string)($row['stat_edit_reason'] ?? '')) !== '') {
@@ -963,7 +976,7 @@ if (!function_exists('sh_approve_stat_line')) {
         );
         $st->execute([$orgId, $lineId]);
         $row = $st->fetch(PDO::FETCH_ASSOC);
-        if (!$row || strcasecmp((string)$row['status'], 'needs approval') !== 0) {
+        if (!$row || !isset($cols['stat_approval_status']) || !sh_needs_approval($row)) {
             return false;
         }
         $calculated = isset($row['stat_calculated_amount']) ? (float)$row['stat_calculated_amount'] : (float)$row['total_gross'];
@@ -971,7 +984,7 @@ if (!function_exists('sh_approve_stat_line')) {
         if (abs($newAmount - $calculated) > 0.009 && trim($reason) === '') {
             return false;
         }
-        $sets = ["status='pending'", 'total_gross=?', 'reg_pay=?'];
+        $sets = ["stat_approval_status='approved'", 'total_gross=?', 'reg_pay=?'];
         $params = [$newAmount, $newAmount];
         if ($hours !== null) {
             $sets[] = 'reg_hours=?';
@@ -1010,24 +1023,17 @@ if (!function_exists('sh_approve_stat_line')) {
 
 if (!function_exists('sh_bulk_approve_unflagged')) {
     function sh_bulk_approve_unflagged(PDO $pdo, int $orgId, int $actorId): int {
-        $st = $pdo->prepare(
-            "SELECT f.id FROM payroll_finalized f
-              INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
-              WHERE f.category='Statutory Holiday' AND f.status='needs approval'
-                AND (f.stat_flag IS NULL OR f.stat_flag='')"
-        );
         try {
-            $st->execute([$orgId]);
-            $ids = $st->fetchAll(PDO::FETCH_COLUMN);
-        } catch (Throwable $e) {
             $st = $pdo->prepare(
                 "SELECT f.id FROM payroll_finalized f
                   INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
-                  WHERE f.category='Statutory Holiday' AND f.status='needs approval'
-                    AND COALESCE(f.comments,'') NOT LIKE '%FLAG:%'"
+                  WHERE f.category='Statutory Holiday' AND f.stat_approval_status='pending'
+                    AND (f.stat_flag IS NULL OR f.stat_flag='')"
             );
             $st->execute([$orgId]);
             $ids = $st->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Throwable $e) {
+            return 0;
         }
         $n = 0;
         foreach ($ids as $id) {
@@ -1088,7 +1094,7 @@ if (!function_exists('sh_post_stat_line')) {
                 (user_id, org_id, site_id, work_date, pay_period_end, category, display_label, pay_type,
                  reg_hours, hourly_rate, reg_pay, total_gross, cpp, ei, income_tax, cpp_er, ei_er, wcb, vac,
                  status, finalized_by, comments)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'needs approval',?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)"
         );
         $ins->execute([
             $userId, $orgId, $siteId, $holidayDate, $periodEnd, 'Statutory Holiday',

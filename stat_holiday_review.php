@@ -39,31 +39,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $rows = [];
 try {
     $st = $pdo->prepare(
-        "SELECT f.id, f.user_id, f.work_date, f.reg_hours, f.total_gross, f.comments,
+        "SELECT f.id, f.user_id, f.work_date, f.reg_hours, f.total_gross, f.comments, f.status,
                 COALESCE(f.stat_calculated_amount, f.total_gross) AS calculated_amount,
                 COALESCE(f.stat_flag, '') AS stat_flag,
                 u.Name AS employee, s.nick_name AS site_name
            FROM payroll_finalized f
            INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
            INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
-          WHERE f.category = 'Statutory Holiday' AND f.status = 'needs approval'
+          WHERE f.category = 'Statutory Holiday' AND f.stat_approval_status = 'pending'
           ORDER BY (COALESCE(f.stat_flag, '') = '') ASC, f.work_date, u.Name"
     );
     $st->execute([$orgId]);
     $rows = $st->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {
-    $st = $pdo->prepare(
-        "SELECT f.id, f.user_id, f.work_date, f.reg_hours, f.total_gross, f.comments,
-                f.total_gross AS calculated_amount, '' AS stat_flag,
-                u.Name AS employee, s.nick_name AS site_name
-           FROM payroll_finalized f
-           INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
-           INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
-          WHERE f.category = 'Statutory Holiday' AND f.status = 'needs approval'
-          ORDER BY f.work_date, u.Name"
-    );
-    $st->execute([$orgId]);
-    $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+    $err = 'Stat approval is not installed on this database yet.';
 }
 $reasons = ['quit', 'on vacation/leave - pay on return', 'missed shift without reasonable cause', 'other'];
 ?>
