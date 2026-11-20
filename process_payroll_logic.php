@@ -1,6 +1,7 @@
 <?php
 /** Path: /process_payroll_logic.php */
 require_once 'header.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 $month = $_GET['month'] ?? date('Y-m'); 
 
 try {
@@ -19,20 +20,24 @@ try {
 
     foreach ($results as $r) {
         $base_gross = $r['total_hrs'] * $r['Hourly_Rate'];
-        $vac_pay    = $base_gross * 0.04; // 4% Vac Pay
-        $gross_total = $base_gross + $vac_pay;
-
-        // --- EMPLOYEE DEDUCTIONS ---
-        $cpp_ee = $gross_total * ($r['cpp_rate'] / 100);
-        $ei_ee  = $gross_total * ($r['ei_rate_er'] / 100);
-        $tax    = $gross_total * 0.15; // Placeholder Tax
-
-        // --- EMPLOYER CONTRIBUTIONS ---
-        $cpp_er = $cpp_ee;       // Employer matches CPP
-        $ei_er  = $ei_ee * 1.4;  // Employer pays 1.4x EI
-        $wcb    = $gross_total * ($r['wcb_rate'] / 100);
-
-        $net_pay = $gross_total - ($cpp_ee + $ei_ee + $tax);
+        $workDay = date('Y-m-t', strtotime($month . '-01'));
+        $line = pe_line($base_gross, pe_vacation_rate($pdo, (int)$r['user_id'], (int)$r['site_id'], $workDay), pe_rates($pdo), [
+            'pdo' => $pdo,
+            'user_id' => (int)$r['user_id'],
+            'site_id' => (int)$r['site_id'],
+            'org_id' => (int)$r['org_id'],
+            'work_date' => $workDay,
+            'pay_date' => $workDay,
+        ]);
+        $vac_pay = (float)$line['vac'];
+        $gross_total = (float)$line['pay_gross'];
+        $cpp_ee = (float)$line['cpp'] + (float)($line['cpp2'] ?? 0);
+        $ei_ee = (float)$line['ei'];
+        $tax = (float)$line['income_tax'];
+        $cpp_er = (float)$line['cpp_er'] + (float)($line['cpp2_er'] ?? 0);
+        $ei_er = (float)$line['ei_er'];
+        $wcb = (float)$line['wcb'];
+        $net_pay = (float)$line['net'];
 
         $ins = $pdo->prepare("INSERT INTO payroll_records 
             (user_id, org_id, site_id, total_hours, vac_pay, rate_used, gross_pay, cpp_deduction, employer_cpp, ei_deduction, employer_ei, income_tax, wcb_payable, net_pay, pay_period) 

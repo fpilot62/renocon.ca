@@ -3,6 +3,7 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
     require_once __DIR__ . '/break_waiver_finalize_guard.php';
 }
@@ -64,6 +65,16 @@ if (isset($_POST['confirm_finalize']) && !empty($_POST['final_ids'])) {
             // 3. UPDATE ATTENDANCE
             $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$row['id']]);
         }
+        $seen = [];
+        foreach ($rows as $row) {
+            $key = (int)$row['user_id'] . '|' . (int)$row['site_id'] . '|' . substr((string)$row['clock_in'], 0, 10);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $day = !empty($row['clock_in']) ? date('Y-m-d', strtotime($row['clock_in'])) : date('Y-m-d');
+            sh_after_finalize($pdo, (int)$row['user_id'], (int)$row['site_id'], $day, (int)$_SESSION['user_id']);
+        }
         $pdo->commit();
         header("Location: staff_audit.php?msg=Processed"); exit;
     } catch (Exception $e) { $pdo->rollBack(); die("Error: " . $e->getMessage()); }
@@ -104,8 +115,17 @@ $stmt = $pdo->prepare($sql); $stmt->execute($ids); $rows = $stmt->fetchAll(PDO::
                 <?php $total_net = 0; foreach ($rows as $r): 
                     $work = (float)$r['gross_seconds']; $brk = (float)($r['total_break_seconds'] ?? ($work > 18000 ? 1800 : 0));
                     $hrs = round(max(0, ($work - $brk) / 3600), 2); $as_of = !empty($r['clock_in']) ? date('Y-m-d', strtotime($r['clock_in'])) : date('Y-m-d'); $rate = pe_profile_hourly_rate($pdo, (int)$r['user_id'], $as_of);
-                    $reg = round($hrs * $rate, 2); $vac = round($reg * 0.04, 2); $gross = $reg + $vac;
-                    $ded = round(($reg * 0.0595) + ($reg * 0.0163), 2); $net = $gross - $ded;
+                    $reg = round($hrs * $rate, 2);
+                    $preview = pe_line($reg, pe_vacation_rate($pdo, (int)$r['user_id'], (int)$r['site_id'], $as_of), pe_rates($pdo), [
+                        'pdo' => $pdo,
+                        'user_id' => (int)$r['user_id'],
+                        'site_id' => (int)$r['site_id'],
+                        'org_id' => (int)($r['org_id'] ?? 0),
+                        'work_date' => $as_of,
+                    ]);
+                    $vac = (float)$preview['vac']; $gross = (float)$preview['pay_gross'];
+                    $ded = round((float)$preview['cpp'] + (float)($preview['cpp2'] ?? 0) + (float)$preview['ei'] + (float)$preview['income_tax'], 2);
+                    $net = (float)$preview['net'];
                     $is_over = ($hrs > 8.00); if (!$is_over) { $total_net += $net; echo '<input type="hidden" name="final_ids[]" value="'.$r['id'].'">'; }
                 ?>
                 <tr class="<?= $is_over ? 'over-limit' : '' ?>">

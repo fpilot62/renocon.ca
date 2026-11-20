@@ -123,32 +123,14 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
     if (!in_array($province, sh_supported_stat_provinces(), true)) { return null; }
     if ($holidayProvinces && !in_array($province, $holidayProvinces, true)) { return null; }
 
-    if ($province === 'ON') {
-        $weekday = (int)date('N', strtotime($holidayDate));
-        $weekMonday = date('Y-m-d', strtotime($holidayDate . ' -' . ($weekday - 1) . ' days'));
-        $from = date('Y-m-d', strtotime($weekMonday . ' -28 days'));
-        $to = date('Y-m-d', strtotime($weekMonday . ' -1 day'));
-    } else {
-        $from = date('Y-m-d', strtotime($holidayDate . ' -28 days'));
-        $to = date('Y-m-d', strtotime($holidayDate . ' -1 day'));
-    }
-
-    $earnQ = $pdo->prepare("SELECT
-          COALESCE(SUM(CASE WHEN COALESCE(f.category,'') NOT LIKE 'Statutory%' THEN
-              GREATEST(0, COALESCE(f.total_gross,0) - COALESCE(f.overtime_hours,0)*COALESCE(f.hourly_rate,0)*0.5) ELSE 0 END),0) regular_wages,
-          COALESCE(SUM(CASE WHEN COALESCE(f.category,'') NOT LIKE 'Statutory%' THEN COALESCE(f.vac,0) ELSE 0 END),0) vacation_pay,
-          COALESCE(SUM(GREATEST(0, COALESCE(f.total_gross,0) - COALESCE(f.overtime_hours,0)*COALESCE(f.hourly_rate,0)*0.5)),0) sk_wages
-        FROM payroll_finalized f
-        INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
-        WHERE f.user_id=? AND f.site_id=? AND f.work_date BETWEEN ? AND ?");
-    // OT premium exclusion: overtime_hours * rate * 0.5 ≈ the 0.5× premium above straight time
-    $earnQ->execute([$orgId, $userId, $siteId, $from, $to]);
-    $earn = $earnQ->fetch(PDO::FETCH_ASSOC);
-    $regular = (float)$earn['regular_wages'];
-    $vacation = (float)$earn['vacation_pay'];
-    $base = $province === 'ON' ? $regular + $vacation : (float)$earn['sk_wages'];
-    $amount = round($province === 'ON' ? $base / 20 : $base * 0.05, 2);
-    if ($amount <= 0) { return null; }
+    $calc = sh_compute_stat_pay($pdo, $userId, $siteId, $holidayDate, $province);
+    $from = $calc['from'];
+    $to = $calc['to'];
+    $regular = (float)$calc['wages'];
+    $vacation = (float)$calc['vacation'];
+    $base = $province === 'ON' ? $regular + $vacation : ($province === 'BC' ? $regular : $regular);
+    $amount = (float)$calc['amount'];
+    if (!$calc['eligible'] || $amount <= 0) { return null; }
 
     $hrsQ = $pdo->prepare("SELECT COALESCE(SUM(
             GREATEST(0, TIMESTAMPDIFF(SECOND, a.clock_in, COALESCE(NULLIF(a.clock_out,'0000-00-00 00:00:00'), a.clock_in)))
@@ -208,7 +190,7 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
         'work_posted'=>$workPosted ? 1 : 0, 'att_id'=>$attId,
         'worked_holiday'=>$worked, 'posted_id'=>$postedId,
         'hourly_rate'=>$rate, 'change_text'=>$change,
-        'formula'=>$province === 'ON' ? 'Avg daily wage = (regular wages + vacation) / 20' : 'Avg daily wage = 5% of wages (OT premium out)',
+        'formula'=>$calc['formula'],
     ];
 }
 
@@ -273,7 +255,7 @@ function stat_zero_regular_shifts(PDO $pdo, int $userId, int $siteId, string $ho
 
 function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, array $holidayProvinces, int $byUser): bool {
     $row = stat_preview_row($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayProvinces);
-    if (!$row || $row['posted_id']) { return false; }
+    if (!$row || $row['posted_id'] || sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) { return false; }
     $ded = pe_line_for($pdo, $userId, $siteId, $holidayDate, (float)$row['amount']);
     $comments = 'Stat default: '.$row['formula'].'; lookback '.$row['lookback_from'].' to '.$row['lookback_to'].
                 '; base $'.number_format($row['base'], 2, '.', '').'. If they worked, hours are also posted at 1.5x (or +0.5x if straight time already exists).';

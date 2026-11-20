@@ -13,12 +13,7 @@ if (!isset($_SESSION['user_id'])) {
     exit; 
 }
 
-// 3. SETTINGS & RATES
-$cpp_r = 0.0595; 
-$ei_r = 0.0163; 
-$ei_er_m = 1.4; 
-$wcb_r = 0.018; 
-$vac_r = 0.04;
+// Deductions on this screen come from pe_line. There is no flat rate.
 
 // 4. FETCH DATA
 $view = $_GET['view'] ?? 'audit'; 
@@ -108,10 +103,20 @@ $data = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
                         }
 
                         $net_hrs = ($out - $in - $total_b_sec) / 3600;
-                        $gross = $net_hrs * pe_profile_hourly_rate($pdo, (int)($r['user_id'] ?? 0));
-                        $vac = $gross * (($r['vac_pay_percent'] ?? 4)/100);
-                        $taxes = ($gross * $cpp_r) + ($gross * $ei_r * $ei_er_m) + ($gross * $wcb_r);
-                        $total = $gross + $vac + $taxes;
+                        $as_of = date('Y-m-d', $in);
+                        $gross = $net_hrs * pe_profile_hourly_rate($pdo, (int)($r['user_id'] ?? 0), $as_of);
+                        $uid = (int)($r['user_id'] ?? 0);
+                        $sid = (int)($r['site_id'] ?? 0);
+                        $line = pe_line($gross, pe_vacation_rate($pdo, $uid, $sid, $as_of), pe_rates($pdo), [
+                            'pdo' => $pdo,
+                            'user_id' => $uid,
+                            'site_id' => $sid,
+                            'org_id' => (int)($r['org_id'] ?? 0),
+                            'work_date' => $as_of,
+                        ]);
+                        $vac = (float)$line['vac'];
+                        $taxes = (float)$line['cpp_er'] + (float)($line['cpp2_er'] ?? 0) + (float)$line['ei_er'] + (float)$line['wcb'];
+                        $total = (float)$line['pay_gross'] + $taxes;
                     ?>
                         <?php if($view == 'audit'): ?>
                             <tr>

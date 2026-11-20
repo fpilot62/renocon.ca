@@ -147,6 +147,10 @@ if ($do_save) {
 
         $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$attendance_id]);
                 pe_refresh_period_stat($pdo, (int)$ctx['user_id'], (int)$ctx['site_id'], $work_date);
+        if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+            require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+            sh_after_finalize($pdo, (int)$ctx['user_id'], (int)$ctx['site_id'], $work_date, (int)($_SESSION['user_id'] ?? 0));
+        }
         $pdo->commit();
     } catch (Exception $e) {
         if ($pdo->inTransaction()) { $pdo->rollBack(); }

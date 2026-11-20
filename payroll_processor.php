@@ -3,6 +3,7 @@
 ob_start(); 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'engine.php';
+require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 // Get data from the dashboard click
 $att_id      = $_POST['attendance_id'] ?? null;
@@ -22,12 +23,19 @@ try {
 
     if (!$data) { die("Record not found."); }
 
-    // 2. Financial Calculations (Standard CA Rates)
     $total_gross = ($reg_hrs * $data['official_rate']) + ($balance_hrs * $bal_rate);
-    $ee_cpp = $total_gross * 0.0595; // 2026 Estimate
-    $ee_ei  = $total_gross * 0.0163; // 2026 Estimate
-    $ee_tax = $total_gross * 0.15;   // Base 15% Tax
-    $net_pay = $total_gross - ($ee_cpp + $ee_ei + $ee_tax);
+    $workDay = !empty($data['clock_in']) ? date('Y-m-d', strtotime($data['clock_in'])) : date('Y-m-d');
+    $line = pe_line($total_gross, pe_vacation_rate($pdo, (int)$data['user_id'], (int)$data['site_id'], $workDay), pe_rates($pdo), [
+        'pdo' => $pdo,
+        'user_id' => (int)$data['user_id'],
+        'site_id' => (int)$data['site_id'],
+        'org_id' => (int)$data['org_id'],
+        'work_date' => $workDay,
+    ]);
+    $ee_cpp = (float)$line['cpp'] + (float)($line['cpp2'] ?? 0);
+    $ee_ei  = (float)$line['ei'];
+    $ee_tax = (float)$line['income_tax'];
+    $net_pay = (float)$line['net'];
 
     // 3. INSERT (Using your exact DB column names: balance_hrs, cpp_deduction)
     $sql = "INSERT INTO payroll_records 
