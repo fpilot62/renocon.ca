@@ -4,6 +4,7 @@
  */
 session_start();
 require_once '../db.php';
+require_once __DIR__ . '/../engine/attendance_audit_lib.php';
 
 ini_set('max_execution_time', 600); 
 
@@ -17,8 +18,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->beginTransaction();
 
         // 1. Clear existing Status 4 for the range
+        $aaIds = aa_ids_where($pdo, "org_id = ? AND status = '4' AND DATE(clock_in) BETWEEN ? AND ?", [$target_org_id, $from, $to]);
+        $aaBefore = aa_befores($pdo, $aaIds);
         $clear = $pdo->prepare("DELETE FROM attendance WHERE org_id = ? AND status = '4' AND DATE(clock_in) BETWEEN ? AND ?");
         $clear->execute([$target_org_id, $from, $to]);
+        aa_log_ids($pdo, 'delete', $aaIds, $aaBefore, 'Import replaced this range');
 
         // 2. Insert records
         $ins = $pdo->prepare("INSERT INTO attendance (user_id, site_id, org_id, clock_in, clock_out, status, Remarks) VALUES (?, ?, ?, ?, ?, '4', ?)");
@@ -38,6 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($u_id) {
                 $receipt = "Orig In: " . date('M j, H:i', strtotime($r['clock_in'])) . " | Sync: " . date('Y-m-d H:i');
                 $ins->execute([$u_id, $s_id, $target_org_id, $r['clock_in'], $r['clock_out'], $receipt]);
+                aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Import commit');
             }
         }
 

@@ -1,6 +1,7 @@
 <?php
 header("Content-Type: application/json");
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 date_default_timezone_set('America/Toronto'); 
 
 $user_id = $_POST['user_id'] ?? 0;
@@ -39,17 +40,27 @@ try {
             }
             $sql = "INSERT INTO attendance (site_id, user_id, status, selfie_in, clock_in, lat_in, lng_in, flag_reason, is_flagged, created_at) VALUES (?, ?, 1, ?, NOW(), ?, ?, ?, ?, NOW())";
             $pdo->prepare($sql)->execute([$SId, $user_id, $path, $lat, $lng, $reason, $flag]);
+            aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Upload clock in');
         } 
         else if ($action == 'on_break' && $active) {
+            $aaId = (int)$active['id'];
+            $aaBefore = aa_snapshot($pdo, $aaId);
             $pdo->prepare("UPDATE attendance SET status = 3 WHERE id = ?")->execute([$active['id']]);
+            aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Upload break start');
             $pdo->prepare("INSERT INTO breaks (shift_id, break_start, start_selfie, start_lat, start_lng) VALUES (?, NOW(), ?, ?, ?)")->execute([$active['id'], $path, $lat, $lng]);
         }
         else if ($action == 'working' && $active && $active['status'] == 3) {
+            $aaId = (int)$active['id'];
+            $aaBefore = aa_snapshot($pdo, $aaId);
             $pdo->prepare("UPDATE attendance SET status = 1 WHERE id = ?")->execute([$active['id']]);
+            aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Upload break end');
             $pdo->prepare("UPDATE breaks SET break_end = NOW(), end_selfie = ?, end_lat = ?, end_lng = ? WHERE shift_id = ? AND break_end IS NULL")->execute([$path, $lat, $lng, $active['id']]);
         }
         else if ($action == 'not_working' && $active) {
+            $aaId = (int)$active['id'];
+            $aaBefore = aa_snapshot($pdo, $aaId);
             $pdo->prepare("UPDATE attendance SET clock_out = NOW(), status = 4, lat_out = ?, lng_out = ?, selfie_out = ? WHERE id = ?")->execute([$lat, $lng, $path, $active['id']]);
+            aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Upload clock out');
         }
         echo json_encode(["success" => true]);
     }

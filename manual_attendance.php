@@ -8,6 +8,7 @@
 require_once __DIR__ . '/engine/privacy_lib.php';
 privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 payroll_require_admin(false, 'Manual attendance is for admins only.');
 
 error_reporting(E_ALL);
@@ -85,7 +86,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                     att_manual_remark(),
                 ]);
 
-                $new_shift_id = $pdo->lastInsertId();
+                $new_shift_id = (int)$pdo->lastInsertId();
+                aa_log($pdo, 'create', $new_shift_id, null, null, 'Manual shift');
 
                 if (!empty($_POST['break_start']) && is_array($_POST['break_start'])) {
                     $insBreak = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, break_end) VALUES (?, ?, ?)");

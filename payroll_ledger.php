@@ -2,18 +2,23 @@
 /** Path: /payroll_ledger.php */
 ob_start(); // This captures output in a buffer to prevent "headers already sent"
 require_once 'engine.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 
 // Handle Actions FIRST before any HTML starts
 if (isset($_GET['action']) && isset($_GET['att_id'])) {
     $id = (int)$_GET['att_id'];
     
     if ($_GET['action'] === 'undo') {
+        $aaBefore = aa_snapshot($pdo, $id);
         $pdo->prepare("UPDATE attendance SET is_processed = 0 WHERE id = ?")->execute([$id]);
+        aa_log($pdo, 'unfinalize', $id, $aaBefore, null, 'Ledger undo');
         $pdo->prepare("DELETE FROM payroll_records WHERE id = ?")->execute([$id]);
         header("Location: manager_dashboard.php"); // This will now work
         exit;
     } elseif ($_GET['action'] === 'finalize') {
+        $aaBefore = aa_snapshot($pdo, $id);
         $pdo->prepare("UPDATE attendance SET is_processed = 2 WHERE id = ?")->execute([$id]);
+        aa_log($pdo, 'finalize', $id, $aaBefore, null, 'Ledger finalize');
         header("Location: payroll_history.php");
         exit;
     }

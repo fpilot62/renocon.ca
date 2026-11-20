@@ -4,6 +4,7 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 
@@ -54,8 +55,10 @@ try {
     $ins_bal->execute([$org_id, $user_id, $final_hours, "Payroll Finalized for Shift #$shift_id"]);
 
     // 6. MARK ATTENDANCE AS FINALIZED
+    $aaBefore = aa_snapshot($pdo, (int)$shift_id);
     $upd = $pdo->prepare("UPDATE attendance SET is_finalized = 1 WHERE id = ?");
     $upd->execute([$shift_id]);
+    aa_log($pdo, 'finalize', (int)$shift_id, $aaBefore, null, 'Approve shift');
 
     $pdo->commit();
     header("Location: finalize_payroll.php?success=1");

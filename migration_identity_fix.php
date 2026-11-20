@@ -4,6 +4,7 @@
  * MASTER PRODUCTION MIGRATION BUILD - HARDENED EPOCH PROTECTION (CAPPED AT 20 RECORDS)
  */
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 
 // LOCK IMPORTER FRAMEWORK TO OPERATIONS TIMEZONE
 date_default_timezone_set('America/Vancouver');
@@ -27,6 +28,7 @@ if (isset($_POST['ajax_import'])) {
                           VALUES (?, 2, ?, ?, ?, 0, 'CV Military Test Run', 0)");
     
     if ($ins->execute([$uid, $sid, $final_cin, $final_cout])) {
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Identity migration');
         echo "SUCCESS";
     } else {
         echo "ERROR";

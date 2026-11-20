@@ -10,7 +10,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
 }
 /** Path: /app_clock.php */
 header('Content-Type: application/json');
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php'; 
 
 $user_id = $_POST['user_id'] ?? '';
 $org_id  = $_POST['org_id'] ?? '';
@@ -33,6 +34,7 @@ try {
         $sql = "INSERT INTO attendance (user_id, org_id, site_id, clock_in, status, flag_reason, is_flagged, lat_in, lng_in) 
                 VALUES (?, ?, ?, ?, '1', ?, ?, ?, ?)";
         $pdo->prepare($sql)->execute([$user_id, $org_id, $site_id, $localNow, $note, $is_flagged, $lat, $lng]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'App clock in');
         
         $pdo->prepare("UPDATE users SET current_status = '1' WHERE id = ?")->execute([$user_id]);
     } 
@@ -41,8 +43,11 @@ try {
         $stmtShift->execute([$user_id]);
         $shift_id = $stmtShift->fetchColumn();
 
+        $aaId = (int)$shift_id;
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $stmt = $pdo->prepare("UPDATE attendance SET clock_out = ?, status = '4', lat_out = ?, lng_out = ? WHERE id = ?");
         $stmt->execute([$localNow, $lat, $lng, $shift_id]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'App clock out');
         
         $pdo->prepare("UPDATE users SET current_status = '4' WHERE id = ?")->execute([$user_id]);
     }

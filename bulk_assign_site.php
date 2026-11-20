@@ -1,6 +1,7 @@
 <?php
 /** Path: /bulk_assign_site.php */
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // Security: Only admins can bulk assign
@@ -22,8 +23,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['shift_ids'])) {
             
             // Combine target_site_id with the array of IDs for execution
             $params = array_merge([$target_site_id], $ids);
+            $aaIds = array_map('intval', (array)$ids);
+            $aaBefore = aa_befores($pdo, $aaIds);
             
             if ($stmt->execute($params)) {
+                aa_log_ids($pdo, 'update', $aaIds, $aaBefore, 'Bulk assign site');
                 // Redirect back to audit page with success message
                 header("Location: staff_audit.php?msg=BulkSuccess");
                 exit;

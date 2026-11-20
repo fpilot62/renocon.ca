@@ -9,6 +9,7 @@
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/engine/org_modules_lib.php';
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
@@ -176,10 +177,14 @@ try {
 
         $ins = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, is_flagged, flag_reason, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '0', 'none', ?, ?, ?, ?, ?, ?, ?)");
         $ins->execute([$org_id, $uid, $site_id, $now, $lat, $lng, $image, $is_flagged_trigger, $reason, $current_hourly, $current_official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Clock in');
 
     } elseif ($action == 'clock_out' && $live) {
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET clock_out = ?, status = '4', lat_out = ?, lng_out = ?, selfie_out = ?, hourly_rate = ?, official_rate = ? WHERE id = ?");
         $upd->execute([$now, $lat, $lng, $image, $current_hourly, $current_official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Clock out');
 
         if (is_file(__DIR__ . '/engine/break_waiver_lib.php')) {
             require_once __DIR__ . '/engine/break_waiver_lib.php';
@@ -198,11 +203,15 @@ try {
     } elseif ($action == 'transfer_out' && $live) {
         $old_site_id = (int)$live['site_id'];
         
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET clock_out = ?, status = '4', lat_out = ?, lng_out = ?, selfie_out = ?, hourly_rate = ?, official_rate = ? WHERE id = ?");
         $upd->execute([$now, $lat, $lng, $image, $current_hourly, $current_official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Transfer out');
 
         $insTravel = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '5', 'travel', ?, ?, ?, ?, ?)");
         $insTravel->execute([$org_id, $uid, $old_site_id, $now, $lat, $lng, $image, $current_hourly, $current_official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Travel row');
 
     } elseif ($action == 'transfer_in' && $live) {
         $origin_site_name = 'Origin Site';
@@ -218,16 +227,23 @@ try {
         $full_route_string = $origin_site_name . ' → ' . $dest_site_name;
 
         // Finalize old transit link row
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $updTravel = $pdo->prepare("UPDATE attendance SET clock_out = ?, status = '5', transfer_status = ?, lat_out = ?, lng_out = ?, selfie_out = ?, hourly_rate = ?, official_rate = ? WHERE id = ?");
         $updTravel->execute([$now, $full_route_string, $lat, $lng, $image, $current_hourly, $current_official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Transfer in');
 
         // Launch newly targeted shift sequence with unified calibrated parameters 
         $insNewShift = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '0', 'none', ?, ?, ?, ?, ?)");
         $insNewShift->execute([$org_id, $uid, $site_id, $now, $lat, $lng, $image, $current_hourly, $current_official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Transfer in new shift');
 
     } elseif ($action == 'break_start' && $live) {
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET status = '1' WHERE id = ?");
         $upd->execute([$live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Break start');
 
         $insBreak = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, start_selfie, start_lat, start_lng) VALUES (?, ?, ?, ?, ?)");
         $insBreak->execute([$live['id'], $now, $image, $lat, $lng]);
@@ -241,8 +257,11 @@ try {
             $updBreak = $pdo->prepare("UPDATE breaks SET break_end = ?, end_selfie = ?, end_lat = ?, end_lng = ? WHERE id = ?");
             $updBreak->execute([$now, $image, $lat, $lng, $activeBreak['id']]);
         }
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET status = '0' WHERE id = ?");
         $upd->execute([$live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Break end');
     }
 
     header("Location: " . $kiosk_page);

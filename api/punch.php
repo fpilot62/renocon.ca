@@ -24,6 +24,7 @@ header('Access-Control-Allow-Methods: POST, OPTIONS');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit; }
 
 require_once '../db.php';
+require_once __DIR__ . '/../engine/attendance_audit_lib.php';
 require_once __DIR__ . '/../engine/org_modules_lib.php';
 require_once 'jwt_helper.php';
 
@@ -202,6 +203,7 @@ try {
 
         $ins = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, is_flagged, flag_reason, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '0', 'none', ?, ?, ?, ?, ?, ?, ?)");
         $ins->execute([$org_id, $uid, $site_id, $now, $lat, $lng, $image, $is_flagged, $reason, $hourly, $official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Clock in');
 
         echo json_encode(['success' => true, 'mode' => 'WORKING', 'message' => "Clocked in at $site_name", 'timestamp' => $now, 'is_flagged' => (bool)$is_flagged]);
         exit;
@@ -216,18 +218,25 @@ try {
     }
 
     if ($action === 'clock_out') {
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET clock_out=?, status='4', lat_out=?, lng_out=?, selfie_out=?, hourly_rate=?, official_rate=? WHERE id=?");
         $upd->execute([$now, $lat, $lng, $image, $hourly, $official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Clock out');
         echo json_encode(['success' => true, 'mode' => 'OFF_CLOCK', 'message' => 'Clocked out', 'timestamp' => $now]);
 
     } elseif ($action === 'transfer_out') {
         $old_site_id = (int)$live['site_id'];
         // Close current shift
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET clock_out=?, status='4', lat_out=?, lng_out=?, selfie_out=?, hourly_rate=?, official_rate=? WHERE id=?");
         $upd->execute([$now, $lat, $lng, $image, $hourly, $official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Transfer out');
         // Open travel row
         $ins = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '5', 'travel', ?, ?, ?, ?, ?)");
         $ins->execute([$org_id, $uid, $old_site_id, $now, $lat, $lng, $image, $hourly, $official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Travel row');
         echo json_encode(['success' => true, 'mode' => 'TRANSIT', 'message' => 'Transferred out — select destination site', 'timestamp' => $now]);
 
     } elseif ($action === 'transfer_in') {
@@ -246,16 +255,23 @@ try {
         $route = "$origin_name → $dest_name";
 
         // Close travel row
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET clock_out=?, status='5', transfer_status=?, lat_out=?, lng_out=?, selfie_out=?, hourly_rate=?, official_rate=? WHERE id=?");
         $upd->execute([$now, $route, $lat, $lng, $image, $hourly, $official, $live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Transfer in');
         // Open new shift at destination
         $ins = $pdo->prepare("INSERT INTO attendance (org_id, user_id, site_id, clock_in, status, transfer_status, lat_in, lng_in, selfie_in, hourly_rate, official_rate) VALUES (?, ?, ?, ?, '0', 'none', ?, ?, ?, ?, ?)");
         $ins->execute([$org_id, $uid, $site_id, $now, $lat, $lng, $image, $hourly, $official]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Transfer in new shift');
         echo json_encode(['success' => true, 'mode' => 'WORKING', 'message' => "Arrived at $dest_name", 'timestamp' => $now, 'route' => $route]);
 
     } elseif ($action === 'break_start') {
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd = $pdo->prepare("UPDATE attendance SET status='1' WHERE id=?");
         $upd->execute([$live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Break start');
         $ins = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, start_selfie, start_lat, start_lng) VALUES (?, ?, ?, ?, ?)");
         $ins->execute([$live['id'], $now, $image, $lat, $lng]);
         echo json_encode(['success' => true, 'mode' => 'BREAK', 'message' => 'Break started', 'timestamp' => $now]);
@@ -268,8 +284,11 @@ try {
             $upd = $pdo->prepare("UPDATE breaks SET break_end=?, end_selfie=?, end_lat=?, end_lng=? WHERE id=?");
             $upd->execute([$now, $image, $lat, $lng, $activeBreak['id']]);
         }
+        $aaId = (int)$live['id'];
+        $aaBefore = aa_snapshot($pdo, $aaId);
         $upd2 = $pdo->prepare("UPDATE attendance SET status='0' WHERE id=?");
         $upd2->execute([$live['id']]);
+        aa_log($pdo, 'update', $aaId, $aaBefore, null, 'Break end');
         echo json_encode(['success' => true, 'mode' => 'WORKING', 'message' => 'Break ended — resumed work', 'timestamp' => $now]);
     }
 

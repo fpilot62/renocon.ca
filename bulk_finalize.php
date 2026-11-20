@@ -10,7 +10,8 @@ error_reporting(E_ALL);
 session_start();
 
 // 1. We ONLY need the database connection
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php'; 
 
 // 2. Logic to process the IDs
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['shift_ids'])) {
@@ -19,9 +20,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['shift_ids'])) {
     $placeholders = implode(',', array_fill(0, count($ids), '?'));
     
     try {
+        $aaBefore = aa_befores($pdo, $ids);
         $sql = "UPDATE attendance SET status = '1' WHERE id IN ($placeholders) AND status = '4'";
         $stmt = $pdo->prepare($sql);
         $stmt->execute($ids);
+        aa_log_ids($pdo, 'finalize', $ids, $aaBefore, 'Bulk finalize');
         
         $updated = $stmt->rowCount();
 

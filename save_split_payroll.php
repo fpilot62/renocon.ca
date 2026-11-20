@@ -24,6 +24,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
     require_once __DIR__ . '/break_waiver_finalize_guard.php';
 }
@@ -147,7 +148,9 @@ if ($do_save) {
             }
         }
 
+        $aaBefore = aa_snapshot($pdo, (int)$attendance_id);
         $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$attendance_id]);
+        aa_log($pdo, 'finalize', (int)$attendance_id, $aaBefore, null, 'Save split payroll');
                 pe_refresh_period_stat($pdo, (int)$ctx['user_id'], (int)$ctx['site_id'], $work_date);
         if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
             require_once __DIR__ . '/payroll_engine/stat_holidays.php';

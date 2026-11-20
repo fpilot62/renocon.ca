@@ -6,6 +6,7 @@ error_reporting(E_ALL);
 
 ob_start();
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
@@ -68,7 +69,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_csv'])) {
                     date('Y-m-d H:i:s', $in_ts), date('Y-m-d H:i:s', $out_ts), 
                     $travel, "CV Migration Import"
                 ]);
-                $shift_id = $pdo->lastInsertId();
+                $shift_id = (int)$pdo->lastInsertId();
+                aa_log($pdo, 'create', $shift_id, null, null, 'Clearview import');
 
                 // 3. Insert Break record
                 $break_secs = (int)($break_hrs * 3600);

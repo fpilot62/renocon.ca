@@ -3,6 +3,7 @@
 ob_start();
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once 'engine/menu_generator.php';
 
 // 1. SECURITY
@@ -22,8 +23,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_full_shift']))
         $pdo->beginTransaction();
 
         // Update Master Attendance Entry
+        $aaBefore = aa_snapshot($pdo, (int)$shift_id);
         $stmt = $pdo->prepare("UPDATE attendance SET clock_in = ?, clock_out = ?, site_id = ? WHERE id = ?");
         $stmt->execute([$_POST['c_in'], $_POST['c_out'] ?: null, $_POST['site_id'], $shift_id]);
+        aa_log($pdo, 'update', (int)$shift_id, $aaBefore, null, 'Edit shift times');
 
         // Wipe existing child break lines to commit modified values accurately
         $delBreaks = $pdo->prepare("DELETE FROM breaks WHERE shift_id = ?");

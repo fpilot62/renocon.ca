@@ -7,6 +7,7 @@
 require_once __DIR__ . '/engine/privacy_lib.php';
 privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 payroll_require_admin(true, 'Deleting attendance is for admins only.');
 require_once __DIR__ . '/db.php';
 payroll_require_scope_admin();
@@ -57,6 +58,8 @@ if ($restrict) {
     $params[] = $scope;
     $params[] = $scope;
 }
+$delBefore = aa_befores($pdo, $ids);
 $st = $pdo->prepare($sql);
 $st->execute($params);
+aa_log_ids($pdo, 'delete', $ids, $delBefore, 'Soft delete');
 echo json_encode(['success' => true, 'deleted' => $st->rowCount()]);

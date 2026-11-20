@@ -4,6 +4,7 @@ require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>10]); //
 /** Path: /bulk_finalize_handler.php */
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
@@ -65,7 +66,10 @@ if (isset($_POST['confirm_finalize']) && !empty($_POST['final_ids'])) {
             $stmtFin->execute([$row['id'], $row['user_id'], $row['org_id'], $row['site_id'], $row['country'], $row['clock_in'], $net_hrs, $rate, $reg_pay, $vac, $gross, $cpp, $ei, $net_cheque, $_SESSION['user_id']]);
 
             // 3. UPDATE ATTENDANCE
+            $aaId = (int)$row['id'];
+            $aaBefore = aa_snapshot($pdo, $aaId);
             $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$row['id']]);
+            aa_log($pdo, 'finalize', $aaId, $aaBefore, null, 'Bulk finalize handler');
         }
         $seen = [];
         foreach ($rows as $row) {

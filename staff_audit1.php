@@ -13,7 +13,8 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 // Pull in the core database layer and session profiles from your db.php
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php'; 
 
 if (file_exists('engine/menu_generator.php')) {
     require_once 'engine/menu_generator.php';
@@ -30,14 +31,26 @@ $org_id = (int)($_SESSION['org_id'] ?? 1);
 // 🔥 EMERGENCY BACKGROUND BULK FIXER: RESOLVES OMITTED SITES AUTOMATICALLY
 // =========================================================================
 try {
-    $fixStmt = $pdo->query("
-        UPDATE attendance a
+    $fixIdStmt = $pdo->query("
+        SELECT a.id FROM attendance a
         INNER JOIN users u ON a.user_id = u.id
-        SET a.site_id = u.primary_site_id
         WHERE (a.site_id = '0' OR a.site_id = 'all' OR a.site_id IS NULL)
-          AND u.primary_site_id > 0 
+          AND u.primary_site_id > 0
           AND a.payout_status = 0
     ");
+    $fixIds = array_map('intval', $fixIdStmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+    $fixBefore = aa_befores($pdo, $fixIds);
+    if ($fixIds) {
+        $pdo->query("
+            UPDATE attendance a
+            INNER JOIN users u ON a.user_id = u.id
+            SET a.site_id = u.primary_site_id
+            WHERE (a.site_id = '0' OR a.site_id = 'all' OR a.site_id IS NULL)
+              AND u.primary_site_id > 0
+              AND a.payout_status = 0
+        ");
+        aa_log_ids($pdo, 'update', $fixIds, $fixBefore, 'Filled a missing site from the employee primary site');
+    }
 } catch (Exception $e) {}
 
 // =========================================================================
@@ -88,7 +101,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $src['transfer_status']
             ]);
             
-            $new_shift_id = $pdo->lastInsertId();
+            $new_shift_id = (int)$pdo->lastInsertId();
+            aa_log($pdo, 'create', $new_shift_id, null, null, 'Duplicated shift');
             
             $brkSrc = $pdo->prepare("SELECT * FROM breaks WHERE shift_id = ?");
             $brkSrc->execute([$target_id]);
@@ -124,8 +138,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $delQuery = "DELETE FROM attendance WHERE id IN ($placeholders) AND org_id = " . (int)$org_id;
             }
             
+            $aaBefore = aa_befores($pdo, $clean_ids);
             $delStmt = $pdo->prepare($delQuery);
             $delStmt->execute($clean_ids);
+            aa_log_ids($pdo, 'delete', $clean_ids, $aaBefore, 'Staff audit delete');
             
             // Clean out corresponding child breaks automatically
             $pdo->prepare("DELETE FROM breaks WHERE shift_id IN ($placeholders)")->execute($clean_ids);

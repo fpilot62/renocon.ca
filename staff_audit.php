@@ -13,6 +13,7 @@ error_reporting(E_ALL);
 require_once __DIR__ . '/engine/privacy_lib.php';
 privacy_boot_web();
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 payroll_require_admin(false, 'Staff audit is for admins only.');
 require_once 'db.php';
 if (is_file(__DIR__ . '/payroll_scope.php')) {
@@ -153,7 +154,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $src['transfer_status']
             ]);
             
-            $new_shift_id = $pdo->lastInsertId();
+            $new_shift_id = (int)$pdo->lastInsertId();
+            aa_log($pdo, 'create', $new_shift_id, null, null, 'Duplicated shift');
             
             $brkSrc = $pdo->prepare("SELECT * FROM breaks WHERE shift_id = ?");
             $brkSrc->execute([$target_id]);
@@ -206,8 +208,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $delParams[] = $scope_org;
                 $delParams[] = $scope_org;
             }
+            $delBefore = aa_befores($pdo, $clean_ids);
             $delStmt = $pdo->prepare($delQuery);
             $delStmt->execute($delParams);
+            aa_log_ids($pdo, 'delete', $clean_ids, $delBefore, 'Staff audit delete');
 
             header("Location: " . $_SERVER['REQUEST_URI']);
             exit;
@@ -387,7 +391,24 @@ if ($privacy_scope_org > 0) {
         if (att_has_deleted_at($pdo)) {
             $fixSql .= ' AND a.deleted_at IS NULL';
         }
-        $pdo->prepare($fixSql)->execute([$privacy_scope_org, $privacy_scope_org]);
+        $fixIdSql = "SELECT a.id FROM attendance a
+            INNER JOIN users u ON a.user_id = u.id
+            WHERE (a.site_id = '0' OR a.site_id = 'all' OR a.site_id IS NULL)
+              AND u.primary_site_id > 0
+              AND a.payout_status = 0
+              AND a.org_id = ?
+              AND u.org_id = ?";
+        if (att_has_deleted_at($pdo)) {
+            $fixIdSql .= ' AND a.deleted_at IS NULL';
+        }
+        $fixIdStmt = $pdo->prepare($fixIdSql);
+        $fixIdStmt->execute([$privacy_scope_org, $privacy_scope_org]);
+        $fixIds = array_map('intval', $fixIdStmt->fetchAll(PDO::FETCH_COLUMN) ?: []);
+        $fixBefore = aa_befores($pdo, $fixIds);
+        if ($fixIds) {
+            $pdo->prepare($fixSql)->execute([$privacy_scope_org, $privacy_scope_org]);
+            aa_log_ids($pdo, 'update', $fixIds, $fixBefore, 'Filled a missing site from the employee primary site');
+        }
     } catch (Exception $e) {
     }
 }
@@ -677,6 +698,7 @@ foreach ($audit_sort_cols as $col_key => $pair) {
 }
 
 $rows = [];
+$aa_badges = [];
 $total_rows = 0;
 $offset = 0;
 $total_pages = 1;
@@ -719,6 +741,9 @@ try {
     $stmt = $pdo->prepare($query);
     $stmt->execute($params);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $aa_badges = aa_manual_badges($pdo, array_map(static function ($row) {
+        return (int)($row['id'] ?? 0);
+    }, $rows));
 
     $net_sec_sql = "GREATEST(0,
         TIMESTAMPDIFF(SECOND, a.clock_in, IFNULL(NULLIF(a.clock_out, '0000-00-00 00:00:00'), NOW()))
@@ -1455,6 +1480,26 @@ if (!function_exists('sa_render_pager')) {
             white-space: nowrap;
         }
         .mpe-row-link:hover { text-decoration: underline; color: #166534; }
+        .aa-manual-badge {
+            display: inline-block;
+            margin-top: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1.3;
+            color: #7c2d12;
+            background: #ffedd5;
+            border: 1px solid #fdba74;
+            border-radius: 999px;
+            padding: 2px 7px;
+        }
+        .aa-history-link {
+            font-size: 10px;
+            font-weight: 800;
+            color: #1d4ed8;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .aa-history-link:hover { text-decoration: underline; }
 
         .btn-green {
             background: #16a34a;
@@ -1998,18 +2043,19 @@ if (!function_exists('sa_render_pager')) {
                             <div class="staff-meta" title="ID <?= (int)$r['user_id'] ?> · <?= htmlspecialchars((string)($r['mobile'] ?? '')) ?> · <?= htmlspecialchars((string)($r['user_email'] ?? '')) ?>">
                                 #<?= (int)$r['user_id'] ?><?php if (!empty($r['mobile'])): ?> · <?= htmlspecialchars((string)$r['mobile']) ?><?php endif; ?><?php if (!empty($r['user_email'])): ?> · <a href="mailto:<?= htmlspecialchars((string)$r['user_email']) ?>" class="email-link"><?= htmlspecialchars((string)$r['user_email']) ?></a><?php endif; ?>
                             </div>
+                            <?php
+                            $aaBadge = $aa_badges[(int)$r['id']] ?? '';
+                            $aaOrg = (int)($r['staff_org_id'] ?? 0);
+                            if ($aaOrg <= 0) {
+                                $aaOrg = (int)$privacy_scope_org;
+                            }
+                            $aaHref = 'attendance_audit.php?attendance_id=' . (int)$r['id'] . ($aaOrg > 0 ? '&org_id=' . $aaOrg : '');
+                            if ($aaBadge !== ''):
+                            ?>
+                            <div class="aa-manual-badge"><?= htmlspecialchars($aaBadge) ?></div>
+                            <?php endif; ?>
                             <div class="action-icons">
-                                <?php if ($sess_user_level < 30 && (int)($r['user_id'] ?? 0) > 0 && (int)($r['site_id'] ?? 0) > 0):
-                                    $mpeOrg = (int)($r['staff_org_id'] ?? 0);
-                                    $mpeDate = date('Y-m-d', $in_ts);
-                                    $mpeHref = 'manual_pay_entry.php?lock=1'
-                                        . '&user_id=' . (int)$r['user_id']
-                                        . '&site_id=' . (int)$r['site_id']
-                                        . '&entry_date=' . urlencode($mpeDate)
-                                        . ($mpeOrg > 0 ? '&org_id=' . $mpeOrg : '');
-                                ?>
-                                <a class="mpe-row-link" target="_blank" href="<?= htmlspecialchars($mpeHref) ?>" title="Manual pay for <?= htmlspecialchars($display_name) ?> — employee and site are filled in">Manual Pay</a>
-                                <?php endif; ?>
+                                <a class="aa-history-link" href="<?= htmlspecialchars($aaHref) ?>" title="Who changed this punch">History</a>
                                 <a href="edit_shift.php?id=<?= $r['id'] ?>" style="color:#ca8a04; text-decoration:none;" title="Modify Master Punch Times"><i class="fas fa-pencil-alt icon-action-trigger"></i></a>
                                 <span style="color:#3b82f6; cursor:pointer;" title="Adjust Rest/Break Windows" onclick="openBreakModal(<?= $r['id'] ?>, <?= htmlspecialchars(json_encode($all_breaks)) ?>)"><i class="fas fa-clock icon-action-trigger"></i></span>
                                 <span style="color:#10b981; cursor:pointer;" title="Duplicate Shift as New Entry" onclick="duplicateShiftRow(<?= $r['id'] ?>)"><i class="fas fa-copy icon-action-trigger"></i></span>

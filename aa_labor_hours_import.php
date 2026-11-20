@@ -8,6 +8,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -300,6 +301,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'preview') {
             $markedN = 0;
             $siteId = (int)($_SESSION['aalh_preview']['site_id'] ?? 0);
             if ($siteId > 0) {
+                $aaIds = aa_ids_where(
+                    $pdo,
+                    "user_id = ? AND site_id = ? AND org_id = ? AND DATE(clock_in) >= ? AND flag_reason LIKE 'Rate flag:%'",
+                    [$uid, $siteId, $aa_org, $effective]
+                );
+                $aaBefore = aa_befores($pdo, $aaIds);
                 $upd = $pdo->prepare(
                     "UPDATE attendance
                         SET is_flagged = 1, flag_reason = ?
@@ -308,6 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'preview') {
                         AND flag_reason LIKE 'Rate flag:%'"
                 );
                 $upd->execute([$markText, $uid, $siteId, $aa_org, $effective]);
+                aa_log_ids($pdo, 'update', $aaIds, $aaBefore, 'AA rate mark');
                 $markedN = (int)$upd->rowCount();
             }
             if (isset($_SESSION['aalh_profile_accepts'][(string)$uid])) {

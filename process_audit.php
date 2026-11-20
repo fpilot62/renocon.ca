@@ -3,6 +3,7 @@ require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>10]); //
 
 /** Path: /process_audit.php */
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 try {
@@ -40,8 +41,11 @@ try {
         ]);
     }
 
+    $aaId = (int)$_POST['meta']['shift_id'];
+    $aaBefore = aa_snapshot($pdo, $aaId);
     $pdo->prepare("UPDATE attendance SET status = 'audited' WHERE id = ?")
         ->execute([$_POST['meta']['shift_id']]);
+    aa_log($pdo, 'finalize', $aaId, $aaBefore, null, 'Process audit');
 
     $pdo->commit();
     header("Location: staff_audit.php?success=1");

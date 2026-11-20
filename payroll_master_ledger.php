@@ -49,6 +49,7 @@ if ($sess_user_level >= 30) {
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once 'payroll_scope.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
@@ -300,7 +301,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_back_to_audit'])
         if (!$auth->fetchColumn()) { http_response_code(403); exit('Attendance row is outside your organization.'); }
         try {
             $pdo->beginTransaction();
+            $aaBefore = aa_snapshot($pdo, $target);
             $pdo->prepare("UPDATE attendance SET status = 4, payout_status = 0 WHERE id = ?")->execute([$target]);
+            aa_log($pdo, 'unfinalize', $target, $aaBefore, null, 'Send back to audit');
             $pdo->prepare("DELETE FROM payroll_finalized WHERE attendance_id = ?")->execute([$target]);
             $pdo->prepare("DELETE FROM payroll_balance   WHERE attendance_id = ?")->execute([$target]);
             $pdo->commit();

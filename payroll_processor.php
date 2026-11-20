@@ -5,6 +5,7 @@ require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level'=>29,'fenc
 ob_start(); 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'engine.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 // Get data from the dashboard click
@@ -63,7 +64,9 @@ try {
     ]);
 
     // 4. Update attendance status
+    $aaBefore = aa_snapshot($pdo, (int)$att_id);
     $pdo->prepare("UPDATE attendance SET is_processed = 1 WHERE id = ?")->execute([$att_id]);
+    aa_log($pdo, 'finalize', (int)$att_id, $aaBefore, null, 'Payroll processor');
 
     header("Location: payroll_ledger.php");
     exit();

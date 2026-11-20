@@ -1,6 +1,7 @@
 <?php
 /** Path: /process_finalize.php */
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 
@@ -40,8 +41,10 @@ if (isset($_GET['id'])) {
         $pdo->beginTransaction();
 
         // 1. Update Attendance
+        $aaBefore = aa_snapshot($pdo, (int)$id);
         $pdo->prepare("UPDATE attendance SET approved_hours = ?, is_finalized = 1 WHERE id = ?")
             ->execute([$shift_audit, $id]);
+        aa_log($pdo, 'finalize', (int)$id, $aaBefore, null, 'Process finalize');
 
         // 2. Insert into Ledger (The table we just recreated)
         $ledger = $pdo->prepare("INSERT INTO payroll_records (user_id, site_id, total_hours, rate_used, gross_pay, date_processed) 

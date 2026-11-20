@@ -32,6 +32,8 @@
  * Exemptions: EIExempt / WSIBExempt / VacPayExempt default No (not exempt).
  */
 
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
+
 /** Canonical template header lines (for clipboard copy / docs). Public = customer. */
 function pgcsv_template_header(string $mode): string {
     if ($mode === 'hours') {
@@ -1544,6 +1546,7 @@ function pg_import_hours_rows(PDO $pdo, array $rows, array $sess, bool $dry_run)
         );
         foreach ($to_insert as $row) {
             $ins->execute($row);
+            aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'CSV import');
         }
         if ($rate_updates) {
             $upd = $pdo->prepare("UPDATE users SET hourly_rate = ? WHERE id = ?");
