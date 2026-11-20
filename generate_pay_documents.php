@@ -23,6 +23,9 @@ require_once __DIR__ . '/engine/privacy_lib.php';
 privacy_boot_web();
 require_once 'db.php';
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
+if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+}
 
 $paydoc_org_id = 0;
 $record_cheques = false;
@@ -207,8 +210,8 @@ $in = implode(',', array_fill(0, count($line_ids), '?'));
 $sql = "SELECT
             f.id AS line_id, f.user_id, f.site_id, f.work_date, f.pay_period_end,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate,
-            f.total_gross, f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-            f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
+            f.total_gross, " . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . " AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+            " . (function_exists('pe_sql_employer_cpp') ? pe_sql_employer_cpp($pdo, 'f') : 'f.cpp_er') . " AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
             f.paid_amount, f.payment_status, f.category, f.display_label
             $extraFin,
             u.Name AS emp_name, u.Email AS emp_email,
@@ -341,8 +344,8 @@ foreach ($groups as &$g) {
         $stats = pe_read_period_stats($pdo, $g['wstart'], $g['wend'] ?: $g['wstart'], [(int)$g['user_id']], $site ? [$site] : []);
         $k = ((int)$g['user_id']) . '|' . $site;
         if (isset($stats[$k])) {
-            $g['ee_cpp'] = (float)$stats[$k]['cpp'];
-            $g['er_cpp'] = (float)$stats[$k]['cpp_er'];
+            $g['ee_cpp'] = (float)$stats[$k]['cpp'] + (float)($stats[$k]['cpp2'] ?? 0);
+            $g['er_cpp'] = (float)$stats[$k]['cpp_er'] + (float)($stats[$k]['cpp2_er'] ?? 0);
         }
     }
     $pstart = $req_period_start ?: $g['wstart'];
@@ -390,12 +393,13 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
         'sick_avail'=>0.0,'vac_avail'=>0.0,'vac_used'=>0.0,
     ];
     $fCols = paydocs_fin_cols($pdo);
+    $cppSum = !empty($fCols['cpp2']) ? 'COALESCE(SUM(cpp),0)+COALESCE(SUM(cpp2),0)' : 'COALESCE(SUM(cpp),0)';
     $regPaySel = !empty($fCols['reg_pay']) ? 'COALESCE(SUM(reg_pay),0)' : '0';
     $bonusSel = !empty($fCols['bonus_pay']) ? 'COALESCE(SUM(bonus_pay),0)' : '0';
     $st = $pdo->prepare(
         "SELECT COALESCE(SUM(reg_hours),0) rh, COALESCE(SUM(overtime_hours),0) ot, COALESCE(SUM(travel_hours),0) th,
                 $regPaySel rp, COALESCE(SUM(vac),0) vac, $bonusSel bonus,
-                COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
+                COALESCE(SUM(total_gross),0) g, $cppSum cpp, COALESCE(SUM(ei),0) ei,
                 COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
            FROM payroll_finalized
           WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
@@ -484,6 +488,8 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
     if (!$o) return $out;
 
     $snap = (string)$o['as_of_date'];
+    $stubCols = paydocs_fin_cols($pdo);
+    $cppSum = !empty($stubCols['cpp2']) ? 'COALESCE(SUM(cpp),0)+COALESCE(SUM(cpp2),0)' : 'COALESCE(SUM(cpp),0)';
     // Opening gross already includes vacation. The stub adds vacation on top,
     // the same way the current column does, so keep vacation out of this gross.
     $out['gross'] = (float)$o['ytd_gross'] - (float)$o['ytd_vac'];
@@ -503,7 +509,7 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
         $st2 = $pdo->prepare(
             "SELECT COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(vac),0) vac,
                     COALESCE(SUM(bonus_pay),0) bonus, COALESCE(SUM(total_gross),0) g,
-                    COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
+                    $cppSum cpp, COALESCE(SUM(ei),0) ei,
                     COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
                FROM payroll_finalized
               WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?

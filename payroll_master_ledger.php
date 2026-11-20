@@ -55,6 +55,11 @@ require_once 'db.php';
 require_once 'payroll_scope.php';
 require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 require_once __DIR__ . '/engine/payroll_cheque_lib.php';
+if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+}
+$ledgerEeCpp = function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp';
+$ledgerErCpp = function_exists('pe_sql_employer_cpp') ? pe_sql_employer_cpp($pdo, 'f') : 'f.cpp_er';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 ps_require_payroll_admin();
 $user_org_id = ps_selected_org($pdo);
@@ -423,8 +428,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
                 f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross,
-                f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-                f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
+                $ledgerEeCpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+                $ledgerErCpp AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
          INNER JOIN users u ON f.user_id = u.id
          LEFT  JOIN sites s ON f.site_id = s.Sid
@@ -497,8 +502,8 @@ $sql = "SELECT
             u.Name AS employee_name, s.nick_name AS site_name,
             f.status AS row_lifecycle, f.payment_status, f.paid_amount AS db_paid_amount,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate, f.total_gross,
-            f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
-            f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
+            $ledgerEeCpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+            $ledgerErCpp AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
             f.work_date, f.display_label, f.comments, f.category, f.pay_type
         FROM payroll_finalized f
         INNER JOIN users u ON f.user_id = u.id

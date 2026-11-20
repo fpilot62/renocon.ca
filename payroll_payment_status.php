@@ -25,6 +25,9 @@ if (is_file(__DIR__ . '/engine/org_modules_lib.php')) {
     require_once __DIR__ . '/engine/org_modules_lib.php';
 }
 require_once __DIR__ . '/engine/payroll_payment_status_lib.php';
+if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+}
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -123,7 +126,7 @@ $warnings = [];
 
 $q = $pdo->prepare(
     "SELECT f.id AS line_id, f.user_id, f.site_id, f.work_date, f.total_gross, f.paid_amount,
-            f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
+            " . (function_exists('pe_sql_employee_cpp') ? pe_sql_employee_cpp($pdo, 'f') : 'f.cpp') . " AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
             u.Name AS employee_name, s.nick_name AS site_name
      FROM payroll_finalized f
      INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
