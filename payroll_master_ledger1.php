@@ -50,6 +50,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once __DIR__ . '/engine/attendance_audit_lib.php';
+require_once __DIR__ . '/engine/ledger_matrix_lib.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
@@ -485,6 +486,8 @@ unset($st);
         .name-cell { text-align:left; padding-left:14px; }
         tr.lvl-emp .name-cell { padding-left:30px; }
         .chev { display:inline-block; transition:transform .15s ease; margin-right:8px; color:#64748b; }
+        .ledger-expand-btn { margin-left:6px; background:transparent; color:#fff; border:1px solid #94a3b8; border-radius:4px; font-size:10px; font-weight:800; padding:2px 8px; cursor:pointer; text-transform:none; line-height:1.4; }
+        .ledger-expand-btn:hover { background:#fff; color:#0f172a; }
         .chev.open { transform:rotate(90deg); }
         tr.hidden { display:none; }
         @media print { tr.hidden { display:table-row !important; } .chev{display:none;} }
@@ -602,7 +605,7 @@ unset($st);
             <table class="table table-ledger mb-0 text-center" id="ledgerCoreMatrixTable">
                 <thead>
                     <tr>
-                        <th class="text-left">Site / Employee / Shift</th>
+                        <th class="text-left">Site / Employee / Shift <?= ledger_expand_controls() ?></th>
                         <th>Allocated Units</th>
                         <th>Gross</th>
                         <th>Statutory Deductions</th>
@@ -831,6 +834,7 @@ unset($st);
             if (chev) chev.classList.toggle('open', willOpen);
         }
 
+        <?= ledger_expand_script() ?>
         document.addEventListener("DOMContentLoaded", function(){
             var bucket=document.getElementById('qb_hidden_fields_bucket');
             document.querySelectorAll('.qb-buffer-source-node').forEach(function(node){

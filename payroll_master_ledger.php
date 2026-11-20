@@ -50,6 +50,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once __DIR__ . '/engine/attendance_audit_lib.php';
+require_once __DIR__ . '/engine/ledger_matrix_lib.php';
 require_once 'payroll_scope.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
@@ -239,6 +240,8 @@ $site_filter     = $_GET['site_id']       ?? 'all';
 $employee_filter = $_GET['user_id']       ?? 'all';
 $view_category   = $_GET['view_category'] ?? 'consolidated';
 $balance_scope   = $_GET['balance_scope'] ?? 'all';
+$stat_pay        = $_GET['stat_pay'] ?? 'all';
+if (!in_array($stat_pay, ['all', 'only'], true)) { $stat_pay = 'all'; }
 if (!function_exists('sip_org_pay_period_mode')) {
     require_once __DIR__ . '/engine/org_modules_lib.php';
 }
@@ -288,6 +291,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') { ps_require_csrf(); }
 $redir = "payroll_master_ledger.php?org_id=$user_org_id&from_date=$from_date&to_date=$to_date"
        . "&site_id=" . urlencode($site_filter) . "&user_id=" . urlencode($employee_filter)
        . "&view_category=" . urlencode($view_category) . "&balance_scope=" . urlencode($balance_scope)
+       . "&stat_pay=" . urlencode($stat_pay)
        . "&period_mode=" . urlencode($period_mode);
 
 // ---------------------------------------------------------------- ROLLBACK
@@ -463,8 +467,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
 }
 
 // ---------------------------------------------------------------- DATA PULL (stored columns)
-$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
-$params = [$from_date, $to_date, $user_org_id];
+$where  = ["(f.work_date BETWEEN ? AND ? OR ((COALESCE(f.category,'') = 'Statutory Holiday' OR COALESCE(f.pay_type,'') = 'Statutory') AND f.pay_period_end BETWEEN ? AND ?))", "u.org_id = ?", "s.org_id = u.org_id"];
+$params = [$from_date, $to_date, $from_date, $to_date, $user_org_id];
 if ($site_filter !== 'all' && $site_filter !== '')     { $where[] = "f.site_id = ?"; $params[] = (int)$site_filter; }
 if ($employee_filter !== 'all' && $employee_filter !== '') { $where[] = "f.user_id = ?"; $params[] = (int)$employee_filter; }
 if ($view_category === 'travel')   { $where[] = "f.travel_hours > 0"; }
@@ -520,6 +524,7 @@ foreach ($raw as $r) {
     $r['_paid']      = $paid;
     $r['_remaining'] = $remaining;
     $is_stat         = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0;
+    $is_alloc        = ledger_row_is_stat_alloc($r['category'] ?? '', $r['pay_type'] ?? '');
     $reg_h           = $is_stat ? 0.0 : (float)$r['reg_hours'];
     $stat_h          = $is_stat ? (float)$r['reg_hours'] : 0.0;
     $ot_h            = (float)$r['overtime_hours'];
@@ -539,9 +544,14 @@ foreach ($raw as $r) {
                                              'pay_method'=>(string)($r['payment_method'] ?? ''),
                                              't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,
                                              't_ee'=>0,'t_ee_tax'=>0,'t_ee_cpp'=>0,'t_ee_ei'=>0,
-                                             't_er'=>0,'t_er_cpp'=>0,'t_er_ei'=>0,'t_er_wcb'=>0,'t_er_vac'=>0, 'lines'=>[]];
+                                             't_er'=>0,'t_er_cpp'=>0,'t_er_ei'=>0,'t_er_wcb'=>0,'t_er_vac'=>0,
+                                             'has_stat'=>false, 't_stat_alloc'=>0, 'lines'=>[]];
     }
 
+    if ($is_alloc) {
+        $sites_tree[$sname]['emps'][$uid]['has_stat'] = true;
+        $sites_tree[$sname]['emps'][$uid]['t_stat_alloc'] += (float)$r['total_gross'];
+    }
     $sites_tree[$sname]['emps'][$uid]['lines'][] = $r;
     foreach ([[&$sites_tree[$sname]], [&$sites_tree[$sname]['emps'][$uid]]] as $ref) {
         $ref[0]['t_gross']    += (float)$r['total_gross'];
@@ -620,6 +630,10 @@ if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
 uksort($sites_tree, fn($a,$b) => strcmp($a,$b));
 foreach ($sites_tree as &$st) { uasort($st['emps'], fn($a,$b)=>strcmp($a['name'],$b['name'])); }
 unset($st);
+$stat_summary = ledger_stat_summary($sites_tree);
+if ($stat_pay === 'only') {
+    [$sites_tree, $period_tot] = ledger_strip_non_stat($sites_tree, $period_tot);
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -651,6 +665,8 @@ unset($st);
         .name-cell { text-align:left; padding-left:14px; }
         tr.lvl-emp .name-cell { padding-left:30px; }
         .chev { display:inline-block; transition:transform .15s ease; margin-right:8px; color:#64748b; }
+        .ledger-expand-btn { margin-left:6px; background:transparent; color:#fff; border:1px solid #94a3b8; border-radius:4px; font-size:10px; font-weight:800; padding:2px 8px; cursor:pointer; text-transform:none; line-height:1.4; }
+        .ledger-expand-btn:hover { background:#fff; color:#0f172a; }
         .chev.open { transform:rotate(90deg); }
         tr.hidden { display:none; }
         @media print { tr.hidden { display:table-row !important; } .chev{display:none;} }
@@ -823,6 +839,13 @@ function ledgerOnOrgChange(sel){
                     <div class="small text-muted mt-1"><?=htmlspecialchars($period_mode_label)?> · from org profile</div>
                 </div>
                 <div class="col-md-2">
+                    <label class="font-weight-bold small text-uppercase mb-1" style="color:#a16207;"><i class="fa fa-calendar-check"></i> Stat pay</label>
+                    <select name="stat_pay" class="form-control form-control-sm font-weight-bold" style="background:#fff3b0;">
+                        <option value="all" <?=$stat_pay==='all'?'selected':''?>>All employees</option>
+                        <option value="only" <?=$stat_pay==='only'?'selected':''?>>Stat pay only</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
                     <label class="font-weight-bold small text-primary text-uppercase mb-1"><i class="fa fa-filter"></i> Balance Scope</label>
                     <select name="balance_scope" class="form-control form-control-sm font-weight-bold text-primary" style="background:#f0f9ff;">
                         <option value="all" <?=$balance_scope==='all'?'selected':''?>>📋 All Rows</option>
@@ -834,11 +857,15 @@ function ledgerOnOrgChange(sel){
             </form>
         </div>
 
+        <div class="mb-2 font-weight-bold" style="color:#854d0e;">
+            <span class="stat-pay-mark"><?= (int)$stat_summary['employees'] ?> employees with stat pay, $<?= number_format($stat_summary['stat_total'], 2) ?> total</span>
+            <?php if ($stat_pay === 'only'): ?> · showing only those employees<?php endif; ?>
+        </div>
         <div class="card shadow-sm border-0 rounded-lg overflow-hidden">
             <table class="table table-ledger mb-0 text-center" id="ledgerCoreMatrixTable">
                 <thead>
                     <tr>
-                        <th class="text-left">Site / Employee / Shift</th>
+                        <th class="text-left">Site / Employee / Shift <?= ledger_expand_controls() ?></th>
                         <th>Allocated Units</th>
                         <th>Gross</th>
                         <th>EE Deductions (withheld)</th>
@@ -1154,6 +1181,7 @@ function ledgerOnOrgChange(sel){
             });
         });
 
+        <?= ledger_expand_script() ?>
         document.addEventListener("DOMContentLoaded", function(){
             var bucket=document.getElementById('qb_hidden_fields_bucket');
             document.querySelectorAll('.qb-buffer-source-node').forEach(function(node){
