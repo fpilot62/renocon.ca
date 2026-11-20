@@ -85,7 +85,7 @@ check('Remembrance Day is inside the window for Saskatchewan only', in_array('20
 check('unpaid SK Labour Day stays in that fortnight', isset($byKey['1|2026-09-07']) && $byKey['1|2026-09-07']['period_end'] === '2026-09-20' && $byKey['1|2026-09-07']['late'] === false);
 check('unpaid SK amount is 5 percent', isset($byKey['1|2026-09-07']) && abs($byKey['1|2026-09-07']['amount'] - 50) < 0.01);
 check('paid SK fortnight moves to the next unpaid period', isset($byKey['2|2026-09-07']) && $byKey['2|2026-09-07']['late'] === true && $byKey['2|2026-09-07']['period_end'] === '2026-10-04');
-check('ON employee who missed the last shift is not eligible', !isset($byKey['3|2026-09-07']));
+check('ON employee who missed the last shift is still created', isset($byKey['3|2026-09-07']) && abs($byKey['3|2026-09-07']['amount'] - 100) < 0.01);
 
 $labour = null;
 foreach ($plan['groups'] as $g) {
@@ -102,7 +102,7 @@ check('apply posts the planned lines', $applied['posted'] === count($plan['rows'
 check('paid row is unchanged', $paidBefore === $paidAfter);
 
 $late = $pdo->query("SELECT work_date, pay_period_end, status, paid_amount, comments FROM payroll_finalized WHERE user_id=2 AND category='Statutory Holiday' AND work_date='2026-09-07'")->fetch(PDO::FETCH_ASSOC);
-check('late line keeps the holiday date and is not marked paid', $late && $late['work_date'] === '2026-09-07' && $late['pay_period_end'] === '2026-10-04' && $late['status'] === 'pending' && (float)$late['paid_amount'] === 0.0);
+check('late line keeps the holiday date and waits for approval', $late && $late['work_date'] === '2026-09-07' && $late['pay_period_end'] === '2026-10-04' && $late['status'] === 'needs approval' && (float)$late['paid_amount'] === 0.0);
 check('late line says the original period was paid', $late && strpos((string)$late['comments'], 'late stat, period paid') !== false);
 
 $home = $pdo->query("SELECT pay_period_end, comments FROM payroll_finalized WHERE user_id=1 AND category='Statutory Holiday' AND work_date='2026-09-07'")->fetch(PDO::FETCH_ASSOC);

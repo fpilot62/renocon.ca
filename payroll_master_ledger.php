@@ -172,6 +172,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q = $pdo->prepare(
         "SELECT f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id, f.work_date,
                 f.pay_period, f.pay_period_end, f.total_gross, f.paid_amount AS db_paid_amount,
+                f.status AS line_status,
                 f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -182,6 +183,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$org_id, $line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
+    if (strcasecmp((string)($line['line_status'] ?? ''), 'needs approval') === 0) { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -379,7 +381,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
         try {
             $pdo->beginTransaction();
             ps_assert_user($pdo, $uid, $user_org_id);
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id"];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", "COALESCE(f.status,'') <> 'needs approval'"];
             $p = [$uid, $pstart, $pend, $user_org_id];
             if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f
@@ -416,7 +418,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $in  = implode(',', array_fill(0, count($ids), '?'));
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
-                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross,
+                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross, f.status AS line_status,
                 f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -427,6 +429,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q->execute(array_merge($ids, [$user_org_id]));
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
     if (count($lines) !== count($ids)) { http_response_code(403); exit('One or more export rows are outside your organization.'); }
+    $lines = array_values(array_filter($lines, static function ($r) {
+        return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+    }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];
     $grouping   = $opts['grouping']   ?? 'per_employee_period';
@@ -509,7 +514,7 @@ foreach (['payment_method', 'bank_name', 'bank_institution', 'bank_transit', 'ba
 $sql = "SELECT
             f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id,
             u.Name AS employee_name, s.nick_name AS site_name $payExtra,
-            f.status AS row_lifecycle, f.payment_status, f.paid_amount AS db_paid_amount,
+            f.status AS row_lifecycle, f.status AS line_status, f.payment_status, f.paid_amount AS db_paid_amount,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate, f.total_gross,
             f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
             f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
@@ -540,6 +545,9 @@ foreach ($raw as $r) {
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
+    $needsApproval = strcasecmp((string)($r['row_lifecycle'] ?? ''), 'needs approval') === 0;
+    $payRemaining = $needsApproval ? 0.0 : $remaining;
+    $r['_needs_approval'] = $needsApproval;
     $r['_ee']        = ee_deduct($r);
     $r['_er']        = (float)$r['er_cpp'] + (float)($r['er_cpp2'] ?? 0) + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
     $r['_net']       = $net;
@@ -579,7 +587,7 @@ foreach ($raw as $r) {
         $ref[0]['t_gross']    += (float)$r['total_gross'];
         $ref[0]['t_net']      += $net;
         $ref[0]['t_paid']     += $paid;
-        $ref[0]['t_rem']      += $remaining;
+        $ref[0]['t_rem']      += $payRemaining;
         $ref[0]['t_reg_h']    += $reg_h;
         $ref[0]['t_ot_h']     += $ot_h;
         $ref[0]['t_travel_h'] += $trav_h;
@@ -603,7 +611,7 @@ foreach ($raw as $r) {
     $period_tot['stat_h']   += $stat_h;
     $period_tot['stat_cost']+= $is_stat ? (float)$r['total_gross'] : 0;
     $period_tot['paid']  += $paid;
-    $period_tot['rem']   += $remaining;
+    $period_tot['rem']   += $payRemaining;
     $period_tot['ee']     += $r['_ee'];
     $period_tot['ee_tax'] += (float)$r['ee_tax'];
     $period_tot['ee_cpp'] += (float)$r['ee_cpp'];
@@ -649,8 +657,24 @@ if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
     unset($empRow, $siteRow);
 }
 // sort sites by name, employees within each by name
+$pendingStatApproval = 0;
+foreach ($raw as $pendingRow) {
+    if (strcasecmp((string)($pendingRow['row_lifecycle'] ?? ''), 'needs approval') === 0) {
+        $pendingStatApproval++;
+    }
+}
 uksort($sites_tree, fn($a,$b) => strcmp($a,$b));
-foreach ($sites_tree as &$st) { uasort($st['emps'], fn($a,$b)=>strcmp($a['name'],$b['name'])); }
+foreach ($sites_tree as &$st) {
+    uasort($st['emps'], fn($a,$b)=>strcmp($a['name'],$b['name']));
+    foreach ($st['emps'] as &$empSort) {
+        usort($empSort['lines'], static function ($a, $b) {
+            $af = stripos((string)($a['comments'] ?? ''), 'FLAG:') !== false ? 0 : 1;
+            $bf = stripos((string)($b['comments'] ?? ''), 'FLAG:') !== false ? 0 : 1;
+            return $af <=> $bf;
+        });
+    }
+    unset($empSort);
+}
 unset($st);
 $stat_summary = ledger_stat_summary($sites_tree);
 if ($stat_pay === 'only') {
@@ -681,6 +705,7 @@ if ($stat_pay === 'only') {
         tr.lvl-emp td:first-child { cursor:pointer; }
         tr.lvl-shift { background:#ffffff; }
         tr.lvl-shift.stat-holiday td { background:#fff3b0 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+        tr.lvl-shift.stat-flag td { background:#fde68a !important; outline:2px solid #d97706; }
         .stat-pay-mark { background:#fff3b0; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
         .travel-badge { display:inline-block; background:#fef3c7; color:#b45309; border:1px solid #fcd34d; font-size:9px; font-weight:800; text-transform:uppercase; padding:1px 7px; border-radius:9px; margin-left:6px; letter-spacing:.3px; }
         tr.lvl-site .sub, tr.lvl-emp .sub { color:#64748b; font-weight:600; font-size:10px; }
@@ -896,6 +921,9 @@ function ledgerOnOrgChange(sel){
         if (is_file($statHolLib)) { require_once $statHolLib; }
         if (function_exists('sh_review_banner_html')) { echo sh_review_banner_html($pdo, (int)$user_org_id, $from_date, $to_date); }
         ?>
+        <?php if (!empty($pendingStatApproval)): ?>
+        <div class="alert alert-warning font-weight-bold"><?= (int)$pendingStatApproval ?> stat holiday lines need approval before they can be paid. <a href="stat_holiday_review.php?org_id=<?= (int)$user_org_id ?>&from_date=<?= urlencode($from_date) ?>&to_date=<?= urlencode($to_date) ?>">Open the approval list</a></div>
+        <?php endif; ?>
         <?php if (ledger_stat_visible((float)$stat_summary['stat_total'])): ?>
         <div class="mb-2 font-weight-bold" style="color:#854d0e;">
             <span class="stat-pay-mark"><?= (int)$stat_summary['employees'] ?> employees with stat pay, $<?= number_format($stat_summary['stat_total'], 2) ?> total</span>
@@ -1034,10 +1062,12 @@ function ledgerOnOrgChange(sel){
                                 <?php $is_travel_row = (strcasecmp(trim((string)($r['category'] ?? '')), 'Travel') === 0) || ((float)$r['travel_hours'] > 0 && (float)$r['reg_hours'] == 0 && (float)$r['overtime_hours'] == 0);
                                       $is_stat_row = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0;
                                       $is_holiday_row = strcasecmp((string)($r['category'] ?? ''), 'Statutory Holiday') === 0; ?>
-                                <tr class="lvl-shift hidden<?= $is_holiday_row ? ' stat-holiday' : '' ?>" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
+                                <tr class="lvl-shift hidden<?= $is_holiday_row ? ' stat-holiday' : '' ?><?= !empty($r['_needs_approval']) && stripos((string)($r['comments'] ?? ''), 'FLAG:') !== false ? ' stat-flag' : '' ?>" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
                                     <td class="text-left text-dark" style="padding-left:48px;">
                                         <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>
+                                        <?php if (!empty($r['_needs_approval'])): ?><span class="badge badge-warning">Needs approval</span><?php endif; ?>
+                                        <?php if (preg_match('/FLAG:\s*([^.]+)/', (string)($r['comments'] ?? ''), $flagMatch)): ?><div class="small font-weight-bold" style="color:#92400e;"><?=htmlspecialchars(trim($flagMatch[1]))?></div><?php endif; ?>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
                                         <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
                                     </td>
@@ -1069,7 +1099,9 @@ function ledgerOnOrgChange(sel){
                                     <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?></td>
                                     <td style="font-size:12px; color:<?=$rem>0.01?'#dc2626':'#16a34a'?>;">$<?=number_format($rem,2)?></td>
                                     <td>
-                                        <?php if ($rem > 0.01): ?>
+                                        <?php if (!empty($r['_needs_approval'])): ?>
+                                            <span class="badge badge-warning">Needs approval</span>
+                                        <?php elseif ($rem > 0.01): ?>
                                             <form method="POST" action="" class="mb-0">
                                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                                                 <input type="hidden" name="line_id" value="<?=$r['line_id']?>">

@@ -270,9 +270,6 @@ function stat_zero_regular_shifts(PDO $pdo, int $userId, int $siteId, string $ho
 function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, array $holidayProvinces, int $byUser): bool {
     $row = stat_preview_row($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayProvinces);
     if (!$row || $row['posted_id'] || sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) { return false; }
-    if (function_exists('sh_should_hold_stat') && sh_should_hold_stat($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, (string)$row['province'], (float)$row['amount'])) {
-        return false;
-    }
     $ded = pe_line_for($pdo, $userId, $siteId, $holidayDate, (float)$row['amount']);
     $comments = 'Stat default: '.$row['formula'].'; lookback '.$row['lookback_from'].' to '.$row['lookback_to'].
                 '; base $'.number_format($row['base'], 2, '.', '').'. If they worked, hours are also posted at 1.5x (or +0.5x if straight time already exists).';
@@ -280,7 +277,7 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
         (attendance_id,category,display_label,user_id,country_code,org_id,site_id,work_date,pay_period_end,
          reg_hours,balance_hours,overtime_hours,travel_hours,hourly_rate,reg_pay,bonus_pay,bal_pay,total_gross,
          cpp,ei,wcb,vac,status,finalized_by,pay_type,comments,income_tax,cpp_er,ei_er)
-        VALUES (NULL,'Statutory Holiday',?,?,?,?,?,?,?,?,0,0,0,?,?,0,0,?,?,?,?,?,'pending',?,'Statutory',?,?,?,?)");
+        VALUES (NULL,'Statutory Holiday',?,?,?,?,?,?,?,?,0,0,0,?,?,0,0,?,?,?,?,?,'needs approval',?,'Statutory',?,?,?,?)");
     $ins->execute([
         $holidayName.' — Statutory Holiday Pay', $userId, 'CA', $orgId, $siteId, $holidayDate, $holidayDate,
         $row['equiv_hours'], $row['hourly_rate'], $row['amount'], $row['amount'],

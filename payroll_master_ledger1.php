@@ -156,6 +156,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q = $pdo->prepare(
         "SELECT id AS line_id, attendance_id, user_id, site_id, payroll_id, work_date,
                 pay_period, pay_period_end, total_gross, paid_amount AS db_paid_amount,
+                status AS line_status,
                 cpp AS ee_cpp, ei AS ee_ei, income_tax AS ee_tax,
                 cpp_er AS er_cpp, ei_er AS er_ei, wcb AS er_wcb, vac AS er_vac
          FROM payroll_finalized WHERE id = ? LIMIT 1"
@@ -163,6 +164,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
+    if (strcasecmp((string)($line['line_status'] ?? ''), 'needs approval') === 0) { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -309,7 +311,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
     if ($uid > 0) {
         try {
             $pdo->beginTransaction();
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?"];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "COALESCE(f.status,'') <> 'needs approval'"];
             $p = [$uid, $pstart, $pend];
             if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f WHERE " . implode(" AND ", $w) . " ORDER BY f.work_date ASC");
@@ -343,7 +345,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $in  = implode(',', array_fill(0, count($ids), '?'));
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
-                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross,
+                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross, f.status AS line_status,
                 f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -353,6 +355,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     );
     $q->execute($ids);
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
+    $lines = array_values(array_filter($lines, static function ($r) {
+        return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+    }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];
     $grouping   = $opts['grouping']   ?? 'per_employee_period';

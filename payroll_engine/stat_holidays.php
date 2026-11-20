@@ -870,16 +870,184 @@ if (!function_exists('sh_finalized_stat_line')) {
     }
 }
 
-if (!function_exists('sh_post_stat_line')) {
-    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = '', ?string $asOf = null): bool {
-        if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {
+if (!function_exists('sh_stat_flag_text')) {
+    function sh_stat_flag_text(PDO $pdo, int $userId, int $siteId, string $holidayDate, string $province, ?string $asOf = null): string {
+        if (sh_normalize_province($province) !== 'ON') {
+            return '';
+        }
+        $labels = [
+            'missed_before' => 'Missed last shift before',
+            'missed_after' => 'Missed first shift after',
+            'no_shift_after' => 'No shift in 28 days after',
+        ];
+        $out = [];
+        foreach (sh_on_review_flags($pdo, $userId, $siteId, $holidayDate, $asOf) as $flag) {
+            if (isset($labels[$flag])) {
+                $out[] = $labels[$flag];
+            }
+        }
+        return implode('; ', $out);
+    }
+}
+
+if (!function_exists('sh_stat_payable')) {
+    function sh_stat_payable(array $row): bool {
+        return strcasecmp(trim((string)($row['status'] ?? '')), 'needs approval') !== 0;
+    }
+}
+
+if (!function_exists('sh_store_stat_meta')) {
+    function sh_store_stat_meta(PDO $pdo, int $lineId, float $calculated, string $flag): void {
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        $sets = [];
+        $params = [];
+        if (isset($cols['stat_calculated_amount'])) {
+            $sets[] = 'stat_calculated_amount=?';
+            $params[] = round($calculated, 2);
+        }
+        if (isset($cols['stat_flag'])) {
+            $sets[] = 'stat_flag=?';
+            $params[] = $flag !== '' ? $flag : null;
+        }
+        if (!$sets) {
+            return;
+        }
+        $params[] = $lineId;
+        $pdo->prepare('UPDATE payroll_finalized SET ' . implode(', ', $sets) . ' WHERE id=?')->execute($params);
+    }
+}
+
+if (!function_exists('sh_refresh_pending_stat')) {
+    function sh_refresh_pending_stat(PDO $pdo, int $userId, int $siteId, string $holidayDate, float $calculated, string $flag): void {
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        $extra = '';
+        if (isset($cols['stat_approved_at'])) {
+            $extra .= ', stat_approved_at';
+        }
+        if (isset($cols['stat_edited_by'])) {
+            $extra .= ', stat_edited_by';
+        }
+        if (isset($cols['stat_edit_reason'])) {
+            $extra .= ', stat_edit_reason';
+        }
+        $st = $pdo->prepare(
+            "SELECT id, status, total_gross, comments $extra FROM payroll_finalized
+              WHERE user_id=? AND site_id=? AND work_date=? AND category='Statutory Holiday' LIMIT 1"
+        );
+        $st->execute([$userId, $siteId, substr($holidayDate, 0, 10)]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row || strcasecmp((string)$row['status'], 'needs approval') !== 0) {
+            return;
+        }
+        if (!empty($row['stat_approved_at']) || (int)($row['stat_edited_by'] ?? 0) > 0 || trim((string)($row['stat_edit_reason'] ?? '')) !== '') {
+            return;
+        }
+        $comment = preg_replace('/ FLAG: [^.]*\./', '', (string)($row['comments'] ?? ''));
+        if ($flag !== '') {
+            $comment = rtrim($comment) . ' FLAG: ' . $flag . '.';
+        }
+        $pdo->prepare('UPDATE payroll_finalized SET total_gross=?, reg_pay=?, comments=? WHERE id=?')
+            ->execute([round($calculated, 2), round($calculated, 2), $comment, (int)$row['id']]);
+        sh_store_stat_meta($pdo, (int)$row['id'], $calculated, $flag);
+    }
+}
+
+if (!function_exists('sh_approve_stat_line')) {
+    /** Approve one needs-approval line. A changed amount requires a reason. Does not mark it paid. */
+    function sh_approve_stat_line(PDO $pdo, int $orgId, int $lineId, int $actorId, ?float $amount, ?float $hours, string $reason): bool {
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        $st = $pdo->prepare(
+            "SELECT f.* FROM payroll_finalized f
+              INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
+              WHERE f.id=? AND f.category='Statutory Holiday' LIMIT 1"
+        );
+        $st->execute([$orgId, $lineId]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row || strcasecmp((string)$row['status'], 'needs approval') !== 0) {
             return false;
         }
+        $calculated = isset($row['stat_calculated_amount']) ? (float)$row['stat_calculated_amount'] : (float)$row['total_gross'];
+        $newAmount = $amount === null ? (float)$row['total_gross'] : round($amount, 2);
+        if (abs($newAmount - $calculated) > 0.009 && trim($reason) === '') {
+            return false;
+        }
+        $sets = ["status='pending'", 'total_gross=?', 'reg_pay=?'];
+        $params = [$newAmount, $newAmount];
+        if ($hours !== null) {
+            $sets[] = 'reg_hours=?';
+            $params[] = round($hours, 2);
+        }
+        if (isset($cols['stat_approved_amount'])) {
+            $sets[] = 'stat_approved_amount=?';
+            $params[] = $newAmount;
+        }
+        if (isset($cols['stat_approved_by'])) {
+            $sets[] = 'stat_approved_by=?';
+            $params[] = $actorId;
+        }
+        if (isset($cols['stat_approved_at'])) {
+            $sets[] = 'stat_approved_at=?';
+            $params[] = date('Y-m-d H:i:s');
+        }
+        if (abs($newAmount - $calculated) > 0.009) {
+            if (isset($cols['stat_edited_by'])) {
+                $sets[] = 'stat_edited_by=?';
+                $params[] = $actorId;
+            }
+            if (isset($cols['stat_edit_reason'])) {
+                $sets[] = 'stat_edit_reason=?';
+                $params[] = substr(trim($reason), 0, 255);
+            }
+        }
+        $params[] = $lineId;
+        $pdo->prepare('UPDATE payroll_finalized SET ' . implode(', ', $sets) . ' WHERE id=?')->execute($params);
+        if (function_exists('aa_log')) {
+            sh_review_audit($pdo, (int)$row['user_id'], 'approved', (string)$row['work_date'] . ' ' . $reason);
+        }
+        return true;
+    }
+}
+
+if (!function_exists('sh_bulk_approve_unflagged')) {
+    function sh_bulk_approve_unflagged(PDO $pdo, int $orgId, int $actorId): int {
+        $st = $pdo->prepare(
+            "SELECT f.id FROM payroll_finalized f
+              INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
+              WHERE f.category='Statutory Holiday' AND f.status='needs approval'
+                AND (f.stat_flag IS NULL OR f.stat_flag='')"
+        );
+        try {
+            $st->execute([$orgId]);
+            $ids = $st->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Throwable $e) {
+            $st = $pdo->prepare(
+                "SELECT f.id FROM payroll_finalized f
+                  INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
+                  WHERE f.category='Statutory Holiday' AND f.status='needs approval'
+                    AND COALESCE(f.comments,'') NOT LIKE '%FLAG:%'"
+            );
+            $st->execute([$orgId]);
+            $ids = $st->fetchAll(PDO::FETCH_COLUMN);
+        }
+        $n = 0;
+        foreach ($ids as $id) {
+            if (sh_approve_stat_line($pdo, $orgId, (int)$id, $actorId, null, null, '')) {
+                $n++;
+            }
+        }
+        return $n;
+    }
+}
+
+if (!function_exists('sh_post_stat_line')) {
+    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = '', ?string $asOf = null): bool {
         $calc = sh_compute_stat_pay($pdo, $userId, $siteId, $holidayDate, $province);
         if (!$calc['eligible'] || $calc['amount'] < 0.01) {
             return false;
         }
-        if (sh_should_hold_stat($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, (float)$calc['amount'], $asOf)) {
+        $flag = sh_stat_flag_text($pdo, $userId, $siteId, $holidayDate, $province, $asOf);
+        if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {
+            sh_refresh_pending_stat($pdo, $userId, $siteId, $holidayDate, (float)$calc['amount'], $flag);
             return false;
         }
         if (!function_exists('pe_line')) {
@@ -908,6 +1076,9 @@ if (!function_exists('sh_post_stat_line')) {
             $hours = round($calc['amount'] / $rate, 2);
         }
         $comment = 'Stat pay ' . $province . ': ' . $calc['formula'] . '; ' . $calc['from'] . ' to ' . $calc['to'] . '.';
+        if ($flag !== '') {
+            $comment .= ' FLAG: ' . $flag . '.';
+        }
         if ($commentNote !== '') {
             $comment .= ' ' . $commentNote;
         }
@@ -917,7 +1088,7 @@ if (!function_exists('sh_post_stat_line')) {
                 (user_id, org_id, site_id, work_date, pay_period_end, category, display_label, pay_type,
                  reg_hours, hourly_rate, reg_pay, total_gross, cpp, ei, income_tax, cpp_er, ei_er, wcb, vac,
                  status, finalized_by, comments)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'needs approval',?,?)"
         );
         $ins->execute([
             $userId, $orgId, $siteId, $holidayDate, $periodEnd, 'Statutory Holiday',
@@ -927,6 +1098,7 @@ if (!function_exists('sh_post_stat_line')) {
             (float)($ded['cpp_er'] ?? 0), (float)($ded['ei_er'] ?? 0), (float)($ded['wcb'] ?? 0), (float)($ded['vac'] ?? 0),
             $byUser, $comment,
         ]);
+        sh_store_stat_meta($pdo, (int)$pdo->lastInsertId(), (float)$calc['amount'], $flag);
         return true;
     }
 }
@@ -964,12 +1136,6 @@ if (!function_exists('sh_after_finalize')) {
         foreach (sh_calendar_holidays($province, $start, $end) as $holiday) {
             if (sh_post_stat_line($pdo, $orgId, $userId, $siteId, $holiday['holiday_date'], $holiday['holiday_name'], $province, $byUser)) {
                 $posted++;
-            }
-        }
-        if ($province === 'ON') {
-            try {
-                sh_release_leave_reviews($pdo, $orgId, $userId, $siteId);
-            } catch (Throwable $e) {
             }
         }
         if (function_exists('pe_refresh_period_stat')) {
