@@ -204,8 +204,12 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
 }
 
 // ---------------------------------------------------------------- filters
-$staff_list = $pdo->query("SELECT id, Name FROM users ORDER BY Name ASC")->fetchAll(PDO::FETCH_ASSOC);
-$sites_list = $pdo->query("SELECT Sid, nick_name FROM sites ORDER BY nick_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+$staff_list = $pdo->prepare("SELECT id, Name FROM users WHERE org_id=? ORDER BY Name ASC");
+$staff_list->execute([$user_org_id]);
+$staff_list = $staff_list->fetchAll(PDO::FETCH_ASSOC);
+$sites_q = $pdo->prepare("SELECT Sid, nick_name, province FROM sites WHERE org_id=? ORDER BY nick_name ASC");
+$sites_q->execute([$user_org_id]);
+$sites_list = $sites_q->fetchAll(PDO::FETCH_ASSOC);
 
 $from_date       = $_GET['from_date']     ?? date('Y-m-01');
 $to_date         = $_GET['to_date']       ?? date('Y-m-t');
@@ -214,10 +218,23 @@ $employee_filter = $_GET['user_id']       ?? 'all';
 $view_category   = $_GET['view_category'] ?? 'consolidated';
 $balance_scope   = $_GET['balance_scope'] ?? 'all';
 $period_mode     = $_GET['period_mode']   ?? 'semi_monthly'; // semi_monthly | bi_weekly | monthly
+$province_options = ledger_province_options($sites_list);
+$province_filter = ledger_province_param((string)($_GET['province'] ?? 'all'), $province_options);
+$sites_for_location = array_values(array_filter($sites_list, function ($site) use ($province_filter) {
+    return ledger_site_in_province($site['province'] ?? '', $province_filter);
+}));
+if ($site_filter !== 'all' && $site_filter !== '') {
+    $__siteOk = false;
+    foreach ($sites_for_location as $__siteRow) {
+        if ((string)$__siteRow['Sid'] === (string)$site_filter) { $__siteOk = true; break; }
+    }
+    if (!$__siteOk) { $site_filter = 'all'; }
+}
 
 $redir = "payroll_master_ledger.php?from_date=$from_date&to_date=$to_date"
        . "&site_id=" . urlencode($site_filter) . "&user_id=" . urlencode($employee_filter)
        . "&view_category=" . urlencode($view_category) . "&balance_scope=" . urlencode($balance_scope)
+       . "&province=" . urlencode($province_filter)
        . "&period_mode=" . urlencode($period_mode);
 
 // ---------------------------------------------------------------- ROLLBACK
@@ -383,9 +400,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
 }
 
 // ---------------------------------------------------------------- DATA PULL (stored columns)
-$where  = ["f.work_date BETWEEN ? AND ?"];
-$params = [$from_date, $to_date];
+$where  = ["f.work_date BETWEEN ? AND ?", "u.org_id = ?"];
+$params = [$from_date, $to_date, $user_org_id];
 if ($site_filter !== 'all' && $site_filter !== '')     { $where[] = "f.site_id = ?"; $params[] = (int)$site_filter; }
+if ($province_filter !== 'all') {
+    $__provIds = [];
+    foreach ($sites_for_location as $__siteRow) { $__provIds[] = (int)$__siteRow['Sid']; }
+    if (!$__provIds) { $where[] = '1=0'; }
+    else {
+        $where[] = 'f.site_id IN (' . implode(',', array_fill(0, count($__provIds), '?')) . ')';
+        foreach ($__provIds as $__provId) { $params[] = $__provId; }
+    }
+}
 if ($employee_filter !== 'all' && $employee_filter !== '') { $where[] = "f.user_id = ?"; $params[] = (int)$employee_filter; }
 if ($view_category === 'travel')   { $where[] = "f.travel_hours > 0"; }
 elseif ($view_category === 'overtime') { $where[] = "f.overtime_hours > 0"; }
@@ -568,9 +594,21 @@ unset($st);
                     <label class="font-weight-bold small text-muted text-uppercase mb-1">Location</label>
                     <select name="site_id" class="form-control form-control-sm font-weight-bold">
                         <option value="all">All Locations</option>
-                        <?php foreach($sites_list as $s): ?>
+                        <?php foreach($sites_for_location as $s): ?>
                             <option value="<?=$s['Sid']?>" <?=((string)$site_filter===(string)$s['Sid'])?'selected':''?>><?=htmlspecialchars($s['nick_name'])?></option>
                         <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="font-weight-bold small text-muted text-uppercase mb-1">Province</label>
+                    <select name="province" class="form-control form-control-sm font-weight-bold" onchange="this.form.site_id.value='all'; this.form.submit();">
+                        <option value="all" <?=$province_filter==='all'?'selected':''?>>All Provinces</option>
+                        <?php foreach ($province_options['codes'] as $__code): ?>
+                            <option value="<?=htmlspecialchars($__code)?>" <?=$province_filter===$__code?'selected':''?>><?=htmlspecialchars($__code)?></option>
+                        <?php endforeach; ?>
+                        <?php if ($province_options['unmapped'] || $province_filter === 'unmapped'): ?>
+                            <option value="unmapped" <?=$province_filter==='unmapped'?'selected':''?>>Unmapped</option>
+                        <?php endif; ?>
                     </select>
                 </div>
                 <div class="col-md-2">

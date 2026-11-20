@@ -527,7 +527,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
   <?php else:?>
     <div class="stat-total-bar" id="statGrandTop">
       <span><strong class="stat-grand-n"><?=$periodEligibleTotal?></strong> ticked</span>
-      <span>Avg daily / stat total <strong class="stat-grand-total">$<?=number_format($periodReadyAmt, 2)?></strong> · mean ADW <strong class="stat-grand-avg">$<?=number_format($periodReadyAvg, 2)?></strong><?php if($periodPostedAmt > 0):?> <small style="font-weight:600;opacity:.85;">· already posted $<?=number_format($periodPostedAmt, 2)?></small><?php endif;?></span>
+      <span class="stat-pay-show"<?= $periodReadyAmt > 0.009 ? '' : ' style="display:none"' ?>>Avg daily / stat total <strong class="stat-grand-total">$<?=number_format($periodReadyAmt, 2)?></strong> · mean ADW <strong class="stat-grand-avg">$<?=number_format($periodReadyAvg, 2)?></strong></span><?php if($periodPostedAmt > 0.009):?> <small class="stat-pay-show" style="font-weight:600;opacity:.85;">· already posted $<?=number_format($periodPostedAmt, 2)?></small><?php endif;?>
     </div>
     <p class="small-note mb-2 mt-2">Tick = include. Untick = exclude. Totals follow the ticks.</p>
     <?php if($periodEligibleTotal > 0):?>
@@ -548,7 +548,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
     <?php foreach($periodBuckets as $b):?>
       <h6 class="mt-3"><?=htmlspecialchars($b['holiday_date'].' · '.$b['holiday_name'])?> <span class="badge badge-secondary"><?=htmlspecialchars(implode('/', $b['provinces']))?></span>
         <small class="text-muted"><?=$b['eligible']?> ready · <?=$b['already']?> already posted</small>
-        <span class="stat-hol-top"> · Stat pay <strong class="stat-hol-total">$<?=number_format((float)$b['ready_amt'], 2)?></strong> · avg <strong class="stat-hol-avg">$<?=number_format(((int)$b['eligible'] > 0 ? (float)$b['ready_amt'] / (int)$b['eligible'] : 0), 2)?></strong></span></h6>
+        <span class="stat-hol-top stat-pay-show"<?= (float)$b['ready_amt'] > 0.009 ? '' : ' style="display:none"' ?>> · Stat pay <strong class="stat-hol-total">$<?=number_format((float)$b['ready_amt'], 2)?></strong> · avg <strong class="stat-hol-avg">$<?=number_format(((int)$b['eligible'] > 0 ? (float)$b['ready_amt'] / (int)$b['eligible'] : 0), 2)?></strong></span></h6>
       <table class="table table-sm table-bordered bg-white stat-hol-table"><thead class="thead-light"><tr><th></th><th>Site</th><th>Employee</th><th>Lookback</th><th>Base</th><th>Avg daily / stat</th><th>Hrs on holiday</th><th>1.5× work $</th><th>Change on approve</th><th>Status</th></tr></thead><tbody>
       <?php if(!$b['rows']):?><tr><td colspan="10" class="text-muted">No eligible employees for this holiday.</td></tr>
       <?php else:
@@ -570,8 +570,8 @@ body.stat-flat .stat-emp-row{display:table-row !important}
             <button type="button" class="stat-site-toggle" data-site="<?= (int)$sid ?>" onclick="event.stopPropagation(); statToggleSite(this);">▾</button>
             <?=htmlspecialchars($g['name'])?>
             · <?=$g['n']?> people
-            · <span class="stat-site-total">$<?=number_format($g['amt'], 2)?></span>
-            · avg <span class="stat-site-avg">$<?=number_format($g['n'] > 0 ? $g['amt'] / $g['n'] : 0, 2)?></span>
+            <span class="stat-pay-show"<?= $g['amt'] > 0.009 ? '' : ' style="display:none"' ?>> · <span class="stat-site-total">$<?=number_format($g['amt'], 2)?></span>
+            · avg <span class="stat-site-avg">$<?=number_format($g['n'] > 0 ? $g['amt'] / $g['n'] : 0, 2)?></span></span>
           </td>
         </tr>
         <?php foreach ($g['rows'] as $r): ?>
@@ -581,23 +581,23 @@ body.stat-flat .stat-emp-row{display:table-row !important}
           <td><?=htmlspecialchars($r['Name'])?></td>
           <td><?=$r['lookback_from']?> – <?=$r['lookback_to']?></td>
           <td>$<?=number_format($r['base'],2)?></td>
-          <td><strong>$<?=number_format($r['amount'],2)?></strong></td>
+          <td><?php if ((float)$r['amount'] > 0.009): ?><strong>$<?=number_format($r['amount'],2)?></strong><?php endif; ?></td>
           <td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td>
           <td><?php $wp=(float)($r['worked_pay'] ?? 0); echo $wp>0 ? '$'.number_format($wp,2) : '—'; ?></td>
           <td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td>
-          <td><?php if($r['posted_id']):?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status'])):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php else:?>Ready<?php if($r['worked_holiday']):?> · <span class="text-danger">worked holiday</span><?php endif;?><?php endif;?></td>
+          <td><?php if($r['posted_id']):?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status']) && (float)$r['amount'] > 0.009):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php else:?>Ready<?php if($r['worked_holiday']):?> · <span class="text-danger">worked holiday</span><?php endif;?><?php endif;?></td>
         </tr>
         <?php endforeach; endforeach; endif;?>
       </tbody>
       <?php if($b['rows']):?>
-      <tfoot><tr class="stat-total-foot"><td colspan="5">Total ticked / avg daily</td><td><span class="stat-hol-total">$<?=number_format((float)$b['ready_amt'], 2)?></span><div class="tiny-avg">avg <span class="stat-hol-avg">$<?=number_format(((int)$b['eligible'] > 0 ? (float)$b['ready_amt'] / (int)$b['eligible'] : 0), 2)?></span></div></td><td></td><td></td><td></td><td></td></tr></tfoot>
+      <tfoot><tr class="stat-total-foot"><td colspan="5">Total ticked / avg daily</td><td><span class="stat-pay-show"<?= (float)$b['ready_amt'] > 0.009 ? '' : ' style="display:none"' ?>><span class="stat-hol-total">$<?=number_format((float)$b['ready_amt'], 2)?></span><div class="tiny-avg">avg <span class="stat-hol-avg">$<?=number_format(((int)$b['eligible'] > 0 ? (float)$b['ready_amt'] / (int)$b['eligible'] : 0), 2)?></span></div></span></td><td></td><td></td><td></td><td></td></tr></tfoot>
       <?php endif;?>
       </table>
     <?php endforeach;?>
     <?php if($periodEligibleTotal > 0):?>
       <div class="stat-total-bar" id="statGrandBottom">
         <span><strong class="stat-grand-n"><?=$periodEligibleTotal?></strong> ticked</span>
-        <span>Avg daily / stat total <strong class="stat-grand-total">$<?=number_format($periodReadyAmt, 2)?></strong> · mean ADW <strong class="stat-grand-avg">$<?=number_format($periodReadyAvg, 2)?></strong></span>
+        <span class="stat-pay-show"<?= $periodReadyAmt > 0.009 ? '' : ' style="display:none"' ?>>Avg daily / stat total <strong class="stat-grand-total">$<?=number_format($periodReadyAmt, 2)?></strong> · mean ADW <strong class="stat-grand-avg">$<?=number_format($periodReadyAvg, 2)?></strong></span>
       </div>
       <button class="btn btn-success btn-lg mt-2" name="post_period_all" value="1" id="statPostPeriodBtn">Approve &amp; post ticked only</button>
     </form>
@@ -630,7 +630,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
 <?php if($preview):?>
 <div class="stat-total-bar stat-single-bar mb-2">
   <span>Eligible <strong><?=$singleReadyN?></strong> · list total <strong>$<?=number_format($singleReadyAmt, 2)?></strong> · avg <strong>$<?=number_format($singleReadyAvg, 2)?></strong></span>
-  <span>Ticked <strong class="stat-single-n">0</strong> · Stat pay <strong class="stat-single-total">$0.00</strong> · avg <strong class="stat-single-avg">$0.00</strong></span>
+  <span class="stat-pay-show" style="display:none">Ticked <strong class="stat-single-n">0</strong> · Stat pay <strong class="stat-single-total">$0.00</strong> · avg <strong class="stat-single-avg">$0.00</strong></span>
 </div>
 <div class="mb-2">
   <label class="stat-group-toggle"><input type="checkbox" class="stat-group-by-site" checked onchange="statSetGroupBySite(this.checked)"> Group by site</label>
@@ -652,10 +652,10 @@ foreach ($sg as $sid => $g):
 ?>
 <tr class="stat-site-head" data-site="<?= (int)$sid ?>">
   <td><input type="checkbox" class="stat-site-tick" data-site="<?= (int)$sid ?>" onclick="event.stopPropagation(); statTickSite(this);"></td>
-  <td colspan="11"><button type="button" class="stat-site-toggle" data-site="<?= (int)$sid ?>" onclick="event.stopPropagation(); statToggleSite(this);">▾</button> <?=htmlspecialchars($g['name'])?> · <?=$g['n']?> people · <span class="stat-site-total">$<?=number_format($g['amt'], 2)?></span> · avg <span class="stat-site-avg">$<?=number_format($g['n']>0?$g['amt']/$g['n']:0, 2)?></span></td>
+  <td colspan="11"><button type="button" class="stat-site-toggle" data-site="<?= (int)$sid ?>" onclick="event.stopPropagation(); statToggleSite(this);">▾</button> <?=htmlspecialchars($g['name'])?> · <?=$g['n']?> people <span class="stat-pay-show"<?= $g['amt'] > 0.009 ? '' : ' style="display:none"' ?>> · <span class="stat-site-total">$<?=number_format($g['amt'], 2)?></span> · avg <span class="stat-site-avg">$<?=number_format($g['n']>0?$g['amt']/$g['n']:0, 2)?></span></span></td>
 </tr>
 <?php foreach ($g['rows'] as $r): ?>
-<tr class="stat-emp-row <?=$r['posted_id']?'posted':($r['worked_holiday']?'worked':'')?>" data-site="<?= (int)$sid ?>" data-stat-amt="<?=htmlspecialchars(number_format((float)$r['amount'], 2, '.', ''))?>" data-stat-ready="<?= empty($r['posted_id']) ? '1' : '0' ?>"><td><?php if(!$r['posted_id']):?><input type="checkbox" name="items[]" value="<?=$r['id'].':'.$r['SId']?>"><?php else:?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status'])):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php endif;?></td><td><?=htmlspecialchars($r['nick_name'].' ['.$r['province'].']')?></td><td><?=htmlspecialchars($r['Name'])?></td><td><?=$r['lookback_from']?> – <?=$r['lookback_to']?></td><td>$<?=number_format($r['base'],2)?><br><small>Regular $<?=number_format($r['regular_wages'],2)?> · Vac $<?=number_format($r['vacation_pay'],2)?></small></td><td><?=htmlspecialchars($r['formula'])?></td><td><strong>$<?=number_format($r['amount'],2)?></strong></td><td><?=number_format($r['equiv_hours'],2)?>h</td><td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td><td><?= ((float)($r['worked_pay'] ?? 0) > 0) ? '$'.number_format((float)$r['worked_pay'], 2) : '—' ?></td><td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td><td><?=!empty($r['start_date'])?'Service since '.htmlspecialchars($r['start_date']):'Recent finalized earnings used';?><?php if($r['worked_holiday']):?><br><strong class="text-danger">Worked holiday: premium pay must be reviewed separately.</strong><?php endif;?></td></tr>
+<tr class="stat-emp-row <?=$r['posted_id']?'posted':($r['worked_holiday']?'worked':'')?>" data-site="<?= (int)$sid ?>" data-stat-amt="<?=htmlspecialchars(number_format((float)$r['amount'], 2, '.', ''))?>" data-stat-ready="<?= empty($r['posted_id']) ? '1' : '0' ?>"><td><?php if(!$r['posted_id']):?><input type="checkbox" name="items[]" value="<?=$r['id'].':'.$r['SId']?>"><?php else:?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status']) && (float)$r['amount'] > 0.009):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php endif;?></td><td><?=htmlspecialchars($r['nick_name'].' ['.$r['province'].']')?></td><td><?=htmlspecialchars($r['Name'])?></td><td><?=$r['lookback_from']?> – <?=$r['lookback_to']?></td><td>$<?=number_format($r['base'],2)?><br><small>Regular $<?=number_format($r['regular_wages'],2)?> · Vac $<?=number_format($r['vacation_pay'],2)?></small></td><td><?=htmlspecialchars($r['formula'])?></td><td><?php if ((float)$r['amount'] > 0.009): ?><strong>$<?=number_format($r['amount'],2)?></strong><?php endif; ?></td><td><?=number_format($r['equiv_hours'],2)?>h</td><td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td><td><?= ((float)($r['worked_pay'] ?? 0) > 0) ? '$'.number_format((float)$r['worked_pay'], 2) : '—' ?></td><td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td><td><?=!empty($r['start_date'])?'Service since '.htmlspecialchars($r['start_date']):'Recent finalized earnings used';?><?php if($r['worked_holiday']):?><br><strong class="text-danger">Worked holiday: premium pay must be reviewed separately.</strong><?php endif;?></td></tr>
 <?php endforeach; endforeach; ?>
 <?php if(!$preview):?><tr><td colspan="12" class="text-center text-muted p-4">No eligible employees with scoped recent earnings for <?=htmlspecialchars(implode('/', $holidayProvinces))?> on this date.</td></tr><?php endif;?></tbody>
 <?php if($preview):?><tfoot><tr class="stat-total-foot"><td colspan="6">Total ticked / avg daily</td><td><span class="stat-single-total">$0.00</span><div class="tiny-avg">avg <span class="stat-single-avg">$0.00</span></div></td><td colspan="4"></td></tr></tfoot><?php endif;?>
@@ -663,13 +663,17 @@ foreach ($sg as $sid => $g):
 <?php if($preview):?>
 <div class="stat-total-bar stat-single-bar mb-2">
   <span>Eligible <strong><?=$singleReadyN?></strong> · list total <strong>$<?=number_format($singleReadyAmt, 2)?></strong> · avg <strong>$<?=number_format($singleReadyAvg, 2)?></strong></span>
-  <span>Ticked <strong class="stat-single-n">0</strong> · Stat pay <strong class="stat-single-total">$0.00</strong> · avg <strong class="stat-single-avg">$0.00</strong></span>
+  <span class="stat-pay-show" style="display:none">Ticked <strong class="stat-single-n">0</strong> · Stat pay <strong class="stat-single-total">$0.00</strong> · avg <strong class="stat-single-avg">$0.00</strong></span>
 </div>
 <?php endif;?>
 <button class="btn btn-success" name="post_selected" value="1" onclick="return confirm('Post selected statutory pay lines to finalized payroll?')">Approve &amp; post selected</button> <span class="small-note">Leave someone unticked to exclude them.</span>
 </form></div>
 <script>
 function statMoney(n){ return '$' + (Math.round(n * 100) / 100).toFixed(2); }
+function statReveal(el, n){
+  var box = el && el.closest ? el.closest('.stat-pay-show') : null;
+  if (box) box.style.display = n > 0.009 ? '' : 'none';
+}
 function statAvg(sum, n){ return n > 0 ? statMoney(sum / n) : '$0.00'; }
 function statRefreshTotals(){
   var grand = 0, gn = 0;
@@ -682,10 +686,10 @@ function statRefreshTotals(){
     });
     var wrap = tbl.previousElementSibling;
     if (wrap) {
-      wrap.querySelectorAll('.stat-hol-total').forEach(function(el){ el.textContent = statMoney(sum); });
+      wrap.querySelectorAll('.stat-hol-total').forEach(function(el){ el.textContent = statMoney(sum); statReveal(el, sum); });
       wrap.querySelectorAll('.stat-hol-avg').forEach(function(el){ el.textContent = statAvg(sum, n); });
     }
-    tbl.querySelectorAll('.stat-hol-total').forEach(function(el){ el.textContent = statMoney(sum); });
+    tbl.querySelectorAll('.stat-hol-total').forEach(function(el){ el.textContent = statMoney(sum); statReveal(el, sum); });
     tbl.querySelectorAll('.stat-hol-avg').forEach(function(el){ el.textContent = statAvg(sum, n); });
     tbl.querySelectorAll('.stat-site-head').forEach(function(head){
       var sid = head.getAttribute('data-site');
@@ -695,12 +699,12 @@ function statRefreshTotals(){
         var amt = parseFloat(tr.getAttribute('data-stat-amt') || '0');
         if (cb && cb.checked) { sSum += amt; sN++; }
       });
-      head.querySelectorAll('.stat-site-total').forEach(function(el){ el.textContent = statMoney(sSum); });
+      head.querySelectorAll('.stat-site-total').forEach(function(el){ el.textContent = statMoney(sSum); statReveal(el, sSum); });
       head.querySelectorAll('.stat-site-avg').forEach(function(el){ el.textContent = statAvg(sSum, sN); });
     });
     grand += sum; gn += n;
   });
-  document.querySelectorAll('.stat-grand-total').forEach(function(el){ el.textContent = statMoney(grand); });
+  document.querySelectorAll('.stat-grand-total').forEach(function(el){ el.textContent = statMoney(grand); statReveal(el, grand); });
   document.querySelectorAll('.stat-grand-avg').forEach(function(el){ el.textContent = statAvg(grand, gn); });
   document.querySelectorAll('.stat-grand-n').forEach(function(el){ el.textContent = String(gn); });
   var sSum = 0, sN = 0;
@@ -718,11 +722,11 @@ function statRefreshTotals(){
         var amt = parseFloat(tr.getAttribute('data-stat-amt') || '0');
         siteSum += amt; siteN++;
       });
-      head.querySelectorAll('.stat-site-total').forEach(function(el){ el.textContent = statMoney(siteSum); });
+      head.querySelectorAll('.stat-site-total').forEach(function(el){ el.textContent = statMoney(siteSum); statReveal(el, siteSum); });
       head.querySelectorAll('.stat-site-avg').forEach(function(el){ el.textContent = statAvg(siteSum, siteN); });
     });
   }
-  document.querySelectorAll('.stat-single-total').forEach(function(el){ el.textContent = statMoney(sSum); });
+  document.querySelectorAll('.stat-single-total').forEach(function(el){ el.textContent = statMoney(sSum); statReveal(el, sSum); });
   document.querySelectorAll('.stat-single-avg').forEach(function(el){ el.textContent = statAvg(sSum, sN); });
   document.querySelectorAll('.stat-single-n').forEach(function(el){ el.textContent = String(sN); });
 }
