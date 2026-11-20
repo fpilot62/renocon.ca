@@ -24,6 +24,7 @@
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
@@ -232,7 +233,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'execu
                     $writeFin($s, $work_date, $pp_end, 'Travel / Transit Segment',
                         ['reg'=>0,'ot'=>0,'travel'=>$total_hours,'bal'=>0,'reg_pay'=>0,'pay_type'=>'Travel','category'=>'Travel'], $rate, $g);
                 }
+                $aaBefore = aa_snapshot($pdo, (int)$sid);
                 $closeShift->execute([$sid]);
+                aa_log($pdo, 'finalize', (int)$sid, $aaBefore, null, 'Bulk allocation desk');
                 continue; // travel shift fully handled
             }
 
@@ -276,7 +279,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'execu
                 }
             }
 
+            $aaBefore = aa_snapshot($pdo, (int)$sid);
             $closeShift->execute([$sid]);
+            aa_log($pdo, 'finalize', (int)$sid, $aaBefore, null, 'Bulk allocation desk');
             $period_refresh[(int)$s['user_id'] . '|' . (int)$s['site_id'] . '|' . $work_date] = [
                 (int)$s['user_id'], (int)$s['site_id'], $work_date
             ];

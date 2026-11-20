@@ -4,6 +4,8 @@
  * Live only. Do not copy this file into GitHub.
  */
 
+require_once __DIR__ . '/attendance_audit_lib.php';
+
 function aalh_h($v): string
 {
     return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
@@ -1134,6 +1136,7 @@ function aalh_import_rows(PDO $pdo, int $orgId, int $siteId, array $rows, int $b
             $flagText !== '' ? $flagText : null,
         ]);
         $aid = (int)$pdo->lastInsertId();
+        aa_log($pdo, 'create', $aid, null, null, 'AA labor hours import');
         $ids[] = $aid;
         $link->execute([$batchId, $aid]);
         foreach (aalh_break_windows($r['clock_in'], $r['clock_out'], (int)$r['breaks']) as $w) {
@@ -1226,8 +1229,12 @@ function aalh_undo_batch(PDO $pdo, int $batchId, int $aaOrg, int $byUserId): arr
             $skippedPaid++;
             continue;
         }
+        $aaBefore = aa_snapshot($pdo, (int)$aid);
         $delBrk->execute([$aid]);
         $delAtt->execute([$aid, $aaOrg]);
+        if ($delAtt->rowCount() > 0) {
+            aa_log($pdo, 'delete', (int)$aid, $aaBefore, null, 'AA labor hours undo');
+        }
         if ($delAtt->rowCount() > 0) {
             $deleted++;
         }

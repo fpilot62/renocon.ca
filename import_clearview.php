@@ -1,13 +1,17 @@
 <?php
 /** Path: /import_clearview_all.php */
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 
 try {
     $pdo->beginTransaction();
 
     // 1. CLEAR EXISTING FEBRUARY DATA
     // Clears raw attendance and finalized payroll for Feb 2026
+    $aaIds = aa_ids_where($pdo, "clock_in BETWEEN '2026-02-01 00:00:00' AND '2026-02-28 23:59:59'", []);
+    $aaBefore = aa_befores($pdo, $aaIds);
     $pdo->query("DELETE FROM attendance WHERE clock_in BETWEEN '2026-02-01 00:00:00' AND '2026-02-28 23:59:59'");
+    aa_log_ids($pdo, 'delete', $aaIds, $aaBefore, 'Clearview February replace');
     $pdo->query("DELETE FROM payroll_finalized WHERE work_date BETWEEN '2026-02-01' AND '2026-02-28'");
     
     $file = 'payroll_feb.csv'; // Ensure your Clearview export is named this
@@ -60,6 +64,7 @@ try {
                 $clock_in, 
                 $clock_out
             ]);
+            aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Clearview import');
             $rowCount++;
         }
     }

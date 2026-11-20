@@ -1,5 +1,6 @@
 <?php
 /** Path: /engine/transfer_engine.php */
+require_once __DIR__ . '/attendance_audit_lib.php';
 
 if (isset($_POST['action'])) {
     $action = $_POST['action']; // 'transfer_out' or 'transfer_in'
@@ -15,7 +16,10 @@ if (isset($_POST['action'])) {
                 lng_out = ?, 
                 transfer_status = 'out' 
                 WHERE user_id = ? AND clock_out IS NULL";
+        $aaIds = aa_ids_where($pdo, 'user_id = ? AND clock_out IS NULL', [$user_id]);
+        $aaBefore = aa_befores($pdo, $aaIds);
         $pdo->prepare($sql)->execute([$now, $_POST['selfie'], $_POST['lat'], $_POST['lng'], $user_id]);
+        aa_log_ids($pdo, 'update', $aaIds, $aaBefore, 'Transfer out');
         echo json_encode(['status' => 'In Transit']);
     } 
 
@@ -29,6 +33,7 @@ if (isset($_POST['action'])) {
         $sql = "INSERT INTO attendance (user_id, site_id, org_id, clock_in, selfie_in, lat_in, lng_in, transfer_status) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')";
         $pdo->prepare($sql)->execute([$user_id, $_POST['site_id'], $_SESSION['org_id'], $now, $_POST['selfie'], $_POST['lat'], $_POST['lng']]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'Transfer in');
         
         echo json_encode(['status' => 'Arrived at Site B']);
     }

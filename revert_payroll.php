@@ -2,6 +2,7 @@
 /** Path: /revert_payroll.php */
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 
 header('Content-Type: application/json');
 
@@ -27,8 +28,10 @@ try {
 
     // 2. THE CRITICAL UPDATE: Reset both finalized and payout flags
     // This moves it back to "Audit" and marks it as "Unpaid"
+    $aaBefore = aa_snapshot($pdo, (int)$attendance_id);
     $upd = $pdo->prepare("UPDATE attendance SET is_finalized = 0, payout_status = 0 WHERE id = ?");
     $upd->execute([$attendance_id]);
+    aa_log($pdo, 'unfinalize', (int)$attendance_id, $aaBefore, null, 'Revert payroll');
 
     // 3. Remove the finalized entry
     $del = $pdo->prepare("DELETE FROM payroll_finalized WHERE id = ?");

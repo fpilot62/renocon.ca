@@ -5,7 +5,8 @@ ini_set('display_errors', 0);
 header('Content-Type: application/json');
 
 // 2. Load your standard database file
-require_once 'db.php'; 
+require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php'; 
 
 // 3. Define the Distance Function
 function getDistance($lat1, $lon1, $lat2, $lon2) {
@@ -72,6 +73,7 @@ $userLng = $_REQUEST['lng_in'] ?? $_REQUEST['lng_out'] ?? $_REQUEST['start_lng']
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1')";
         $insert = $pdo->prepare($sql);
         $insert->execute([$org_id, $site_id, $reason, $is_flagged, $user_id, $currentTime, $userLat, $userLng]);
+        aa_log($pdo, 'create', (int)$pdo->lastInsertId(), null, null, 'App punch clock in');
         
         echo json_encode(["status" => "success", "message" => "Clock In Processed Successfully"]);
     } 
@@ -112,6 +114,10 @@ $userLng = $_REQUEST['lng_in'] ?? $_REQUEST['lng_out'] ?? $_REQUEST['start_lng']
     }
    else if ($action == "4") { // CLOCK OUT
     // We update the row where clock_out is empty for this user
+    $aaOpen = $pdo->prepare("SELECT id FROM attendance WHERE user_id = ? AND (clock_out IS NULL OR clock_out = '') ORDER BY id DESC LIMIT 1");
+    $aaOpen->execute([$user_id]);
+    $aaId = (int)$aaOpen->fetchColumn();
+    $aaBefore = aa_snapshot($pdo, $aaId);
     $sql = "UPDATE attendance 
             SET clock_out = ?, lat_out = ?, lng_out = ?, is_flagged = IF(?='1', 1, is_flagged)
             WHERE user_id = ? AND (clock_out IS NULL OR clock_out = '') 
@@ -120,6 +126,7 @@ $userLng = $_REQUEST['lng_in'] ?? $_REQUEST['lng_out'] ?? $_REQUEST['start_lng']
     $update = $pdo->prepare($sql);
     // Use $userLat and $userLng (the Universal Check variables from line 44/45)
     $update->execute([$currentTime, $userLat, $userLng, $is_flagged, $user_id]);
+    aa_log($pdo, 'update', $aaId, $aaBefore, null, 'App punch clock out');
 
     $payload = ["status" => "success", "message" => "Clock Out Processed Successfully"];
     if (is_file(__DIR__ . '/engine/break_waiver_lib.php')) {

@@ -317,12 +317,15 @@ function att_undo_finalized_shifts(PDO $pdo, array $ids, int $userLevel, int $se
             $skipped[] = 'Shift ' . $id . ' has a recorded payment and was left finalized.';
             continue;
         }
+        require_once __DIR__ . '/attendance_audit_lib.php';
+        $undoBefore = aa_snapshot($pdo, $id);
         $pdo->beginTransaction();
         try {
             $pdo->prepare(att_undo_attendance_sql())->execute([$id]);
             $pdo->prepare(att_undo_finalized_sql())->execute([$id]);
             $pdo->prepare(att_undo_balance_sql())->execute([$id]);
             $pdo->commit();
+            aa_log($pdo, 'unfinalize', $id, $undoBefore, null, 'Sent back from finalized');
             $done++;
         } catch (Throwable $e) {
             if ($pdo->inTransaction()) {

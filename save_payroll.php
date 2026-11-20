@@ -2,6 +2,7 @@
 /** Path: /save_payroll.php */
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/payroll_engine/stat_holidays.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
@@ -124,7 +125,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         // Update attendance status so it disappears from the audit list
+        $aaBefore = aa_snapshot($pdo, (int)$attendance_id);
         $pdo->prepare("UPDATE attendance SET payout_status = 1 WHERE id = ?")->execute([$attendance_id]);
+        aa_log($pdo, 'finalize', (int)$attendance_id, $aaBefore, null, 'Save payroll');
         sh_after_finalize($pdo, (int)$orig['user_id'], (int)$orig['site_id'], $as_of, (int)($_SESSION['user_id'] ?? 0));
         
         $pdo->commit();

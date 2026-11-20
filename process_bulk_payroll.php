@@ -11,6 +11,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['org_id'])) {
 }
 
 require_once "db.php";
+require_once __DIR__ . '/engine/attendance_audit_lib.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
     require_once __DIR__ . '/break_waiver_finalize_guard.php';
@@ -87,8 +88,10 @@ try {
                 $bal_hours = $total_calculated_hours - $hourly_cap;
 
                 // UPDATE 2: Explicitly updates targeted fields in attendance
+                $aaBefore = aa_snapshot($pdo, (int)$id);
                 $pdo->prepare("UPDATE attendance SET approved_hours = ?, hourly_rate = ?, payout_status = 1, status = 'Finalized', flag_reason = 'Core Split Line' WHERE id = ?")
                     ->execute([$reg_hours, $base_rate, $id]);
+                aa_log($pdo, 'finalize', (int)$id, $aaBefore, null, 'Bulk payroll split');
 
                 if ($allocation_type === 'StandardBalance' || $allocation_type === 'PeriodSplit') {
                     // INSERT 3A: Pushes excess to the generic balance repository
@@ -105,8 +108,10 @@ try {
                 }
             } else {
                 // FALLBACK: Finalizes timesheet cleanly if under the selected cap limit boundary
+                $aaBefore = aa_snapshot($pdo, (int)$id);
                 $pdo->prepare("UPDATE attendance SET approved_hours = ?, hourly_rate = ?, payout_status = 1, status = 'Finalized' WHERE id = ?")
                     ->execute([$total_calculated_hours, $base_rate, $id]);
+                aa_log($pdo, 'finalize', (int)$id, $aaBefore, null, 'Bulk payroll');
             }
         }
     }
