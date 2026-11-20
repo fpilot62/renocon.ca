@@ -82,6 +82,17 @@ else
     || bad 'a missing engine file was not reported as MISSING'
 fi
 
+grep -q 'payroll_finalized.status:' "$ROOT/ops/deploy_stat_approval_v1.sh" \
+  && ok 'check reports the live status column' \
+  || bad 'check does not report the status column'
+grep -q 'MIGRATION FAILED. Restoring the database' "$ROOT/ops/deploy_stat_approval_v1.sh" \
+  && ok 'a failed migration restores the database backup' \
+  || bad 'a failed migration does not restore the database'
+grep -q "stat_approval_status = 'pending'" "$ROOT/migrations/20261121_stat_approval.sql" \
+  && ! grep -q "status = 'needs approval'" "$ROOT/migrations/20261121_stat_approval.sql" \
+  && ok 'the migration does not write the status column' \
+  || bad 'the migration still writes status'
+
 if [[ $fail -gt 0 ]]; then
   echo "$fail failed"
   exit 1

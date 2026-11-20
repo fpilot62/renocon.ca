@@ -151,12 +151,26 @@ function refresh_master_status(PDO $pdo, int $master_id): void {
     $pdo->prepare("UPDATE payroll_masters SET status = ? WHERE id = ?")->execute([$status, $master_id]);
 }
 /** Apply one payment to a finalized line (and its mirror balance row + master + payment log). */
+function ledger1_has_stat_approval(PDO $pdo): bool {
+    static $has = null;
+    if ($has !== null) { return $has; }
+    try {
+        $c = $pdo->query("SHOW COLUMNS FROM payroll_finalized LIKE 'stat_approval_status'");
+        $has = (bool)($c && $c->fetch(PDO::FETCH_ASSOC));
+    } catch (Throwable $e) {
+        $has = false;
+    }
+    return $has;
+}
 function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, int $org_id): float {
+    $approvalSelect = ledger1_has_stat_approval($pdo)
+        ? "COALESCE(stat_approval_status,'') AS stat_approval_status"
+        : "'' AS stat_approval_status";
     // full line with stored columns
     $q = $pdo->prepare(
         "SELECT id AS line_id, attendance_id, user_id, site_id, payroll_id, work_date,
                 pay_period, pay_period_end, total_gross, paid_amount AS db_paid_amount,
-                status AS line_status,
+                status AS line_status, {$approvalSelect},
                 cpp AS ee_cpp, ei AS ee_ei, income_tax AS ee_tax,
                 cpp_er AS er_cpp, ei_er AS er_ei, wcb AS er_wcb, vac AS er_vac
          FROM payroll_finalized WHERE id = ? LIMIT 1"
@@ -164,7 +178,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
-    if (strcasecmp((string)($line['line_status'] ?? ''), 'needs approval') === 0) { return 0.0; }
+    if (strcasecmp((string)($line['stat_approval_status'] ?? ''), 'pending') === 0) { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -311,7 +325,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
     if ($uid > 0) {
         try {
             $pdo->beginTransaction();
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "COALESCE(f.status,'') <> 'needs approval'"];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?"];
+            if (ledger1_has_stat_approval($pdo)) { $w[] = "COALESCE(f.stat_approval_status,'') <> 'pending'"; }
             $p = [$uid, $pstart, $pend];
             if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f WHERE " . implode(" AND ", $w) . " ORDER BY f.work_date ASC");
@@ -346,6 +361,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
                 f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross, f.status AS line_status,
+                " . (ledger1_has_stat_approval($pdo) ? "COALESCE(f.stat_approval_status,'') AS stat_approval_status" : "'' AS stat_approval_status") . ",
                 f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -356,7 +372,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q->execute($ids);
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
     $lines = array_values(array_filter($lines, static function ($r) {
-        return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+        return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
     }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];

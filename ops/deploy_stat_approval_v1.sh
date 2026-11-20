@@ -7,8 +7,9 @@
 #   bash deploy_stat_approval_v1.sh rollback <ts>
 #
 # Dry-run (also printed by go, before anything is changed):
-#   unpaid statutory lines that will become 'needs approval'
+#   unpaid statutory lines that will wait for approval
 #   already-paid statutory lines that are left paid
+# Approval is a separate column. payroll_finalized.status is not rewritten.
 # The review table from the undeployed holiday-review change is not used.
 # Approval columns on payroll_finalized are the schema this install needs.
 # ops/t4127_stat_backfill.php is not a web page. deploy_stat_backfill_v1.sh
@@ -25,19 +26,19 @@ DB=${PAYROLL_DB:-admin_payroll}
 STAGE=${T4127_STAGE:-/root/t4127-stage}
 OWN=${PAYROLL_OWN:-renocon:renocon}
 REPO=${T4127_REPO:-}
-PINNED=3901ad2b81dc356f818b0a03e8575bb400c7b87f
+PINNED=e295ecd13ca7423fabc04dea19d83e247fee5370
 STAT=4d4c6549b57d9fa2cf548f18fce2ff1fb910247b
 LEDGER2=6c4b8fae0abe38ad43796347e408bd10b388ee89
 LEDGER3=2e332ec705943bd9f9c998a1f10d3feb81e91295
 RAW=${T4127_RAW:-https://raw.githubusercontent.com/fpilot62/renocon.ca/$PINNED}
-MAN='payroll_engine/stat_holidays.php 8aac92a6bc02130a08de81e2c067ff7e,598937bab88de36fb7d8d73ad16769ad,ac15130bce7281657f41650a6a67620c 7ac1cb14961182ae397a4044200b1d15
-payroll_master_ledger.php d97a3af30d0c1879c6482c560defe330,0364d96da0960959067ae54df40e9f86,8a742c2b07ffd45caaab17e129990611,1d1377f76a1baa4fa189f5c26b23f110,b1c676d66118298acb4f4bc02516c4ed,cd047535101b385e165ff12b91d3fa82,602706a4729b27a050362f8cb2e20be6 92a45eeb6e7a97ce69091a03bdc0c643
-payroll_master_ledger1.php 23d06f90bf727fdb5ff4a3ed5d27bfea,8163a859e9d5e46ca179ff9a33db8790,614e8a3895693d1c08ecc69e0371b1f6,0688677ee41046e0a5cb2055b6c69f3f,742e3cd8369734bdb58c9ef83ef3b87f 298757d67946f5e7a6178f346206d699
-generate_stat_shifts.php 3385210d69e3e1a99f14dd2fab0b9bee,45258fe978ae9b0a403b68bab27bb680,b8c5122dae4f7ceed8e98f53c1cf1143 9937224cc569b2875c24bd1c48c05b46
-generate_pay_documents.php 88f43817563e848678a5544a1051f1b1,e0871e140bf263197cee45dd48425836 0f8281d8e4737fb4336f0ba6265655eb
+MAN='payroll_engine/stat_holidays.php 7ac1cb14961182ae397a4044200b1d15,8aac92a6bc02130a08de81e2c067ff7e,598937bab88de36fb7d8d73ad16769ad,ac15130bce7281657f41650a6a67620c f59f69597dfd1163a240a3e5d8c21e9c
+payroll_master_ledger.php 92a45eeb6e7a97ce69091a03bdc0c643,d97a3af30d0c1879c6482c560defe330,0364d96da0960959067ae54df40e9f86,8a742c2b07ffd45caaab17e129990611,1d1377f76a1baa4fa189f5c26b23f110,b1c676d66118298acb4f4bc02516c4ed,cd047535101b385e165ff12b91d3fa82,602706a4729b27a050362f8cb2e20be6 9f87c79b7d8cf863a4bf56dac246c88f
+payroll_master_ledger1.php 298757d67946f5e7a6178f346206d699,23d06f90bf727fdb5ff4a3ed5d27bfea,8163a859e9d5e46ca179ff9a33db8790,614e8a3895693d1c08ecc69e0371b1f6,0688677ee41046e0a5cb2055b6c69f3f,742e3cd8369734bdb58c9ef83ef3b87f e0c538c8f20227272d0db00c87fecb56
+generate_stat_shifts.php 9937224cc569b2875c24bd1c48c05b46,3385210d69e3e1a99f14dd2fab0b9bee,45258fe978ae9b0a403b68bab27bb680,b8c5122dae4f7ceed8e98f53c1cf1143 2552eca2bc7415edd8352d3257b4c517
+generate_pay_documents.php 0f8281d8e4737fb4336f0ba6265655eb,88f43817563e848678a5544a1051f1b1,e0871e140bf263197cee45dd48425836 137d9f7ac8ec60e02883403ae0cec6c0
 ops/t4127_stat_backfill.php -,7a152d9946968c7ab4d5b2acdec0ef6a,85881f9183edd90999d43393eb7b1236 85881f9183edd90999d43393eb7b1236
-stat_holiday_review.php -,962a5f17e30d97cdadcddfb830a4dabe bb2ffd0a3b0101aeff1fff1be6d50b6f
-migrations/20261121_stat_approval.sql - a62605dba3685a1f508cc3d4a9343ed1'
+stat_holiday_review.php -,bb2ffd0a3b0101aeff1fff1be6d50b6f,962a5f17e30d97cdadcddfb830a4dabe a8c29507028637d3178a2171a053ef23
+migrations/20261121_stat_approval.sql -,a62605dba3685a1f508cc3d4a9343ed1 6389e4e7e9e29fb491174791209fb52d'
 
 if [[ ${T4127_ALLOW_NONROOT:-0} != 1 && ${EUID:-1} -ne 0 ]]; then echo "Run as root."; exit 1; fi
 md() { md5sum "$1" | cut -c1-32; }
@@ -191,9 +192,23 @@ smoke() {
     *) return 1 ;;
   esac
 }
+schema_report() {
+  echo "payroll_finalized.status:"
+  ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT CONCAT(DATA_TYPE, ' ', COLUMN_TYPE) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='payroll_finalized' AND COLUMN_NAME='status'" \
+    || echo "SCHEMA_WARN could not read payroll_finalized.status"
+  echo "approval columns already present:"
+  ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='payroll_finalized' AND COLUMN_NAME IN ('stat_calculated_amount','stat_approved_amount','stat_approved_by','stat_approved_at','stat_edited_by','stat_edit_reason','stat_flag','stat_approval_status') ORDER BY COLUMN_NAME" \
+    || echo "SCHEMA_WARN could not list approval columns"
+}
 dry_counts() {
+  local has
+  has=$(${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='payroll_finalized' AND COLUMN_NAME='stat_approval_status'" || echo 0)
   echo "Dry-run unpaid stat lines that will wait for approval:"
-  ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COUNT(*) FROM payroll_finalized WHERE category='Statutory Holiday' AND COALESCE(paid_amount,0)<=0.02 AND LOWER(COALESCE(status,'')) NOT IN ('paid','remitted','needs approval')"
+  if [[ $has == 1 ]]; then
+    ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COUNT(*) FROM payroll_finalized WHERE category='Statutory Holiday' AND COALESCE(paid_amount,0)<=0.02 AND LOWER(COALESCE(status,'')) NOT IN ('paid','remitted') AND (stat_approval_status IS NULL OR stat_approval_status='')"
+  else
+    ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COUNT(*) FROM payroll_finalized WHERE category='Statutory Holiday' AND COALESCE(paid_amount,0)<=0.02 AND LOWER(COALESCE(status,'')) NOT IN ('paid','remitted')"
+  fi
   echo "Already-paid stat lines left unchanged:"
   ${T4127_MYSQL:-mysql} -N "$DB" -e "SELECT COUNT(*) FROM payroll_finalized WHERE category='Statutory Holiday' AND (COALESCE(paid_amount,0)>0.02 OR LOWER(COALESCE(status,'')) IN ('paid','remitted'))"
 }
@@ -206,6 +221,7 @@ case "$M" in
       check_one "$rel" "$prevs" "$newMd" || bad=1
     done <<< "$MAN"
     [[ $bad -eq 0 ]]
+    schema_report
     ;;
   dry)
     dry_counts
@@ -255,7 +271,18 @@ case "$M" in
       exit 1
     fi
     if ! ${T4127_MYSQL:-mysql} "$DB" < "$APP/migrations/20261121_stat_approval.sql"; then
-      echo "migration failed, restoring files. Database restore: bash $0 rollback $TS"
+      echo "================================================================"
+      echo "MIGRATION FAILED. Restoring the database from the backup just taken."
+      echo "If that restore fails, run these two commands:"
+      echo "gzip -dc $BK/pre-stat-approval-$TS.sql.gz | ${T4127_MYSQL:-mysql} $DB"
+      echo "bash $0 rollback $TS"
+      echo "================================================================"
+      if gzip -dc "$BK/pre-stat-approval-$TS.sql.gz" | ${T4127_MYSQL:-mysql} "$DB"; then
+        echo "Database restored from pre-stat-approval-$TS.sql.gz"
+      else
+        echo "DATABASE RESTORE FAILED. Run this yourself:"
+        echo "gzip -dc $BK/pre-stat-approval-$TS.sql.gz | ${T4127_MYSQL:-mysql} $DB"
+      fi
       restore_files "$TS"
       exit 1
     fi

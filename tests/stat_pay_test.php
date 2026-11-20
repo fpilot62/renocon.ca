@@ -36,7 +36,8 @@ function fresh(): PDO {
         category TEXT, display_label TEXT, pay_type TEXT,
         reg_hours REAL, hourly_rate REAL, reg_pay REAL, total_gross REAL,
         overtime_hours REAL, vac REAL, cpp REAL, ei REAL, income_tax REAL,
-        cpp_er REAL, ei_er REAL, wcb REAL, status TEXT, finalized_by INT, comments TEXT)");
+        cpp_er REAL, ei_er REAL, wcb REAL, status TEXT, finalized_by INT, comments TEXT,
+        stat_calculated_amount REAL, stat_flag TEXT, stat_approval_status TEXT)");
     $pdo->exec('CREATE TABLE attendance (id INTEGER PRIMARY KEY, user_id INT, site_id INT, clock_in TEXT, status TEXT)');
     return $pdo;
 }
@@ -114,7 +115,8 @@ check('ON 2027 list has 9 holidays', count($onDays) === 9);
 $postedLine = sh_finalized_stat_line($sk, 5, 30, '2026-08-03');
 check('preview sees the payroll_finalized stat line', $postedLine !== null && (int)$postedLine['id'] > 0);
 check('preview uses the ledger amount', $postedLine && abs($postedLine['amount'] - 50) < 0.01);
-check('unpaid stat line needs approval', $postedLine && $postedLine['status'] === 'needs approval');
+$storedLine = $sk->query("SELECT status, stat_approval_status FROM payroll_finalized WHERE user_id=5 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
+check('unpaid stat line waits for approval and stays pending', $storedLine && $storedLine['status'] === 'pending' && $storedLine['stat_approval_status'] === 'pending');
 check('another employee is not marked posted', sh_finalized_stat_line($sk, 6, 30, '2026-08-03') === null);
 check('a regular line is not a stat post', sh_finalized_stat_line($sk, 5, 30, $sFrom) === null);
 $sk->exec('ALTER TABLE payroll_finalized ADD COLUMN paid_amount REAL DEFAULT 0');

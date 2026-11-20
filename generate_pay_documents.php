@@ -144,9 +144,17 @@ if ($is_cli) {
     } elseif ($cli_site > 0 && $cli_from && $cli_to) {
         $req_period_start = $req_period_start ?: $cli_from;
         $req_period_end   = $req_period_end ?: $cli_to;
+        $paydocsApproval = false;
+        try {
+            $approvalCol = $pdo->query("SHOW COLUMNS FROM payroll_finalized LIKE 'stat_approval_status'");
+            $paydocsApproval = (bool)($approvalCol && $approvalCol->fetch(PDO::FETCH_ASSOC));
+        } catch (Throwable $e) {
+            $paydocsApproval = false;
+        }
         $sqlCli = "SELECT f.id FROM payroll_finalized f
                    LEFT JOIN users u ON u.id = f.user_id
-                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ? AND COALESCE(f.status,'') <> 'needs approval'";
+                   WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?"
+                   . ($paydocsApproval ? " AND COALESCE(f.stat_approval_status,'') <> 'pending'" : '');
         $paramsCli = [$cli_site, $cli_from, $cli_to];
         if ($cli_name !== '') {
             $sqlCli .= " AND u.Name LIKE ?";
@@ -198,6 +206,7 @@ if (!empty($fCols['reg_pay'])) $extraFin .= ", f.reg_pay";
 if (!empty($fCols['bonus_pay'])) $extraFin .= ", f.bonus_pay";
 if (!empty($fCols['cpp2'])) $extraFin .= ", f.cpp2 AS ee_cpp2";
 if (!empty($fCols['cpp2_er'])) $extraFin .= ", f.cpp2_er AS er_cpp2";
+if (!empty($fCols['stat_approval_status'])) $extraFin .= ", COALESCE(f.stat_approval_status,'') AS stat_approval_status";
 
 $in = implode(',', array_fill(0, count($line_ids), '?'));
 $sql = "SELECT
@@ -222,7 +231,7 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($line_ids);
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $rows = array_values(array_filter($rows, static function ($r) {
-    return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+    return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
 }));
 if (empty($rows)) { die("Selected rows not found."); }
 

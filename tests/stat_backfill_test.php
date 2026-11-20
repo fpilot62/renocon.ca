@@ -44,7 +44,8 @@ function fresh(): PDO {
         reg_hours REAL, hourly_rate REAL, reg_pay REAL, total_gross REAL,
         overtime_hours REAL, vac REAL, cpp REAL, ei REAL, income_tax REAL,
         cpp_er REAL, ei_er REAL, wcb REAL, status TEXT, finalized_by INT, comments TEXT,
-        paid_amount REAL DEFAULT 0, payment_status TEXT DEFAULT '')");
+        paid_amount REAL DEFAULT 0, payment_status TEXT DEFAULT '',
+        stat_calculated_amount REAL, stat_flag TEXT, stat_approval_status TEXT)");
     $pdo->exec('CREATE TABLE attendance (id INTEGER PRIMARY KEY, user_id INT, site_id INT, clock_in TEXT, status TEXT)');
     return $pdo;
 }
@@ -101,8 +102,8 @@ $paidAfter = $pdo->query("SELECT total_gross, cpp, ei, income_tax, status, paid_
 check('apply posts the planned lines', $applied['posted'] === count($plan['rows']) && $applied['posted'] > 0);
 check('paid row is unchanged', $paidBefore === $paidAfter);
 
-$late = $pdo->query("SELECT work_date, pay_period_end, status, paid_amount, comments FROM payroll_finalized WHERE user_id=2 AND category='Statutory Holiday' AND work_date='2026-09-07'")->fetch(PDO::FETCH_ASSOC);
-check('late line keeps the holiday date and waits for approval', $late && $late['work_date'] === '2026-09-07' && $late['pay_period_end'] === '2026-10-04' && $late['status'] === 'needs approval' && (float)$late['paid_amount'] === 0.0);
+$late = $pdo->query("SELECT work_date, pay_period_end, status, stat_approval_status, paid_amount, comments FROM payroll_finalized WHERE user_id=2 AND category='Statutory Holiday' AND work_date='2026-09-07'")->fetch(PDO::FETCH_ASSOC);
+check('late line keeps the holiday date and waits for approval', $late && $late['work_date'] === '2026-09-07' && $late['pay_period_end'] === '2026-10-04' && $late['status'] === 'pending' && $late['stat_approval_status'] === 'pending' && (float)$late['paid_amount'] === 0.0);
 check('late line says the original period was paid', $late && strpos((string)$late['comments'], 'late stat, period paid') !== false);
 
 $home = $pdo->query("SELECT pay_period_end, comments FROM payroll_finalized WHERE user_id=1 AND category='Statutory Holiday' AND work_date='2026-09-07'")->fetch(PDO::FETCH_ASSOC);

@@ -65,6 +65,13 @@ $ledgerCpp2 = (function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_fi
 $ledgerCpp2Er = (function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2_er'))
     ? 'IFNULL(f.cpp2_er,0) AS er_cpp2'
     : '0 AS er_cpp2';
+$ledgerHasStatApproval = function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'stat_approval_status');
+$ledgerApprovalSelect = $ledgerHasStatApproval
+    ? "COALESCE(f.stat_approval_status,'') AS stat_approval_status"
+    : "'' AS stat_approval_status";
+$ledgerApprovalExclude = $ledgerHasStatApproval
+    ? "COALESCE(f.stat_approval_status,'') <> 'pending'"
+    : '1=1';
 
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
 
@@ -167,12 +174,12 @@ function refresh_master_status(PDO $pdo, int $master_id): void {
 }
 /** Apply one payment to a finalized line (and its mirror balance row + master + payment log). */
 function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, int $org_id): float {
-    global $ledgerCpp2, $ledgerCpp2Er;
+    global $ledgerCpp2, $ledgerCpp2Er, $ledgerApprovalSelect;
     // full line with stored columns
     $q = $pdo->prepare(
         "SELECT f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id, f.work_date,
                 f.pay_period, f.pay_period_end, f.total_gross, f.paid_amount AS db_paid_amount,
-                f.status AS line_status,
+                f.status AS line_status, {$ledgerApprovalSelect},
                 f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -183,7 +190,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$org_id, $line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
-    if (strcasecmp((string)($line['line_status'] ?? ''), 'needs approval') === 0) { return 0.0; }
+    if (strcasecmp((string)($line['stat_approval_status'] ?? ''), 'pending') === 0) { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -381,7 +388,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
         try {
             $pdo->beginTransaction();
             ps_assert_user($pdo, $uid, $user_org_id);
-            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", "COALESCE(f.status,'') <> 'needs approval'"];
+            $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?", "u.org_id = ?", "s.org_id = u.org_id", $ledgerApprovalExclude];
             $p = [$uid, $pstart, $pend, $user_org_id];
             if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f
@@ -418,7 +425,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $in  = implode(',', array_fill(0, count($ids), '?'));
     $q = $pdo->prepare(
         "SELECT f.id, f.user_id, u.Name AS employee_name, s.nick_name AS site_name,
-                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross, f.status AS line_status,
+                f.work_date, f.pay_period_end, f.last_paid_date, f.total_gross, f.status AS line_status, {$ledgerApprovalSelect},
                 f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
                 f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac
          FROM payroll_finalized f
@@ -430,7 +437,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
     if (count($lines) !== count($ids)) { http_response_code(403); exit('One or more export rows are outside your organization.'); }
     $lines = array_values(array_filter($lines, static function ($r) {
-        return strcasecmp((string)($r['line_status'] ?? ''), 'needs approval') !== 0;
+        return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
     }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];
@@ -514,7 +521,7 @@ foreach (['payment_method', 'bank_name', 'bank_institution', 'bank_transit', 'ba
 $sql = "SELECT
             f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id,
             u.Name AS employee_name, s.nick_name AS site_name $payExtra,
-            f.status AS row_lifecycle, f.status AS line_status, f.payment_status, f.paid_amount AS db_paid_amount,
+            f.status AS row_lifecycle, f.status AS line_status, {$ledgerApprovalSelect}, f.payment_status, f.paid_amount AS db_paid_amount,
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate, f.total_gross,
             f.cpp AS ee_cpp, {$ledgerCpp2}, f.ei AS ee_ei, f.income_tax AS ee_tax,
             f.cpp_er AS er_cpp, {$ledgerCpp2Er}, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
@@ -545,7 +552,7 @@ foreach ($raw as $r) {
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
-    $needsApproval = strcasecmp((string)($r['row_lifecycle'] ?? ''), 'needs approval') === 0;
+    $needsApproval = strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') === 0;
     $payRemaining = $needsApproval ? 0.0 : $remaining;
     $r['_needs_approval'] = $needsApproval;
     $r['_ee']        = ee_deduct($r);
@@ -659,7 +666,7 @@ if (function_exists('pe_read_period_stats') && $from_date && $to_date) {
 // sort sites by name, employees within each by name
 $pendingStatApproval = 0;
 foreach ($raw as $pendingRow) {
-    if (strcasecmp((string)($pendingRow['row_lifecycle'] ?? ''), 'needs approval') === 0) {
+    if (strcasecmp((string)($pendingRow['stat_approval_status'] ?? ''), 'pending') === 0) {
         $pendingStatApproval++;
     }
 }
