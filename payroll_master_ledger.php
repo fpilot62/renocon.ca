@@ -929,7 +929,7 @@ function ledgerOnOrgChange(sel){
         if (function_exists('sh_review_banner_html')) { echo sh_review_banner_html($pdo, (int)$user_org_id, $from_date, $to_date); }
         ?>
         <?php if (!empty($pendingStatApproval)): ?>
-        <div class="alert alert-warning font-weight-bold"><?= (int)$pendingStatApproval ?> stat holiday lines need approval before they can be paid. <a href="stat_holiday_review.php?org_id=<?= (int)$user_org_id ?>&from_date=<?= urlencode($from_date) ?>&to_date=<?= urlencode($to_date) ?>">Open the approval list</a></div>
+        <div class="alert alert-warning font-weight-bold"><?= (int)$pendingStatApproval ?> stat holiday lines need approval before they can be paid. <a href="generate_stat_shifts.php?org_id=<?= (int)$user_org_id ?>&from_date=<?= urlencode($from_date) ?>&to_date=<?= urlencode($to_date) ?>&preview_period=1">Open Stat Holiday Pay</a></div>
         <?php endif; ?>
         <?php if (ledger_stat_visible((float)$stat_summary['stat_total'])): ?>
         <div class="mb-2 font-weight-bold" style="color:#854d0e;">
