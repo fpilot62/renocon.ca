@@ -487,7 +487,7 @@ if (!function_exists('sh_finalized_stat_line')) {
 }
 
 if (!function_exists('sh_post_stat_line')) {
-    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0): bool {
+    function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0, ?string $payPeriodEnd = null, string $commentNote = ''): bool {
         if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {
             return false;
         }
@@ -521,6 +521,10 @@ if (!function_exists('sh_post_stat_line')) {
             $hours = round($calc['amount'] / $rate, 2);
         }
         $comment = 'Stat pay ' . $province . ': ' . $calc['formula'] . '; ' . $calc['from'] . ' to ' . $calc['to'] . '.';
+        if ($commentNote !== '') {
+            $comment .= ' ' . $commentNote;
+        }
+        $periodEnd = ($payPeriodEnd !== null && preg_match('/^\d{4}-\d{2}-\d{2}$/', $payPeriodEnd)) ? $payPeriodEnd : $holidayDate;
         $ins = $pdo->prepare(
             "INSERT INTO payroll_finalized
                 (user_id, org_id, site_id, work_date, pay_period_end, category, display_label, pay_type,
@@ -529,7 +533,7 @@ if (!function_exists('sh_post_stat_line')) {
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)"
         );
         $ins->execute([
-            $userId, $orgId, $siteId, $holidayDate, $holidayDate, 'Statutory Holiday',
+            $userId, $orgId, $siteId, $holidayDate, $periodEnd, 'Statutory Holiday',
             $holidayName . ' — Statutory Holiday Pay', 'Statutory',
             $hours, $rate, $calc['amount'], $calc['amount'],
             (float)($ded['cpp'] ?? 0), (float)($ded['ei'] ?? 0), (float)($ded['income_tax'] ?? 0),

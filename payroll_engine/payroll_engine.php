@@ -534,13 +534,17 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
     $anchor = pe_period_anchor_for_org($pdo, $org_id);
     [$start, $end] = pe_period_window($work_date, $mode, $anchor);
 
+    // pay_period_end picks up a late stat line whose work_date is the holiday
+    // and whose cheque is the next unpaid period. In-window lines are unchanged.
+    $spanSql = 'user_id=? AND site_id=? AND (work_date BETWEEN ? AND ? OR pay_period_end=?)';
+    $spanArgs = [$user_id, $site_id, $start, $end, $end];
     $sum = $pdo->prepare(
         "SELECT COALESCE(SUM(total_gross),0) AS gross, COALESCE(SUM(vac),0) AS vac,
                 COALESCE(SUM(ei),0) AS ei, COALESCE(SUM(income_tax),0) AS tax
          FROM payroll_finalized
-         WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?"
+         WHERE $spanSql"
     );
-    $sum->execute([$user_id, $site_id, $start, $end]);
+    $sum->execute($spanArgs);
     $s = $sum->fetch(PDO::FETCH_ASSOC) ?: [];
     $gross = round((float)$s['gross'], 2);
     $vac = round((float)$s['vac'], 2);
@@ -613,8 +617,8 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
 
     // CPP for the period lives on payroll_period_stat (ledgers add it back).
     // EI, tax, WCB, and CPP2 are spread across the lines so a sum of the lines matches.
-    $lineRows = $pdo->prepare('SELECT id, total_gross, COALESCE(paid_amount,0) AS paid_amount FROM payroll_finalized WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ? ORDER BY id');
-    $lineRows->execute([$user_id, $site_id, $start, $end]);
+    $lineRows = $pdo->prepare("SELECT id, total_gross, COALESCE(paid_amount,0) AS paid_amount FROM payroll_finalized WHERE $spanSql ORDER BY id");
+    $lineRows->execute($spanArgs);
     $ids = [];
     $weights = [];
     $locked = false;
@@ -653,7 +657,7 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
                 $params[] = substr($edition, 0, 80);
             }
             $params[] = $id;
-            $pdo->prepare("UPDATE payroll_finalized SET $sets WHERE id=?")->execute($params);
+            $pdo->prepare("UPDATE payroll_finalized SET $sets WHERE id=? AND COALESCE(paid_amount,0) <= 0.02")->execute($params);
         }
     }
 
