@@ -123,6 +123,11 @@ $paidLine = sh_finalized_stat_line($sk, 5, 30, '2026-08-03');
 check('paid stat line is paid', $paidLine && $paidLine['status'] === 'paid' && abs($paidLine['amount'] - 50) < 0.01);
 $page = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
 check('preview page treats the ledger line as posted', strpos($page, 'sh_finalized_stat_line') !== false && strpos($page, 'posted_status') !== false);
+check('preview posted rows are yellow', strpos($page, '#fff3b0') !== false && strpos($page, '.posted') !== false);
+$ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
+check('ledger paints Statutory Holiday rows yellow', strpos($ledger, 'stat-holiday') !== false && strpos($ledger, '#fff3b0') !== false && strpos($ledger, 'stat-pay-mark') !== false);
+$docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
+check('pay stub highlights public holiday yellow', strpos($docs, '255, 243, 176') !== false && strpos($docs, "'Public Holiday'") !== false);
 
 if ($fail > 0) {
     echo $fail . " failed\n";

@@ -448,7 +448,7 @@ $singleReadyAvg = $singleReadyN > 0 ? $singleReadyAmt / $singleReadyN : 0.0;
 ?>
 <!doctype html><html lang="en"><head><meta charset="utf-8"><title>Statutory Pay Preview</title>
 <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-<style>body{background:#f1f5f9;padding-top:95px;font-family:Inter,Arial}.wrap{max-width:1450px;margin:auto;padding:20px}.small-note{font-size:12px;color:#64748b}.worked{background:#fff7ed}.posted{background:#ecfdf5}.chip{display:inline-block;background:#e2e8f0;border-radius:4px;padding:2px 8px;margin:0 4px 4px 0;font-size:12px}.period-card{border-left:4px solid #2563eb}
+<style>body{background:#f1f5f9;padding-top:95px;font-family:Inter,Arial}.wrap{max-width:1450px;margin:auto;padding:20px}.small-note{font-size:12px;color:#64748b}.worked{background:#fff7ed}.posted,.posted td{background:#fff3b0 !important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.chip{display:inline-block;background:#e2e8f0;border-radius:4px;padding:2px 8px;margin:0 4px 4px 0;font-size:12px}.period-card{border-left:4px solid #2563eb}
 .stat-total-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;background:#1e293b;color:#fff;padding:10px 14px;border-radius:8px;font-size:15px;font-weight:700;margin:8px 0}
 .stat-total-bar small{font-weight:600}
 .stat-total-foot{background:#e2e8f0;font-weight:800}
