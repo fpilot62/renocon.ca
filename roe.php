@@ -7,6 +7,11 @@
  * Deploy with migrations/20261119_roe.sql. See ops/DEPLOY_ROE.md.
  */
 require_once __DIR__ . '/engine/roe_boot.php';
+require_once __DIR__ . '/engine/help_qa_lib.php';
+try {
+    help_qa_ensure_link($pdo, 'How to file an ROE', 'roe_help.php', 25);
+} catch (Throwable $e) {
+}
 
 $action = (string)($_POST['action'] ?? '');
 $self = 'roe.php?org_id=' . (int)$orgId;
@@ -99,7 +104,7 @@ echo privacy_banner_html();
     <div class="d-flex flex-wrap justify-content-between align-items-start mb-3">
         <div>
             <h4 class="font-weight-bold mb-1">ROE (Record of Employment)</h4>
-            <p class="text-muted mb-0">Builds ROEs from finalized pay lines and downloads ROE Web payroll extract files (XML v2.0, .BLK), checked against Service Canada's official schema. Upload the file in ROE Web yourself. Nothing is sent from here. Download defaults to <b>Issue = D</b> so ROE Web saves the ROEs as drafts for review.</p>
+            <p class="text-muted mb-0">Builds ROEs from finalized pay lines and downloads ROE Web payroll extract files (XML v2.0, .BLK), checked against Service Canada's official schema. Upload the file in ROE Web yourself. Nothing is sent from here. Download defaults to <b>Issue = D</b> so ROE Web saves the ROEs as drafts for review. <a id="roeHowToFile" href="roe_help.php?org_id=<?= (int)$orgId ?>">How to file an ROE</a></p>
         </div>
         <?php if ($isSuper && $orgs): ?>
         <form method="get" class="form-inline">
@@ -163,7 +168,7 @@ echo privacy_banner_html();
             <div class="col-md-3 mb-2"><label>Reason (block 16)</label><select name="reason_code" class="form-control form-control-sm" required><option value="">— choose —</option>
                 <?php foreach ($reasons as $k => $label): ?><option value="<?= $k ?>"><?= $k ?> – <?= roe_h($label) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Last day for which paid (optional)</label><input type="date" name="last_day_paid" class="form-control form-control-sm"></div>
-            <div class="col-md-2 mb-2"><button class="btn btn-sm btn-primary btn-block">Create draft from pay lines</button></div>
+            <div class="col-md-2 mb-2"><button id="roeCreateDraft" class="btn btn-sm btn-primary btn-block">Create draft from pay lines</button></div>
         </form>
         <p class="text-muted mb-0">Blocks 10, 11, 12, 15A and 15C are filled from finalized pay lines at that employer's stores (regular, overtime and travel hours; total gross by work date). Leave the last day blank to use the last paid work day.</p>
     </div>
@@ -206,11 +211,11 @@ echo privacy_banner_html();
                 </tbody>
             </table>
             <div class="form-inline">
-                <select name="issue" class="form-control form-control-sm mr-2">
+                <select id="roeIssue" name="issue" class="form-control form-control-sm mr-2">
                     <option value="D" selected>Issue = D: ROE Web saves as draft (review there)</option>
                     <option value="S">Issue = S: ROE Web submits on upload</option>
                 </select>
-                <button class="btn btn-sm btn-success">Download selected ready ROEs (.BLK)</button>
+                <button id="roeDownloadBlk" class="btn btn-sm btn-success">Download selected ready ROEs (.BLK)</button>
                 <span class="text-muted ml-2">Each file is validated against the official schema first. Several BNs come as a zip with one .BLK per BN.</span>
             </div>
         </form>

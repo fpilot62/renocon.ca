@@ -166,6 +166,9 @@ $is_staff = ($user_level > 30);
                     <div class="role-badge bg-info text-white">Admin / Manager</div>
                     <h2 class="font-weight-bold">Approving Your Team</h2>
                     <p class="text-muted">Your primary tool is the <code>staff_audit.php</code> page.</p>
+                    <?php if ($user_level < 30): ?>
+                    <p><a href="roe_help.php"><strong>How to file an ROE</strong></a> — payroll admins. The same link is on ROE (Record of Employment).</p>
+                    <?php endif; ?>
                     <div class="row mt-4">
                         <div class="col-md-6 mb-3">
                             <h6 class="font-weight-bold">Audit Monitoring</h6>

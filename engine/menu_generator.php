@@ -326,6 +326,13 @@ function generateMenu($pdo) {
             $html .= '</div>';
         }
     }
+    $qaLib = __DIR__ . '/help_qa_panel.php';
+    if (is_file($qaLib)) {
+        require_once $qaLib;
+        if (function_exists('help_qa_panel')) {
+            $html .= help_qa_panel($pdo);
+        }
+    }
 
     $html .= <<<'JS'
 <script>
