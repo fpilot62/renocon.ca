@@ -179,7 +179,7 @@ $bi = sd_calculate([
 ]);
 near('bi-weekly CPP', $bi['cpp'], 63.39);
 near('bi-weekly EI', $bi['ei'], 19.56);
-near('bi-weekly tax', $bi['income_tax'], 75.73);
+near('bi-weekly tax', $bi['income_tax'], 75.74);
 
 // Monthly, Ontario, $8,000. Annualized CPP and EI credits use the yearly maximum
 // because 12 times this period already exceeds it. First period, so no CPP2 yet.
@@ -191,7 +191,7 @@ $monthly = sd_calculate([
 ]);
 near('monthly CPP', $monthly['cpp'], 458.65);
 near('monthly EI', $monthly['ei'], 130.40);
-near('monthly tax', $monthly['income_tax'], 1572.67);
+near('monthly tax', $monthly['income_tax'], 1572.66);
 near('monthly credit uses the maximum base CPP', $monthly['factors']['annual_base_cpp'], 3519.45);
 near('monthly credit uses the maximum EI premium', $monthly['factors']['annual_ei'], 1123.07);
 check('August payroll uses the July edition', strpos($monthly['edition'], '123rd') !== false);
@@ -215,7 +215,7 @@ near('EI is zero once the maximum premium is withheld', $cpp2['ei'], 0.00);
 near('employer CPP matches the employee base and first additional', $cpp2['cpp_er'], 25.41);
 near('employer CPP2 matches the employee', $cpp2['cpp2_er'], 96.00);
 near('K2 uses the maximum base CPP once the maximum is reached', $cpp2['factors']['annual_base_cpp'], 3519.45);
-near('tax in the CPP2 period', $cpp2['income_tax'], 649.64);
+near('tax in the CPP2 period', $cpp2['income_tax'], 649.65);
 
 // Same person, next period: CPP stays zero, CPP2 continues, still under its own maximum.
 $cpp2next = sd_calculate([
@@ -288,6 +288,48 @@ $weeklyCount = pe_periods_in_year('weekly', 2026, '2024-01-01');
 check('weekly pays in 2026 are 52 or 53', $weeklyCount === 52 || $weeklyCount === 53);
 $migration = file_get_contents(__DIR__ . '/../migrations/20261120_source_deductions.sql');
 check('the migration does not drop or delete payroll rows', stripos($migration, 'DROP TABLE') === false && stripos($migration, 'DELETE FROM') === false && stripos($migration, 'payroll_finalized') !== false);
+
+// CRA PDOC, 2026-11-20, 26 pays, claim code 1, no year-to-date.
+// Federal and provincial tax are each rounded to the cent, then added.
+function pdoc(string $prov, float $gross, string $date = '2026-11-20'): array {
+    return sd_calculate([
+        'pay_date' => $date,
+        'province' => $prov,
+        'periods' => 26,
+        'periodic_gross' => $gross,
+    ]);
+}
+function exact(string $label, float $got, float $want): void {
+    check($label . " (got $got, want $want)", abs($got - $want) < 0.001);
+}
+$p1 = pdoc('ON', 1000);
+exact('PDOC ON 1000 federal', $p1['federal_period'], 33.84);
+exact('PDOC ON 1000 provincial', $p1['provincial_period'], 32.16);
+exact('PDOC ON 1000 tax', $p1['income_tax'], 66.00);
+exact('PDOC ON 1000 CPP', $p1['cpp'], 51.49);
+exact('PDOC ON 1000 EI', $p1['ei'], 16.30);
+$p2 = pdoc('ON', 2000);
+exact('PDOC ON 2000 federal', $p2['federal_period'], 163.23);
+exact('PDOC ON 2000 provincial', $p2['provincial_period'], 91.60);
+exact('PDOC ON 2000 tax', $p2['income_tax'], 254.83);
+exact('PDOC ON 2000 CPP', $p2['cpp'], 110.99);
+exact('PDOC ON 2000 EI', $p2['ei'], 32.60);
+exact('PDOC ON 2000 net', round(2000 - $p2['cpp'] - $p2['cpp2'] - $p2['ei'] - $p2['income_tax'], 2), 1601.58);
+$p3 = pdoc('SK', 1500);
+exact('PDOC SK 1500 federal', $p3['federal_period'], 98.53);
+exact('PDOC SK 1500 provincial', $p3['provincial_period'], 64.10);
+exact('PDOC SK 1500 tax', $p3['income_tax'], 162.63);
+exact('PDOC SK 1500 CPP', $p3['cpp'], 81.24);
+exact('PDOC SK 1500 EI', $p3['ei'], 24.45);
+$p4 = pdoc('ON', 189.50);
+exact('PDOC ON 189.50 tax', $p4['income_tax'], 0.00);
+exact('PDOC ON 189.50 CPP', $p4['cpp'], 3.27);
+exact('PDOC ON 189.50 EI', $p4['ei'], 3.09);
+$july = pdoc('ON', 2000, '2026-07-01');
+check('July 1 pack is the 123rd edition', strpos((string)$july['edition'], '123rd') !== false);
+exact('July pack ON 2000 tax matches November', $july['income_tax'], 254.83);
+exact('July pack ON 2000 federal', $july['federal_period'], 163.23);
+exact('July pack ON 2000 provincial', $july['provincial_period'], 91.60);
 
 if ($fail > 0) {
     echo "\n$fail failed\n";

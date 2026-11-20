@@ -13,13 +13,23 @@
  * gets federal tax, CPP, and EI, and a flag that provincial tax was not calculated.
  */
 
+/** Nearest cent. An exact half-cent goes to the even cent, which is how PDOC lands the Saskatchewan cents. */
 function sd_money(float $n): float
 {
     if (!is_finite($n)) {
         return 0.0;
     }
     $sign = $n < 0 ? -1.0 : 1.0;
-    $cents = (int)floor(abs($n) * 100 + 0.5000001);
+    $scaled = abs($n) * 100.0;
+    $floor = floor($scaled + 1e-8);
+    $frac = $scaled - $floor;
+    if ($frac > 0.5 + 1e-6) {
+        $cents = $floor + 1.0;
+    } elseif ($frac < 0.5 - 1e-6) {
+        $cents = $floor;
+    } else {
+        $cents = (((int)$floor) % 2 === 0) ? $floor : $floor + 1.0;
+    }
     return $sign * $cents / 100.0;
 }
 
@@ -499,23 +509,30 @@ function sd_calculate(array $in, ?array $pack = null): array
         $without = $with;
     }
 
+    // T4127 writes T = (T1 + T2) / P. PDOC rounds the federal piece and the
+    // provincial piece to the cent on their own, then adds them.
+    $periodSource = ($B > 0) ? $without : $with;
+    $fedPeriod = ($taxExempt && $useFlatBonus) ? 0.0 : sd_money((float)$periodSource['t1'] / $P);
+    $provPeriod = ($taxExempt && $useFlatBonus) ? 0.0 : sd_money((float)$periodSource['t2'] / $P);
     if ($core < 0 && $B <= 0) {
-        $tax = $L;
+        $fedPeriod = 0.0;
+        $provPeriod = 0.0;
         $tb = 0.0;
+        $tax = $L;
     } elseif ($useFlatBonus) {
         $tb = sd_money((float)$pack['federal']['bonus_flat_rate'] * max(0.0, $B));
-        $periodic = $taxExempt ? 0.0 : sd_money(($without['t1'] + $without['t2']) / $P);
-        $tax = sd_money($periodic + $tb + $L);
+        $tax = sd_money($fedPeriod + $provPeriod + $tb + $L);
     } else {
-        $tb = 0.0;
-        if ($B > 0) {
-            $tb = sd_money(($with['t1'] + $with['t2']) - ($without['t1'] + $without['t2']));
-            if ($tb < 0) {
-                $tb = 0.0;
-            }
+        $tbFed = $B > 0 ? sd_money((float)$with['t1'] - (float)$without['t1']) : 0.0;
+        $tbProv = $B > 0 ? sd_money((float)$with['t2'] - (float)$without['t2']) : 0.0;
+        if ($tbFed < 0) {
+            $tbFed = 0.0;
         }
-        $annualForPeriod = $B > 0 ? ($without['t1'] + $without['t2']) : ($with['t1'] + $with['t2']);
-        $tax = sd_money($annualForPeriod / $P + $tb + $L);
+        if ($tbProv < 0) {
+            $tbProv = 0.0;
+        }
+        $tb = sd_money($tbFed + $tbProv);
+        $tax = sd_money($fedPeriod + $provPeriod + $tb + $L);
         if ($tax < $L) {
             $tax = $L;
         }
@@ -534,6 +551,8 @@ function sd_calculate(array $in, ?array $pack = null): array
     $result['cpp2'] = $C2;
     $result['ei'] = $EI;
     $result['income_tax'] = $tax;
+    $result['federal_period'] = $fedPeriod;
+    $result['provincial_period'] = $provPeriod;
     $result['tax_bonus'] = $tb;
     $result['cpp_er'] = $C;
     $result['cpp2_er'] = $C2;
@@ -648,6 +667,8 @@ function sd_empty_result(string $payDate, ?array $pack): array
         'cpp2' => 0.0,
         'ei' => 0.0,
         'income_tax' => 0.0,
+        'federal_period' => 0.0,
+        'provincial_period' => 0.0,
         'tax_bonus' => 0.0,
         'cpp_er' => 0.0,
         'cpp2_er' => 0.0,
