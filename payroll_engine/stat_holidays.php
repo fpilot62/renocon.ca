@@ -689,8 +689,85 @@ if (!function_exists('sh_review_banner_html')) {
         if ($n < 1) {
             return '';
         }
-        $href = 'stat_holiday_review.php?org_id=' . $orgId . '&from_date=' . urlencode($from) . '&to_date=' . urlencode($to);
-        return '<div class="alert alert-warning font-weight-bold">Holiday eligibility review: ' . $n . ' pending. <a href="' . htmlspecialchars($href) . '">Open the review list</a></div>';
+        $href = sh_stat_pay_href($pdo, $orgId);
+        return '<div class="alert alert-warning font-weight-bold">Holiday eligibility review: ' . $n . ' pending. <a href="' . htmlspecialchars($href) . '">Open Stat Holiday Pay</a></div>';
+    }
+}
+
+if (!function_exists('sh_latest_pending_stat_date')) {
+    function sh_latest_pending_stat_date(PDO $pdo, int $orgId): ?string {
+        if ($orgId <= 0) {
+            return null;
+        }
+        try {
+            $st = $pdo->prepare(
+                "SELECT MAX(f.work_date) FROM payroll_finalized f
+                  INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+                 WHERE f.category = 'Statutory Holiday'
+                   AND COALESCE(f.stat_approval_status,'') = 'pending'"
+            );
+            $st->execute([$orgId]);
+            $day = substr((string)$st->fetchColumn(), 0, 10);
+            return preg_match('/^\d{4}-\d{2}-\d{2}$/', $day) ? $day : null;
+        } catch (Throwable $e) {
+            return null;
+        }
+    }
+}
+
+if (!function_exists('sh_period_containing')) {
+    /** Pay period that contains $day, using the same window as the holiday page. */
+    function sh_period_containing(PDO $pdo, int $orgId, string $day): array {
+        $lib = dirname(__DIR__) . '/engine/org_modules_lib.php';
+        if (!function_exists('sip_period_window') && is_file($lib)) {
+            require_once $lib;
+        }
+        if (function_exists('sip_period_window')) {
+            $mode = function_exists('sip_org_pay_period_mode') ? sip_org_pay_period_mode($pdo, $orgId) : ($orgId === 4 ? 'bi_weekly' : 'semi_monthly');
+            $anchor = function_exists('sip_org_pay_period_anchor') ? sip_org_pay_period_anchor($pdo, $orgId) : '2024-01-01';
+            return sip_period_window($day, $mode, $anchor);
+        }
+        $mode = $orgId === 4 ? 'bi_weekly' : 'semi_monthly';
+        $anchor = '2024-01-01';
+        if ($mode === 'bi_weekly') {
+            $d0 = new DateTimeImmutable($anchor);
+            $d1 = new DateTimeImmutable(substr($day, 0, 10));
+            $days = (int)$d0->diff($d1)->format('%r%a');
+            $block = (int)floor($days / 14);
+            $start = $d0->modify(($block * 14) . ' days');
+            $end = $start->modify('+13 days');
+            return [$start->format('Y-m-d'), $end->format('Y-m-d')];
+        }
+        $ts = strtotime($day) ?: time();
+        $dom = (int)date('j', $ts);
+        if ($dom <= 15) {
+            return [date('Y-m-01', $ts), date('Y-m-15', $ts)];
+        }
+        return [date('Y-m-16', $ts), date('Y-m-t', $ts)];
+    }
+}
+
+if (!function_exists('sh_stat_pay_href')) {
+    /** Link to Stat Holiday Pay for this org, on the latest period that still has a line waiting. */
+    function sh_stat_pay_href(PDO $pdo, int $orgId): string {
+        if ($orgId <= 0 && function_exists('ps_org_id')) {
+            $orgId = ps_org_id();
+        }
+        $from = '';
+        $to = '';
+        $day = sh_latest_pending_stat_date($pdo, $orgId);
+        if ($day) {
+            [$from, $to] = sh_period_containing($pdo, $orgId, $day);
+        }
+        $query = ['preview_period' => '1'];
+        if ($orgId > 0) {
+            $query['org_id'] = $orgId;
+        }
+        if ($from !== '' && $to !== '') {
+            $query['from_date'] = $from;
+            $query['to_date'] = $to;
+        }
+        return 'generate_stat_shifts.php?' . http_build_query($query);
     }
 }
 

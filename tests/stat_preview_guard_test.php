@@ -78,10 +78,17 @@ check('backfill does not re-offer an exclusion', !isset($keys2['4|2026-09-07']))
 $page = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
 check('the page has one approval list and the status legend', strpos($page, 'Approve all unflagged') !== false && strpos($page, 'Show excluded / not eligible') !== false && strpos($page, 'stat-flagged') !== false && strpos($page, 'stat-approved') !== false && strpos($page, 'stat-paid') !== false && strpos($page, 'stat-excluded') !== false && strpos($page, 'badge-worked') !== false);
 check('preview still recognizes a ledger stat line', strpos($page, 'sh_finalized_stat_line') !== false && strpos($page, '#fff3b0') !== false && strpos($page, 'stat-pay-show') !== false && strpos($page, 'statReveal') !== false);
+$pdo->prepare("INSERT INTO payroll_finalized (user_id, org_id, site_id, work_date, category, total_gross, status, stat_approval_status) VALUES (1,4,10,'2026-09-07','Statutory Holiday',10,'pending','pending')")->execute();
+$pdo->prepare("INSERT INTO payroll_finalized (user_id, org_id, site_id, work_date, category, total_gross, status, stat_approval_status) VALUES (1,4,10,'2026-10-12','Statutory Holiday',10,'pending','pending')")->execute();
 $review = file_get_contents(__DIR__ . '/../stat_holiday_review.php');
-check('the old approval page redirects here', strpos($review, "header('Location: generate_stat_shifts.php?") !== false);
+check('the old approval page keeps the session org', strpos($review, 'ps_org_id()') !== false && strpos($review, 'sh_stat_pay_href') !== false && strpos($review, 'sip_org_id') === false);
+$href = sh_stat_pay_href($pdo, 4);
+check('the link stays on org 4 and opens the period that holds the pending line', strpos($href, 'org_id=4') !== false && strpos($href, 'from_date=2026-10-05') !== false && strpos($href, 'to_date=2026-10-18') !== false && strpos($href, 'org_id=2') === false);
 $ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
-check('the ledger banner opens Stat Holiday Pay', strpos($ledger, 'generate_stat_shifts.php?org_id=') !== false && strpos($ledger, 'Open Stat Holiday Pay') !== false);
+check('the ledger banner opens Stat Holiday Pay for the ledger org', strpos($ledger, 'sh_stat_pay_href($pdo, (int)$user_org_id)') !== false && strpos($ledger, 'Open Stat Holiday Pay') !== false);
+$pageOrg = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
+$orgFn = substr($pageOrg, (int)strpos($pageOrg, 'function stat_selected_org'), 700);
+check('the holiday page prefers the session org over a stale cookie', strpos($orgFn, 'ps_org_id()') !== false && strpos($orgFn, 'ps_org_id()') < strpos($orgFn, 'sip_org_id'));
 $migration = file_get_contents(__DIR__ . '/../migrations/20261122_stat_holiday_exclusions.sql');
 check('the migration seeds the removed Thanksgiving line', strpos($migration, '10766') !== false && strpos($migration, '121') !== false && strpos($migration, '2026-10-12') !== false && strpos($migration, 'Removed: no shift after Sep 18 (AA confirmed)') !== false && strpos($migration, 'NOT EXISTS') !== false);
 
