@@ -12,6 +12,11 @@ function check(string $label, bool $cond): void {
 }
 require_once __DIR__ . '/../engine/ledger_matrix_lib.php';
 
+check('zero stat pay stays hidden', !ledger_stat_visible(0.0) && ledger_stat_visible(0.02));
+check('Ontario and a blank province are classified', ledger_province_code('Ontario') === 'ON' && ledger_province_code('') === '' && ledger_province_code('n/a') === '');
+$opts = ledger_province_options([['province' => 'SK'], ['province' => 'ON'], ['province' => '']]);
+check('province options keep a code and an unmapped bucket', $opts['codes'] === ['ON', 'SK'] && $opts['unmapped'] === true);
+check('a chosen province keeps only its sites', ledger_site_in_province('Saskatchewan', 'SK') && !ledger_site_in_province('', 'SK') && ledger_site_in_province('', 'unmapped'));
 check('statutory holiday is allocated stat pay', ledger_row_is_stat_alloc('Statutory Holiday', 'Hourly'));
 check('pay type Statutory is allocated stat pay', ledger_row_is_stat_alloc('Holiday Worked', 'Statutory'));
 check('a regular line is not stat pay', !ledger_row_is_stat_alloc('Regular', 'Hourly'));
@@ -54,9 +59,15 @@ check('expand reuses the hidden class and carets', strpos($js, "classList.remove
 check('expand is batched and remembered per page', strpos($js, 'requestAnimationFrame') !== false && strpos($js, 'localStorage') !== false && strpos($js, 'location.pathname') !== false);
 $page = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
 check('ledger filter is a Stat pay option in the form', strpos($page, 'name="stat_pay"') !== false && strpos($page, 'Stat pay only') !== false && strpos($page, 'pay_period_end BETWEEN') !== false);
+check('ledger hides a zero stat amount and offers provinces', strpos($page, 'ledger_stat_visible') !== false && strpos($page, 'name="province"') !== false && strpos($page, 'Unmapped') !== false);
 check('ledger has expand controls', strpos($page, 'ledger_expand_controls()') !== false);
 $alt = file_get_contents(__DIR__ . '/../payroll_master_ledger1.php');
 check('ledger1 has the same expand controls', strpos($alt, 'ledger_expand_controls()') !== false && strpos($alt, 'ledger_expand_script()') !== false);
+check('ledger1 filters by province inside the org', strpos($alt, 'name="province"') !== false && strpos($alt, 'org_id=?') !== false);
+$preview = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
+check('preview hides a zero stat total', strpos($preview, 'stat-pay-show') !== false && strpos($preview, 'statReveal') !== false);
+$docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
+check('pay stub does not force a zero stat line', strpos($docs, "\$earn('Public Holiday', '', '', (float)\$g['ph_pay'], (float)\$ytd['ph'], false, true);") !== false);
 
 if ($fail > 0) { echo $fail . " failed\n"; exit(1); }
 echo "all passed\n";

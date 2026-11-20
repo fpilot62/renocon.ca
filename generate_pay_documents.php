@@ -772,7 +772,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     if ($vac_paid_mode || $vac_curr > 0.009 || $vac_ytd > 0.009) {
         $earn('VacPay-Paid Out', '', '', $vac_curr, $vac_ytd, true);
     }
-    $earn('Public Holiday', '', '', (float)$g['ph_pay'], (float)$ytd['ph'], !empty($g['show_zero_stat']), true);
+    $earn('Public Holiday', '', '', (float)$g['ph_pay'], (float)$ytd['ph'], false, true);
     if ((float)$g['bonus'] > 0.009 || (float)$ytd['bonus'] > 0.009) {
         $earn('Bonus', '', '', (float)$g['bonus'], (float)$ytd['bonus']);
     }
@@ -787,7 +787,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     foreach ($deductNames as $deductName) {
         $earn((string)$deductName, '', '', -1 * (float)($g['deduct_lines'][$deductName] ?? 0), -1 * (float)($ytd['deduct_lines'][$deductName] ?? 0));
     }
-    $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], !empty($g['show_zero_stat']), true);
+    $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], false, true);
 
     $y = $pdf->GetY() + 4;
     $pdf->SetXY($L, $y);

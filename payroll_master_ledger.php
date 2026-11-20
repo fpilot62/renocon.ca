@@ -225,7 +225,7 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
 // ---------------------------------------------------------------- filters
 $staff_q = $pdo->prepare("SELECT id, Name FROM users WHERE org_id=? ORDER BY Name ASC");
 $staff_q->execute([$user_org_id]); $staff_list = $staff_q->fetchAll(PDO::FETCH_ASSOC);
-$sites_q = $pdo->prepare("SELECT Sid, nick_name FROM sites WHERE org_id=? ORDER BY nick_name ASC");
+$sites_q = $pdo->prepare("SELECT Sid, nick_name, province FROM sites WHERE org_id=? ORDER BY nick_name ASC");
 $sites_q->execute([$user_org_id]); $sites_list = $sites_q->fetchAll(PDO::FETCH_ASSOC);
 $ledger_orgs = [];
 if (ps_is_superadmin()) {
@@ -242,6 +242,11 @@ $view_category   = $_GET['view_category'] ?? 'consolidated';
 $balance_scope   = $_GET['balance_scope'] ?? 'all';
 $stat_pay        = $_GET['stat_pay'] ?? 'all';
 if (!in_array($stat_pay, ['all', 'only'], true)) { $stat_pay = 'all'; }
+$province_options = ledger_province_options($sites_list);
+$province_filter = ledger_province_param((string)($_GET['province'] ?? 'all'), $province_options);
+$sites_for_location = array_values(array_filter($sites_list, function ($site) use ($province_filter) {
+    return ledger_site_in_province($site['province'] ?? '', $province_filter);
+}));
 if (!function_exists('sip_org_pay_period_mode')) {
     require_once __DIR__ . '/engine/org_modules_lib.php';
 }
@@ -277,9 +282,11 @@ if (!$__have_cur) {
     array_unshift($period_options, ['start' => $__ps, 'end' => $__pe, 'label' => $__pl]);
 }
 if ($site_filter !== 'all' && $site_filter !== '') {
-    $__sc = $pdo->prepare('SELECT COUNT(*) FROM sites WHERE SId = ? AND org_id = ?');
-    $__sc->execute([(int)$site_filter, $user_org_id]);
-    if (!$__sc->fetchColumn()) { $site_filter = 'all'; }
+    $__siteOk = false;
+    foreach ($sites_for_location as $__siteRow) {
+        if ((string)$__siteRow['Sid'] === (string)$site_filter) { $__siteOk = true; break; }
+    }
+    if (!$__siteOk) { $site_filter = 'all'; }
 }
 if ($employee_filter !== 'all' && $employee_filter !== '') {
     $__uc = $pdo->prepare('SELECT COUNT(*) FROM users WHERE id = ? AND org_id = ?');
@@ -291,7 +298,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') { ps_require_csrf(); }
 $redir = "payroll_master_ledger.php?org_id=$user_org_id&from_date=$from_date&to_date=$to_date"
        . "&site_id=" . urlencode($site_filter) . "&user_id=" . urlencode($employee_filter)
        . "&view_category=" . urlencode($view_category) . "&balance_scope=" . urlencode($balance_scope)
-       . "&stat_pay=" . urlencode($stat_pay)
+       . "&stat_pay=" . urlencode($stat_pay) . "&province=" . urlencode($province_filter)
        . "&period_mode=" . urlencode($period_mode);
 
 // ---------------------------------------------------------------- ROLLBACK
@@ -470,6 +477,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
 $where  = ["(f.work_date BETWEEN ? AND ? OR ((COALESCE(f.category,'') = 'Statutory Holiday' OR COALESCE(f.pay_type,'') = 'Statutory') AND f.pay_period_end BETWEEN ? AND ?))", "u.org_id = ?", "s.org_id = u.org_id"];
 $params = [$from_date, $to_date, $from_date, $to_date, $user_org_id];
 if ($site_filter !== 'all' && $site_filter !== '')     { $where[] = "f.site_id = ?"; $params[] = (int)$site_filter; }
+if ($province_filter !== 'all') {
+    $__provIds = [];
+    foreach ($sites_for_location as $__siteRow) { $__provIds[] = (int)$__siteRow['Sid']; }
+    if (!$__provIds) {
+        $where[] = '1=0';
+    } else {
+        $where[] = 'f.site_id IN (' . implode(',', array_fill(0, count($__provIds), '?')) . ')';
+        foreach ($__provIds as $__provId) { $params[] = $__provId; }
+    }
+}
 if ($employee_filter !== 'all' && $employee_filter !== '') { $where[] = "f.user_id = ?"; $params[] = (int)$employee_filter; }
 if ($view_category === 'travel')   { $where[] = "f.travel_hours > 0"; }
 elseif ($view_category === 'overtime') { $where[] = "f.overtime_hours > 0"; }
@@ -808,9 +825,21 @@ function ledgerOnOrgChange(sel){
                     <label class="font-weight-bold small text-muted text-uppercase mb-1">Location</label>
                     <select name="site_id" class="form-control form-control-sm font-weight-bold">
                         <option value="all">All Locations</option>
-                        <?php foreach($sites_list as $s): ?>
+                        <?php foreach($sites_for_location as $s): ?>
                             <option value="<?=$s['Sid']?>" <?=((string)$site_filter===(string)$s['Sid'])?'selected':''?>><?=htmlspecialchars($s['nick_name'])?></option>
                         <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="font-weight-bold small text-muted text-uppercase mb-1">Province</label>
+                    <select name="province" class="form-control form-control-sm font-weight-bold" onchange="this.form.site_id.value='all'; this.form.submit();">
+                        <option value="all" <?=$province_filter==='all'?'selected':''?>>All Provinces</option>
+                        <?php foreach ($province_options['codes'] as $__code): ?>
+                            <option value="<?=htmlspecialchars($__code)?>" <?=$province_filter===$__code?'selected':''?>><?=htmlspecialchars($__code)?></option>
+                        <?php endforeach; ?>
+                        <?php if ($province_options['unmapped'] || $province_filter === 'unmapped'): ?>
+                            <option value="unmapped" <?=$province_filter==='unmapped'?'selected':''?>>Unmapped</option>
+                        <?php endif; ?>
                     </select>
                 </div>
                 <div class="col-md-2">
@@ -857,10 +886,12 @@ function ledgerOnOrgChange(sel){
             </form>
         </div>
 
+        <?php if (ledger_stat_visible((float)$stat_summary['stat_total'])): ?>
         <div class="mb-2 font-weight-bold" style="color:#854d0e;">
             <span class="stat-pay-mark"><?= (int)$stat_summary['employees'] ?> employees with stat pay, $<?= number_format($stat_summary['stat_total'], 2) ?> total</span>
             <?php if ($stat_pay === 'only'): ?> · showing only those employees<?php endif; ?>
         </div>
+        <?php endif; ?>
         <div class="card shadow-sm border-0 rounded-lg overflow-hidden">
             <table class="table table-ledger mb-0 text-center" id="ledgerCoreMatrixTable">
                 <thead>
@@ -886,7 +917,7 @@ function ledgerOnOrgChange(sel){
                         <td class="text-left" colspan="2">
                             <i class="far fa-calendar-alt"></i> Pay Period: <strong><?=htmlspecialchars(date('M j', strtotime($from_date)))?> – <?=htmlspecialchars(date('M j, Y', strtotime($to_date)))?></strong>
                             <span class="sub"> · <?=ucfirst(str_replace('_',' ',$period_mode))?></span>
-                            <div class="sub">Regular <?=number_format($period_tot['reg_h'],2)?>h · OT <?=number_format($period_tot['ot_h'],2)?>h · Travel <?=number_format($period_tot['travel_h'],2)?>h · Statutory <?=number_format($period_tot['stat_h'],2)?>h</div>
+                            <div class="sub">Regular <?=number_format($period_tot['reg_h'],2)?>h · OT <?=number_format($period_tot['ot_h'],2)?>h · Travel <?=number_format($period_tot['travel_h'],2)?>h<?php if (ledger_stat_visible((float)$period_tot['stat_h'])): ?> · Statutory <?=number_format($period_tot['stat_h'],2)?>h<?php endif; ?></div>
                         </td>
                         <td>$<?=number_format($period_tot['gross'],2)?></td>
                         <td class="text-left">
@@ -898,7 +929,7 @@ function ledgerOnOrgChange(sel){
                             <span style="color:#93c5fd;">+$<?=number_format($period_tot['er'],2)?></span>
                             <div class="sub" style="font-size:9px;">CPP $<?=number_format($period_tot['er_cpp'],2)?> · EI $<?=number_format($period_tot['er_ei'],2)?></div>
                             <div class="sub" style="font-size:9px;">WCB $<?=number_format($period_tot['er_wcb'],2)?> · Vac $<?=number_format($period_tot['er_vac'],2)?></div>
-                            <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay cost $<?=number_format($period_tot['stat_cost'],2)?></span> · Total employer cost $<?=number_format($period_tot['gross']+$period_tot['er'],2)?></div>
+                            <div class="sub" style="font-size:9px;"><?php if (ledger_stat_visible((float)$period_tot['stat_cost'])): ?><span class="stat-pay-mark">Stat pay cost $<?=number_format($period_tot['stat_cost'],2)?></span> · <?php endif; ?>Total employer cost $<?=number_format($period_tot['gross']+$period_tot['er'],2)?></div>
                         </td>
                         <td class="text-info">$<?=number_format($period_tot['paid'],2)?></td>
                         <td style="color:<?=$period_tot['rem']>0.01?'#fca5a5':'#86efac'?>;">$<?=number_format($period_tot['rem'],2)?></td>
@@ -914,7 +945,7 @@ function ledgerOnOrgChange(sel){
                                 <i class="fa fa-building" style="color:#60a5fa;"></i> <strong><?=htmlspecialchars($site['name'])?></strong>
                                 <span class="sub"> · <?=count($site['emps'])?> employee(s)</span>
                             </td>
-                            <td class="small">R <?=number_format($site['t_reg_h'],2)?>h<br>OT <?=number_format($site['t_ot_h'],2)?>h<br>Travel <?=number_format($site['t_travel_h'],2)?>h<br>Stat <?=number_format($site['t_stat_h'],2)?>h</td>
+                            <td class="small">R <?=number_format($site['t_reg_h'],2)?>h<br>OT <?=number_format($site['t_ot_h'],2)?>h<br>Travel <?=number_format($site['t_travel_h'],2)?>h<?php if (ledger_stat_visible((float)$site['t_stat_h'])): ?><br>Stat <?=number_format($site['t_stat_h'],2)?>h<?php endif; ?></td>
                             <td>$<?=number_format($site['t_gross'],2)?></td>
                             <td class="text-left">
                                 <span class="text-danger">-$<?=number_format($site['t_ee'],2)?></span>
@@ -925,7 +956,7 @@ function ledgerOnOrgChange(sel){
                                 <span class="text-primary">+$<?=number_format($site['t_er'],2)?></span>
                                 <div class="sub" style="font-size:9px;">CPP $<?=number_format($site['t_er_cpp'],2)?> · EI $<?=number_format($site['t_er_ei'],2)?></div>
                                 <div class="sub" style="font-size:9px;">WCB $<?=number_format($site['t_er_wcb'],2)?> · Vac $<?=number_format($site['t_er_vac'],2)?></div>
-                                <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay $<?=number_format($site['t_stat_cost'],2)?></span> · Employer cost $<?=number_format($site['t_gross']+$site['t_er'],2)?></div>
+                                <div class="sub" style="font-size:9px;"><?php if (ledger_stat_visible((float)$site['t_stat_cost'])): ?><span class="stat-pay-mark">Stat pay $<?=number_format($site['t_stat_cost'],2)?></span> · <?php endif; ?>Employer cost $<?=number_format($site['t_gross']+$site['t_er'],2)?></div>
                             </td>
                             <td class="text-info">$<?=number_format($site['t_paid'],2)?></td>
                             <td style="color:<?=$site['t_rem']>0.01?'#fca5a5':'#86efac'?>;">$<?=number_format($site['t_rem'],2)?></td>
@@ -947,7 +978,7 @@ function ledgerOnOrgChange(sel){
                                         <input type="checkbox" class="eft-check" data-user="<?=(int)$emp['user_id']?>" <?= $isDirect ? 'checked' : '' ?> style="vertical-align:middle;"> Direct deposit
                                     </label>
                                 </td>
-                                <td class="small">R <?=number_format($emp['t_reg_h'],2)?>h<br>OT <?=number_format($emp['t_ot_h'],2)?>h<br>Travel <?=number_format($emp['t_travel_h'],2)?>h<br>Stat <?=number_format($emp['t_stat_h'],2)?>h</td>
+                                <td class="small">R <?=number_format($emp['t_reg_h'],2)?>h<br>OT <?=number_format($emp['t_ot_h'],2)?>h<br>Travel <?=number_format($emp['t_travel_h'],2)?>h<?php if (ledger_stat_visible((float)$emp['t_stat_h'])): ?><br>Stat <?=number_format($emp['t_stat_h'],2)?>h<?php endif; ?></td>
                                 <td>$<?=number_format($emp['t_gross'],2)?></td>
                                 <td class="text-left">
                                     <span class="text-danger">-$<?=number_format($emp['t_ee'],2)?></span>
@@ -958,7 +989,7 @@ function ledgerOnOrgChange(sel){
                                     <span class="text-primary">+$<?=number_format($emp['t_er'],2)?></span>
                                     <div class="sub" style="font-size:9px;">CPP $<?=number_format($emp['t_er_cpp'],2)?> · EI $<?=number_format($emp['t_er_ei'],2)?></div>
                                     <div class="sub" style="font-size:9px;">WCB $<?=number_format($emp['t_er_wcb'],2)?> · Vac $<?=number_format($emp['t_er_vac'],2)?></div>
-                                    <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay $<?=number_format($emp['t_stat_cost'],2)?></span> · Employer cost $<?=number_format($emp['t_gross']+$emp['t_er'],2)?></div>
+                                    <div class="sub" style="font-size:9px;"><?php if (ledger_stat_visible((float)$emp['t_stat_cost'])): ?><span class="stat-pay-mark">Stat pay $<?=number_format($emp['t_stat_cost'],2)?></span> · <?php endif; ?>Employer cost $<?=number_format($emp['t_gross']+$emp['t_er'],2)?></div>
                                 </td>
                                 <td class="text-info">$<?=number_format($emp['t_paid'],2)?></td>
                                 <td style="color:<?=$emp['t_rem']>0.01?'#dc2626':'#16a34a'?>; font-weight:800;">$<?=number_format($emp['t_rem'],2)?></td>
@@ -1001,7 +1032,7 @@ function ledgerOnOrgChange(sel){
                                         <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
                                     </td>
                                     <td class="text-left small text-secondary">
-                                        <?= $is_stat_row ? 'Statutory equivalent' : 'Regular' ?>: <?=number_format($r['reg_hours'],2)?>h
+                                        <?php if (!$is_stat_row || ledger_stat_visible((float)$r['reg_hours'])): ?><?= $is_stat_row ? 'Statutory equivalent' : 'Regular' ?>: <?=number_format($r['reg_hours'],2)?>h<?php endif; ?>
                                         <?php if ((float)$r['overtime_hours']>0): ?><br><span class="text-danger">OT: <?=number_format($r['overtime_hours'],2)?>h</span><?php endif; ?>
                                         <?php if ((float)$r['travel_hours']>0): ?><br><span class="text-info">Travel: <?=number_format($r['travel_hours'],2)?>h</span><?php endif; ?>
                                         <br><small class="text-muted">Total: <?=number_format($total_units,2)?>h</small>

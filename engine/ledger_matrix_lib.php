@@ -3,6 +3,67 @@
  * Shared helpers for the pay-ledger matrix: stat-pay filter and expand/collapse.
  */
 
+function ledger_stat_visible(float $amount): bool {
+    return $amount > 0.009;
+}
+
+function ledger_province_code(?string $raw): string {
+    $p = strtoupper(trim((string)$raw));
+    $map = [
+        'ONTARIO' => 'ON', 'SASK' => 'SK', 'SASKATCHEWAN' => 'SK',
+        'ALBERTA' => 'AB', 'BRITISH COLUMBIA' => 'BC', 'QUEBEC' => 'QC',
+        'MANITOBA' => 'MB', 'NEW BRUNSWICK' => 'NB', 'NOVA SCOTIA' => 'NS',
+        'PRINCE EDWARD ISLAND' => 'PE', 'NEWFOUNDLAND' => 'NL', 'NEWFOUNDLAND AND LABRADOR' => 'NL',
+        'YUKON' => 'YT', 'NORTHWEST TERRITORIES' => 'NT', 'NUNAVUT' => 'NU',
+    ];
+    if (isset($map[$p])) {
+        $p = $map[$p];
+    } elseif (function_exists('sh_normalize_province')) {
+        $p = sh_normalize_province($raw);
+    }
+    return preg_match('/^[A-Z]{2}$/', $p) ? $p : '';
+}
+
+/** @return array{codes:list<string>,unmapped:bool} */
+function ledger_province_options(array $sites): array {
+    $codes = [];
+    $unmapped = false;
+    foreach ($sites as $site) {
+        $code = ledger_province_code($site['province'] ?? '');
+        if ($code === '') {
+            $unmapped = true;
+            continue;
+        }
+        $codes[$code] = true;
+    }
+    $list = array_keys($codes);
+    sort($list);
+    return ['codes' => $list, 'unmapped' => $unmapped];
+}
+
+function ledger_site_in_province(?string $raw, string $filter): bool {
+    if ($filter === '' || strcasecmp($filter, 'all') === 0) {
+        return true;
+    }
+    $code = ledger_province_code($raw);
+    if (strcasecmp($filter, 'unmapped') === 0) {
+        return $code === '';
+    }
+    return $code === strtoupper($filter);
+}
+
+function ledger_province_param(string $raw, array $options): string {
+    $raw = strtolower(trim($raw));
+    if ($raw === '' || $raw === 'all') {
+        return 'all';
+    }
+    if ($raw === 'unmapped') {
+        return 'unmapped';
+    }
+    $code = strtoupper($raw);
+    return in_array($code, $options['codes'], true) ? $code : 'all';
+}
+
 function ledger_row_is_stat_alloc(?string $category, ?string $payType): bool {
     return strcasecmp((string)$category, 'Statutory Holiday') === 0
         || strcasecmp((string)$payType, 'Statutory') === 0;
