@@ -641,6 +641,8 @@ unset($st);
         tr.lvl-emp:hover { background:#e8eef5; }
         tr.lvl-emp td:first-child { cursor:pointer; }
         tr.lvl-shift { background:#ffffff; }
+        tr.lvl-shift.stat-holiday td { background:#fff3b0 !important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+        .stat-pay-mark { background:#fff3b0; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
         .travel-badge { display:inline-block; background:#fef3c7; color:#b45309; border:1px solid #fcd34d; font-size:9px; font-weight:800; text-transform:uppercase; padding:1px 7px; border-radius:9px; margin-left:6px; letter-spacing:.3px; }
         tr.lvl-site .sub, tr.lvl-emp .sub { color:#64748b; font-weight:600; font-size:10px; }
         .name-cell { text-align:left; padding-left:14px; }
@@ -866,7 +868,7 @@ function ledgerOnOrgChange(sel){
                             <span style="color:#93c5fd;">+$<?=number_format($period_tot['er'],2)?></span>
                             <div class="sub" style="font-size:9px;">CPP $<?=number_format($period_tot['er_cpp'],2)?> · EI $<?=number_format($period_tot['er_ei'],2)?></div>
                             <div class="sub" style="font-size:9px;">WCB $<?=number_format($period_tot['er_wcb'],2)?> · Vac $<?=number_format($period_tot['er_vac'],2)?></div>
-                            <div class="sub" style="font-size:9px;">Stat pay cost $<?=number_format($period_tot['stat_cost'],2)?> · Total employer cost $<?=number_format($period_tot['gross']+$period_tot['er'],2)?></div>
+                            <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay cost $<?=number_format($period_tot['stat_cost'],2)?></span> · Total employer cost $<?=number_format($period_tot['gross']+$period_tot['er'],2)?></div>
                         </td>
                         <td class="text-info">$<?=number_format($period_tot['paid'],2)?></td>
                         <td style="color:<?=$period_tot['rem']>0.01?'#fca5a5':'#86efac'?>;">$<?=number_format($period_tot['rem'],2)?></td>
@@ -893,7 +895,7 @@ function ledgerOnOrgChange(sel){
                                 <span class="text-primary">+$<?=number_format($site['t_er'],2)?></span>
                                 <div class="sub" style="font-size:9px;">CPP $<?=number_format($site['t_er_cpp'],2)?> · EI $<?=number_format($site['t_er_ei'],2)?></div>
                                 <div class="sub" style="font-size:9px;">WCB $<?=number_format($site['t_er_wcb'],2)?> · Vac $<?=number_format($site['t_er_vac'],2)?></div>
-                                <div class="sub" style="font-size:9px;">Stat pay $<?=number_format($site['t_stat_cost'],2)?> · Employer cost $<?=number_format($site['t_gross']+$site['t_er'],2)?></div>
+                                <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay $<?=number_format($site['t_stat_cost'],2)?></span> · Employer cost $<?=number_format($site['t_gross']+$site['t_er'],2)?></div>
                             </td>
                             <td class="text-info">$<?=number_format($site['t_paid'],2)?></td>
                             <td style="color:<?=$site['t_rem']>0.01?'#fca5a5':'#86efac'?>;">$<?=number_format($site['t_rem'],2)?></td>
@@ -926,7 +928,7 @@ function ledgerOnOrgChange(sel){
                                     <span class="text-primary">+$<?=number_format($emp['t_er'],2)?></span>
                                     <div class="sub" style="font-size:9px;">CPP $<?=number_format($emp['t_er_cpp'],2)?> · EI $<?=number_format($emp['t_er_ei'],2)?></div>
                                     <div class="sub" style="font-size:9px;">WCB $<?=number_format($emp['t_er_wcb'],2)?> · Vac $<?=number_format($emp['t_er_vac'],2)?></div>
-                                    <div class="sub" style="font-size:9px;">Stat pay $<?=number_format($emp['t_stat_cost'],2)?> · Employer cost $<?=number_format($emp['t_gross']+$emp['t_er'],2)?></div>
+                                    <div class="sub" style="font-size:9px;"><span class="stat-pay-mark">Stat pay $<?=number_format($emp['t_stat_cost'],2)?></span> · Employer cost $<?=number_format($emp['t_gross']+$emp['t_er'],2)?></div>
                                 </td>
                                 <td class="text-info">$<?=number_format($emp['t_paid'],2)?></td>
                                 <td style="color:<?=$emp['t_rem']>0.01?'#dc2626':'#16a34a'?>; font-weight:800;">$<?=number_format($emp['t_rem'],2)?></td>
@@ -959,8 +961,9 @@ function ledgerOnOrgChange(sel){
                             ?>
                                 <!-- LEVEL 3: SHIFT (paid / balance / pay box) -->
                                 <?php $is_travel_row = (strcasecmp(trim((string)($r['category'] ?? '')), 'Travel') === 0) || ((float)$r['travel_hours'] > 0 && (float)$r['reg_hours'] == 0 && (float)$r['overtime_hours'] == 0);
-                                      $is_stat_row = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0; ?>
-                                <tr class="lvl-shift hidden" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
+                                      $is_stat_row = stripos((string)($r['category'] ?? ''), 'Statutory') === 0 || strcasecmp((string)($r['pay_type'] ?? ''), 'Statutory') === 0;
+                                      $is_holiday_row = strcasecmp((string)($r['category'] ?? ''), 'Statutory Holiday') === 0; ?>
+                                <tr class="lvl-shift hidden<?= $is_holiday_row ? ' stat-holiday' : '' ?>" data-parent="<?=$eid?>" data-balance-metric="<?=round($rem,2)?>">
                                     <td class="text-left text-dark" style="padding-left:48px;">
                                         <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>

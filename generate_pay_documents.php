@@ -745,14 +745,17 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     $pdf->Cell(36, 6, 'YTD Amount', 1, 1, 'R', true);
     $pdf->SetFont('Arial', '', 8);
 
-    $earn = function (string $label, $qty, $rateV, $curr, $ytdA, bool $force = false) use ($pdf, $L) {
+    $earn = function (string $label, $qty, $rateV, $curr, $ytdA, bool $force = false, bool $highlight = false) use ($pdf, $L) {
         if (!$force && abs((float)$curr) < 0.005 && abs((float)$ytdA) < 0.005) return;
+        if ($highlight) {
+            $pdf->SetFillColor(255, 243, 176);
+        }
         $pdf->SetX($L);
-        $pdf->Cell(70, 5.5, $label, 1, 0, 'L');
-        $pdf->Cell(22, 5.5, $qty !== null && $qty !== '' ? (string)$qty : '', 1, 0, 'C');
-        $pdf->Cell(22, 5.5, $rateV !== null && $rateV !== '' ? (string)$rateV : '', 1, 0, 'C');
-        $pdf->Cell(35, 5.5, $curr !== null ? number_format((float)$curr, 2) : '', 1, 0, 'R');
-        $pdf->Cell(36, 5.5, $ytdA !== null ? number_format((float)$ytdA, 2) : '', 1, 1, 'R');
+        $pdf->Cell(70, 5.5, $label, 1, 0, 'L', $highlight);
+        $pdf->Cell(22, 5.5, $qty !== null && $qty !== '' ? (string)$qty : '', 1, 0, 'C', $highlight);
+        $pdf->Cell(22, 5.5, $rateV !== null && $rateV !== '' ? (string)$rateV : '', 1, 0, 'C', $highlight);
+        $pdf->Cell(35, 5.5, $curr !== null ? number_format((float)$curr, 2) : '', 1, 0, 'R', $highlight);
+        $pdf->Cell(36, 5.5, $ytdA !== null ? number_format((float)$ytdA, 2) : '', 1, 1, 'R', $highlight);
     };
 
     if (!empty($g['salaried'])) {
@@ -769,7 +772,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     if ($vac_paid_mode || $vac_curr > 0.009 || $vac_ytd > 0.009) {
         $earn('VacPay-Paid Out', '', '', $vac_curr, $vac_ytd, true);
     }
-    $earn('Public Holiday', '', '', (float)$g['ph_pay'], (float)$ytd['ph'], !empty($g['show_zero_stat']));
+    $earn('Public Holiday', '', '', (float)$g['ph_pay'], (float)$ytd['ph'], !empty($g['show_zero_stat']), true);
     if ((float)$g['bonus'] > 0.009 || (float)$ytd['bonus'] > 0.009) {
         $earn('Bonus', '', '', (float)$g['bonus'], (float)$ytd['bonus']);
     }
@@ -784,7 +787,7 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     foreach ($deductNames as $deductName) {
         $earn((string)$deductName, '', '', -1 * (float)($g['deduct_lines'][$deductName] ?? 0), -1 * (float)($ytd['deduct_lines'][$deductName] ?? 0));
     }
-    $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], !empty($g['show_zero_stat']));
+    $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], !empty($g['show_zero_stat']), true);
 
     $y = $pdf->GetY() + 4;
     $pdf->SetXY($L, $y);
@@ -889,11 +892,12 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     $pdf->SetFont('Arial','',9);
     $rate = $g['lines'][0]['hourly_rate'] ?? 0;
     $reg_amt = $g['reg_h'] * $rate;
-    $row_line = function($label,$hrs,$amt) use ($pdf){
+    $row_line = function($label,$hrs,$amt,$highlight=false) use ($pdf){
+        if ($highlight) $pdf->SetFillColor(255, 243, 176);
         $pdf->SetX(15);
-        $pdf->Cell(95, 6, '  ' . $label, 'B', 0, 'L');
-        $pdf->Cell(30, 6, $hrs !== null ? number_format($hrs,2) : '', 'B', 0, 'R');
-        $pdf->Cell(60, 6, money($amt), 'B', 1, 'R');
+        $pdf->Cell(95, 6, '  ' . $label, 'B', 0, 'L', $highlight);
+        $pdf->Cell(30, 6, $hrs !== null ? number_format($hrs,2) : '', 'B', 0, 'R', $highlight);
+        $pdf->Cell(60, 6, money($amt), 'B', 1, 'R', $highlight);
     };
     if (!empty($g['salaried'])) $row_line('Salary', null, (float)$g['reg_pay']);
     if (empty($g['salaried']) && $g['reg_h']  > 0) $row_line('Regular',  $g['reg_h'],  $reg_amt);
@@ -902,6 +906,8 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     if (!empty($vac_paid_mode) && $g['vac_earn'] > 0.009) {
         $row_line('Vacation', null, $g['vac_earn']);
     }
+    if ((float)($g['ph_pay'] ?? 0) > 0.009) $row_line('Public Holiday', null, $g['ph_pay'], true);
+    if ((float)($g['stat_worked'] ?? 0) > 0.009) $row_line('Stat Day Worked', null, $g['stat_worked'], true);
     if ((float)($g['bonus'] ?? 0) > 0.009) $row_line('Bonus', null, $g['bonus']);
     if ((float)($g['car_allow'] ?? 0) > 0.009) $row_line('Car allowance', null, $g['car_allow']);
     foreach (($g['benefit_lines'] ?? []) as $benefitName => $benefitAmt) {
