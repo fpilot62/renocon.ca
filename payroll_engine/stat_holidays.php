@@ -430,6 +430,62 @@ if (!function_exists('sh_stat_line_exists')) {
     }
 }
 
+if (!function_exists('sh_finalized_stat_line')) {
+    /**
+     * The pay-ledger line already written for this employee, site, and holiday.
+     * status is "paid" or "pending" (or the stored status when it is something else).
+     *
+     * @return array{id:int,amount:float,status:string}|null
+     */
+    function sh_finalized_stat_line(PDO $pdo, int $userId, int $siteId, string $holidayDate): ?array {
+        $st = $pdo->prepare(
+            "SELECT id, COALESCE(total_gross,0) AS amount,
+                    LOWER(TRIM(COALESCE(status,''))) AS row_status
+               FROM payroll_finalized
+              WHERE user_id=? AND site_id=? AND work_date=?
+                AND COALESCE(category,'') = 'Statutory Holiday'
+              ORDER BY id DESC
+              LIMIT 1"
+        );
+        $st->execute([$userId, $siteId, $holidayDate]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return null;
+        }
+        $paymentStatus = '';
+        $paidAmount = 0.0;
+        try {
+            $extra = $pdo->prepare(
+                "SELECT COALESCE(paid_amount,0) AS paid_amount,
+                        LOWER(TRIM(COALESCE(payment_status,''))) AS payment_status
+                   FROM payroll_finalized WHERE id=?"
+            );
+            $extra->execute([(int)$row['id']]);
+            $ex = $extra->fetch(PDO::FETCH_ASSOC);
+            if ($ex) {
+                $paidAmount = (float)$ex['paid_amount'];
+                $paymentStatus = (string)$ex['payment_status'];
+            }
+        } catch (Throwable $e) {
+            $paymentStatus = '';
+            $paidAmount = 0.0;
+        }
+        $stored = (string)$row['row_status'];
+        if (in_array($paymentStatus, ['paid', 'remitted'], true) || $paidAmount > 0.02 || in_array($stored, ['paid', 'remitted'], true)) {
+            $payStatus = 'paid';
+        } elseif ($stored === '' || $stored === 'pending') {
+            $payStatus = 'pending';
+        } else {
+            $payStatus = $stored;
+        }
+        return [
+            'id' => (int)$row['id'],
+            'amount' => round((float)$row['amount'], 2),
+            'status' => $payStatus,
+        ];
+    }
+}
+
 if (!function_exists('sh_post_stat_line')) {
     function sh_post_stat_line(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser = 0): bool {
         if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {

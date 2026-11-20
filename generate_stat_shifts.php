@@ -146,6 +146,17 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
     $dupQ = $pdo->prepare("SELECT id FROM statutory_pay_items WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=? LIMIT 1");
     $dupQ->execute([$orgId, $userId, $siteId, $holidayDate]);
     $postedId = $dupQ->fetchColumn();
+    $postedStatus = '';
+    $finStat = function_exists('sh_finalized_stat_line') ? sh_finalized_stat_line($pdo, $userId, $siteId, $holidayDate) : null;
+    if ($finStat) {
+        if (!$postedId) {
+            $postedId = $finStat['id'];
+        }
+        $amount = (float)$finStat['amount'];
+        $postedStatus = (string)$finStat['status'];
+    } elseif ($postedId) {
+        $postedStatus = 'posted';
+    }
     $rate = function_exists('pe_profile_hourly_rate')
         ? pe_profile_hourly_rate($pdo, $userId, $holidayDate)
         : (float)$person['hourly_rate'];
@@ -180,6 +191,9 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
     } else {
         $change = 'No hours on holiday. Insert ADW $'.number_format($amount, 2).' only.';
     }
+    if ($postedId) {
+        $change = 'Already on the pay ledger. $'.number_format($amount, 2).($postedStatus !== '' ? ', '.$postedStatus : '').'.';
+    }
     return $person + [
         'province' => $province,
         'lookback_from'=>$from, 'lookback_to'=>$to, 'regular_wages'=>$regular,
@@ -188,7 +202,7 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
         'holiday_hours'=>$holiday_hours, 'worked_pay'=>$worked_pay,
         'work_mult'=>1.5, 'orig_gross'=>$origGross, 'orig_paid'=>$origPaid ? 1 : 0,
         'work_posted'=>$workPosted ? 1 : 0, 'att_id'=>$attId,
-        'worked_holiday'=>$worked, 'posted_id'=>$postedId,
+        'worked_holiday'=>$worked, 'posted_id'=>$postedId, 'posted_status'=>$postedStatus,
         'hourly_rate'=>$rate, 'change_text'=>$change,
         'formula'=>$calc['formula'],
     ];
@@ -571,7 +585,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
           <td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td>
           <td><?php $wp=(float)($r['worked_pay'] ?? 0); echo $wp>0 ? '$'.number_format($wp,2) : '—'; ?></td>
           <td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td>
-          <td><?php if($r['posted_id']):?><span class="badge badge-success">Posted</span><?php else:?>Ready<?php if($r['worked_holiday']):?> · <span class="text-danger">worked holiday</span><?php endif;?><?php endif;?></td>
+          <td><?php if($r['posted_id']):?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status'])):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php else:?>Ready<?php if($r['worked_holiday']):?> · <span class="text-danger">worked holiday</span><?php endif;?><?php endif;?></td>
         </tr>
         <?php endforeach; endforeach; endif;?>
       </tbody>
@@ -641,7 +655,7 @@ foreach ($sg as $sid => $g):
   <td colspan="11"><button type="button" class="stat-site-toggle" data-site="<?= (int)$sid ?>" onclick="event.stopPropagation(); statToggleSite(this);">▾</button> <?=htmlspecialchars($g['name'])?> · <?=$g['n']?> people · <span class="stat-site-total">$<?=number_format($g['amt'], 2)?></span> · avg <span class="stat-site-avg">$<?=number_format($g['n']>0?$g['amt']/$g['n']:0, 2)?></span></td>
 </tr>
 <?php foreach ($g['rows'] as $r): ?>
-<tr class="stat-emp-row <?=$r['posted_id']?'posted':($r['worked_holiday']?'worked':'')?>" data-site="<?= (int)$sid ?>" data-stat-amt="<?=htmlspecialchars(number_format((float)$r['amount'], 2, '.', ''))?>" data-stat-ready="<?= empty($r['posted_id']) ? '1' : '0' ?>"><td><?php if(!$r['posted_id']):?><input type="checkbox" name="items[]" value="<?=$r['id'].':'.$r['SId']?>"><?php else:?><span class="badge badge-success">Posted</span><?php endif;?></td><td><?=htmlspecialchars($r['nick_name'].' ['.$r['province'].']')?></td><td><?=htmlspecialchars($r['Name'])?></td><td><?=$r['lookback_from']?> – <?=$r['lookback_to']?></td><td>$<?=number_format($r['base'],2)?><br><small>Regular $<?=number_format($r['regular_wages'],2)?> · Vac $<?=number_format($r['vacation_pay'],2)?></small></td><td><?=htmlspecialchars($r['formula'])?></td><td><strong>$<?=number_format($r['amount'],2)?></strong></td><td><?=number_format($r['equiv_hours'],2)?>h</td><td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td><td><?= ((float)($r['worked_pay'] ?? 0) > 0) ? '$'.number_format((float)$r['worked_pay'], 2) : '—' ?></td><td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td><td><?=!empty($r['start_date'])?'Service since '.htmlspecialchars($r['start_date']):'Recent finalized earnings used';?><?php if($r['worked_holiday']):?><br><strong class="text-danger">Worked holiday: premium pay must be reviewed separately.</strong><?php endif;?></td></tr>
+<tr class="stat-emp-row <?=$r['posted_id']?'posted':($r['worked_holiday']?'worked':'')?>" data-site="<?= (int)$sid ?>" data-stat-amt="<?=htmlspecialchars(number_format((float)$r['amount'], 2, '.', ''))?>" data-stat-ready="<?= empty($r['posted_id']) ? '1' : '0' ?>"><td><?php if(!$r['posted_id']):?><input type="checkbox" name="items[]" value="<?=$r['id'].':'.$r['SId']?>"><?php else:?><span class="badge badge-success">Posted</span><?php if(!empty($r['posted_status'])):?><div class="small-note">$<?=number_format((float)$r['amount'],2)?> · <?=htmlspecialchars((string)$r['posted_status'])?></div><?php endif;?><?php endif;?></td><td><?=htmlspecialchars($r['nick_name'].' ['.$r['province'].']')?></td><td><?=htmlspecialchars($r['Name'])?></td><td><?=$r['lookback_from']?> – <?=$r['lookback_to']?></td><td>$<?=number_format($r['base'],2)?><br><small>Regular $<?=number_format($r['regular_wages'],2)?> · Vac $<?=number_format($r['vacation_pay'],2)?></small></td><td><?=htmlspecialchars($r['formula'])?></td><td><strong>$<?=number_format($r['amount'],2)?></strong></td><td><?=number_format($r['equiv_hours'],2)?>h</td><td><?=number_format((float)($r['holiday_hours'] ?? 0), 2)?></td><td><?= ((float)($r['worked_pay'] ?? 0) > 0) ? '$'.number_format((float)$r['worked_pay'], 2) : '—' ?></td><td class="small-note"><?=htmlspecialchars((string)($r['change_text'] ?? ''))?></td><td><?=!empty($r['start_date'])?'Service since '.htmlspecialchars($r['start_date']):'Recent finalized earnings used';?><?php if($r['worked_holiday']):?><br><strong class="text-danger">Worked holiday: premium pay must be reviewed separately.</strong><?php endif;?></td></tr>
 <?php endforeach; endforeach; ?>
 <?php if(!$preview):?><tr><td colspan="12" class="text-center text-muted p-4">No eligible employees with scoped recent earnings for <?=htmlspecialchars(implode('/', $holidayProvinces))?> on this date.</td></tr><?php endif;?></tbody>
 <?php if($preview):?><tfoot><tr class="stat-total-foot"><td colspan="6">Total ticked / avg daily</td><td><span class="stat-single-total">$0.00</span><div class="tiny-avg">avg <span class="stat-single-avg">$0.00</span></div></td><td colspan="4"></td></tr></tfoot><?php endif;?>
