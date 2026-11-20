@@ -188,6 +188,9 @@ function stat_bf_plan(PDO $pdo, int $orgId, string $from, string $to): array {
                 if (!$calc['eligible'] || (float)$calc['amount'] < 0.01) {
                     continue;
                 }
+                if (function_exists('sh_should_hold_stat') && sh_should_hold_stat($pdo, $orgId, $uid, $sid, $h['holiday_date'], $h['holiday_name'], $prov, (float)$calc['amount'], null, false)) {
+                    continue;
+                }
                 $group['eligible']++;
                 $target = stat_bf_target($pdo, $orgId, $uid, $sid, $h['holiday_date']);
                 $row = [
