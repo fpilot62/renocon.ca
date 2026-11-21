@@ -31,7 +31,7 @@ td, th { border-bottom: 1px solid #e4dccb; padding: 6px 10px; text-align: left; 
 </style>
 </head>
 <body>
-<?php if (function_exists('privacy_banner_html')) { echo privacy_banner_html(); } ?>
+<?= function_exists('privacy_banner_html') ? privacy_banner_html() : '' ?>
 <h1>Ontario Employer Health Tax, <?= (int)$year ?></h1>
 <p class="note">This is the annual figure from remuneration stored on Ontario sites. It is not filed with the Ministry of Finance. The rate depends on total Ontario remuneration. The tax is that rate times remuneration after this organization's share of the exemption. An associated group over $5,000,000 has no exemption unless you record that the group is under the cap.</p>
 <form method="get">

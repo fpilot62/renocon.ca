@@ -180,8 +180,14 @@ $_SESSION['user_level'] = 5;
 $_SESSION['org_id'] = 1;
 $opened = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
 $note = $pdo->query("SELECT note FROM privacy_access_log WHERE resource = 'payroll_eht_report.php' ORDER BY id DESC LIMIT 1")->fetchColumn();
-check('the switch lets a superadmin through without a grant', $opened['allow'] && $opened['reason'] === 'platform_full_access' && $note === 'platform_full_access');
-check('the banner names the temporary full access', privacy_banner_html() === '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">Platform full access is ON (temporary until orgs are sold)</div>' || strpos(privacy_banner_html(), 'Platform full access is ON (temporary until orgs are sold)') !== false);
+check('the switch lets a superadmin through without a grant', $opened['allow'] && $opened['reason'] === 'platform_full' && !$opened['support'] && $note === 'platform_full_access');
+check('the banner names the temporary full access', strpos(privacy_banner_html(), 'Platform full access is ON (temporary until orgs are sold).') !== false);
+$grantUntil = date('Y-m-d H:i:s', time() + 3600);
+$pdo->prepare('INSERT INTO privacy_support_grants (org_id, granted_by, reason, starts_at, expires_at, created_at) VALUES (2, 9, ?, ?, ?, ?)')
+    ->execute(['Check the missing clock-out from Tuesday.', $grantUntil, $grantUntil, $grantUntil]);
+$withGrant = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
+check('a live grant still uses the grant path while the switch is on', $withGrant['allow'] && $withGrant['reason'] === 'support' && $withGrant['support']);
+$pdo->exec('DELETE FROM privacy_support_grants');
 $_SESSION['user_level'] = 20;
 $_SESSION['org_id'] = 2;
 $adminStill = privacy_access($pdo, 3, 'employee', 'staff_audit.php', 'view', 20, true);

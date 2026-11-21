@@ -5,8 +5,9 @@
  * Platform superadmins (role level 10 and below) do not receive an
  * organization's pay, bank, SIN, employee, report, or attachment data
  * unless an organization admin has an unexpired support grant.
- * PLATFORM_SUPERADMIN_FULL_ACCESS=1 in the private env file lifts that
- * grant for superadmins only. Any other value, or a missing key, leaves it on.
+ * PLATFORM_SUPERADMIN_FULL_ACCESS=1 in the private payroll env file
+ * lets those superadmins through until it is set back to 0. Any other
+ * value, or a missing key, leaves the grant in place. The grant flow stays.
  * Inside an organization, a higher role number sees less.
  *
  * This file does not calculate payroll and does not mark anyone paid.
@@ -457,23 +458,24 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
     }
 }
 
-function privacy_remember_access(bool $support, ?array $grant, string $orgName): void
+function privacy_remember_access(bool $support, ?array $grant, string $orgName, bool $fullAccess = false): void
 {
     $GLOBALS['privacy_access_state'] = [
         'support' => $support,
         'grant' => $grant,
         'org_name' => $orgName,
+        'full_access' => $fullAccess,
     ];
 }
 
 function privacy_banner_html(): string
 {
-    if (privacy_platform_full_access() && privacy_session_level() <= 10) {
+    $state = $GLOBALS['privacy_access_state'] ?? null;
+    if (is_array($state) && !empty($state['full_access'])) {
         return '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">'
-            . 'Platform full access is ON (temporary until orgs are sold)'
+            . 'Platform full access is ON (temporary until orgs are sold).'
             . '</div>';
     }
-    $state = $GLOBALS['privacy_access_state'] ?? null;
     if (!is_array($state) || empty($state['support']) || !is_array($state['grant'] ?? null)) {
         return '';
     }
@@ -572,12 +574,17 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
     }
     $decision = privacy_business_decision($level, privacy_session_org(), $orgId, $grant, $dataClass, time(), $maxLevel);
     $decision['grant'] = $decision['support'] ? $grant : null;
-    $full = privacy_platform_full_access() && $level <= 10 && $orgId > 0 && $dataClass !== 'platform';
-    if ($full) {
+    $fullAccess = false;
+    if (
+        !$decision['allow']
+        && ($decision['reason'] ?? '') === 'support'
+        && $level <= 10
+        && privacy_platform_full_access()
+    ) {
         $decision['allow'] = true;
-        $decision['support'] = true;
-        $decision['reason'] = 'platform_full_access';
-        $decision['grant'] = null;
+        $decision['support'] = false;
+        $decision['reason'] = 'platform_full';
+        $fullAccess = true;
     }
     if ($log && $decision['reason'] !== 'choose_org') {
         privacy_log_event(
@@ -585,11 +592,11 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
             $decision['allow'] ? $action : 'deny',
             $resource,
             $orgId,
-            (!$full && $decision['support']) ? (int)($grant['id'] ?? 0) : null,
-            $full ? 'platform_full_access' : null
+            $decision['support'] ? (int)($grant['id'] ?? 0) : null,
+            $fullAccess ? 'platform_full_access' : null
         );
     }
-    if ($decision['allow'] && $decision['support']) {
+    if ($decision['allow'] && ($decision['support'] || $fullAccess)) {
         $orgName = '';
         try {
             $st = $pdo->prepare('SELECT org_name FROM organizations WHERE id = ?');
@@ -598,7 +605,7 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
         } catch (Throwable $e) {
             $orgName = '';
         }
-        privacy_remember_access(true, $grant, $orgName);
+        privacy_remember_access($decision['support'], $decision['support'] ? $grant : null, $orgName, $fullAccess);
     }
     return $decision;
 }
