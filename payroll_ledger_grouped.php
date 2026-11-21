@@ -9,7 +9,8 @@ require_once 'engine/menu_generator.php';
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 $sess_user_level = isset($_SESSION['user_level']) ? (int)$_SESSION['user_level'] : 99;
-$org_id = (int)($_SESSION['org_id'] ?? 1);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 1);
 
 $from_date   = $_GET['from_date']   ?? '2026-02-01';
 $to_date     = $_GET['to_date']     ?? '2026-05-31';

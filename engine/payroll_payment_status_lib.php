@@ -193,6 +193,18 @@ function pstat_row_key(int $siteId, int $userId): string
 
 function pstat_default_org_id(PDO $pdo): int
 {
+    if (function_exists('ps_topbar_org')) {
+        $top = ps_topbar_org();
+        if ($top > 0) {
+            return $top;
+        }
+    }
+    if (function_exists('ps_org_id')) {
+        $session = ps_org_id();
+        if ($session > 0) {
+            return $session;
+        }
+    }
     try {
         $st = $pdo->prepare('SELECT id FROM organizations WHERE org_name = ? LIMIT 1');
         $st->execute(['PK BC Food INC']);

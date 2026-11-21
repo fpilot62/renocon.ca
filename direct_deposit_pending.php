@@ -20,7 +20,8 @@ if ($reviewer_id <= 0 || $user_level > 30) {
     exit;
 }
 
-$org_scope = ($user_level <= 10) ? null : $session_org;
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_scope = ($user_level <= 10) ? ((function_exists('ps_topbar_org') && ps_topbar_org() > 0) ? ps_topbar_org() : null) : $session_org;
 $msg = '';
 $error = '';
 $focus_id = (int)($_GET['user_id'] ?? $_POST['user_id'] ?? 0);

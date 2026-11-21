@@ -237,7 +237,16 @@ if (empty($rows)) { die("Selected rows not found."); }
 
 $vac_paid_mode = false;
 try {
-    $orgGuess = (int)(!$is_cli ? ($_SESSION['org_id'] ?? 0) : 0);
+    $orgGuess = 0;
+    if (!$is_cli && is_file(__DIR__ . '/payroll_scope.php')) {
+        require_once __DIR__ . '/payroll_scope.php';
+    }
+    if (!$is_cli && function_exists('ps_topbar_org')) {
+        $orgGuess = ps_topbar_org();
+    }
+    if ($orgGuess <= 0 && !$is_cli) {
+        $orgGuess = (int)($_SESSION['org_id'] ?? 0);
+    }
     if ($orgGuess <= 0 && !empty($rows[0]['site_id'])) {
         $oq = $pdo->prepare("SELECT org_id FROM sites WHERE SId=? LIMIT 1");
         $oq->execute([(int)$rows[0]['site_id']]);

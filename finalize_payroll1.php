@@ -11,7 +11,8 @@ require_once 'engine/menu_generator.php';
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // 1. SECURITY GATE
-$current_org_id = (int)($_SESSION['org_id'] ?? 0);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$current_org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 0);
 $user_lvl       = (int)($_SESSION['user_level'] ?? 99);
 
 if (!isset($_SESSION['user_id']) || $user_lvl >= 30) { 

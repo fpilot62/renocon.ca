@@ -2,7 +2,8 @@
 /** Path: /payroll_statement.php */
 require_once 'engine.php';
 
-$org_filter = $_SESSION['org_id']; // Or capture from GET if super-admin
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_filter = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : $_SESSION['org_id'];
 $from_date  = $_GET['from'] ?? date('Y-m-01');
 $to_date    = $_GET['to'] ?? date('Y-m-t');
 
