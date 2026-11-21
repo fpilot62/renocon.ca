@@ -89,22 +89,17 @@ if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $holidayDate)) { exit('Invalid holiday 
 if ($siteFilter) { ps_assert_site($pdo, $siteFilter, $orgId); }
 
 function stat_selected_org(PDO $pdo): int {
-    if (!ps_is_superadmin()) {
-        return ps_selected_org($pdo);
+    $org = ps_topbar_org();
+    if ($org > 0) {
+        return $org;
     }
-    $raw = $_GET['org_id'] ?? $_POST['org_id'] ?? null;
-    if ($raw !== null && $raw !== '' && $raw !== 'all' && (int)$raw > 0) {
-        return (int)$raw;
+    if (ps_is_superadmin() && function_exists('sh_org_with_latest_pending_stat')) {
+        $org = sh_org_with_latest_pending_stat($pdo);
+        if ($org > 0) {
+            return $org;
+        }
     }
-    $session = ps_org_id();
-    if ($session > 0) {
-        return $session;
-    }
-    $cookie = $_COOKIE['sip_org_id'] ?? ($_COOKIE['sa_org_id'] ?? '');
-    if ($cookie !== '' && $cookie !== 'all' && (int)$cookie > 0) {
-        return (int)$cookie;
-    }
-    return 0;
+    return ps_is_superadmin() ? 0 : ps_org_id();
 }
 
 function stat_holiday_provinces_for(PDO $pdo, array $orgProvinces, string $holidayDate, string $holidayName): array {

@@ -929,7 +929,19 @@ function ledgerOnOrgChange(sel){
         if (function_exists('sh_review_banner_html')) { echo sh_review_banner_html($pdo, (int)$user_org_id, $from_date, $to_date); }
         ?>
         <?php if (!empty($pendingStatApproval)): ?>
-        <div class="alert alert-warning font-weight-bold"><?= (int)$pendingStatApproval ?> stat holiday lines need approval before they can be paid. <a href="<?= htmlspecialchars(function_exists('sh_stat_pay_href') ? sh_stat_pay_href($pdo, (int)$user_org_id) : ('generate_stat_shifts.php?preview_period=1&org_id=' . (int)$user_org_id)) ?>">Open Stat Holiday Pay</a></div>
+        <?php
+        $statBannerOrg = function_exists('ps_topbar_org') ? ps_topbar_org() : (int)$user_org_id;
+        if ($statBannerOrg <= 0 && function_exists('sh_org_with_latest_pending_stat')) {
+            $statBannerOrg = sh_org_with_latest_pending_stat($pdo);
+        }
+        if ($statBannerOrg <= 0) {
+            $statBannerOrg = (int)$user_org_id;
+        }
+        $statBannerHref = function_exists('sh_stat_pay_href')
+            ? sh_stat_pay_href($pdo, $statBannerOrg)
+            : ('generate_stat_shifts.php?preview_period=1&org_id=' . (int)$statBannerOrg);
+        ?>
+        <div class="alert alert-warning font-weight-bold"><?= (int)$pendingStatApproval ?> stat holiday lines need approval before they can be paid. <a href="<?= htmlspecialchars($statBannerHref) ?>">Open Stat Holiday Pay</a></div>
         <?php endif; ?>
         <?php if (ledger_stat_visible((float)$stat_summary['stat_total'])): ?>
         <div class="mb-2 font-weight-bold" style="color:#854d0e;">

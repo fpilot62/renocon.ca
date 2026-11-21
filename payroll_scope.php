@@ -24,6 +24,32 @@ function ps_org_id(): int {
     return (int)($_SESSION['org_id'] ?? 0);
 }
 
+/**
+ * Same org the top bar uses. The menu writes sip_org_id (and sa_org_id, dal_org_id)
+ * and puts org_id on the URL. It does not change the session org, which stays the
+ * home org from login. A superadmin's home org must not override the top bar.
+ * Returns 0 when nothing is selected.
+ */
+function ps_topbar_org_value(bool $super, int $sessionOrg, $requestOrg, $cookieOrg): int {
+    if (!$super) {
+        return $sessionOrg > 0 ? $sessionOrg : 0;
+    }
+    $raw = $requestOrg;
+    if ($raw === null) {
+        $raw = $cookieOrg;
+    }
+    if ($raw === null || $raw === '' || $raw === 'all' || (int)$raw <= 0) {
+        return 0;
+    }
+    return (int)$raw;
+}
+
+function ps_topbar_org(): int {
+    $request = $_GET['org_id'] ?? $_POST['org_id'] ?? null;
+    $cookie = $_COOKIE['sip_org_id'] ?? ($_COOKIE['sa_org_id'] ?? ($_COOKIE['dal_org_id'] ?? null));
+    return ps_topbar_org_value(ps_is_superadmin(), ps_org_id(), $request, $cookie);
+}
+
 function ps_selected_org(PDO $pdo): int {
     if (!ps_is_superadmin()) {
         $org = ps_org_id();

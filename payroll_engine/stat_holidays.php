@@ -694,6 +694,27 @@ if (!function_exists('sh_review_banner_html')) {
     }
 }
 
+if (!function_exists('sh_org_with_latest_pending_stat')) {
+    /** Org that owns the newest statutory line still waiting for approval. Never a hardcoded id. */
+    function sh_org_with_latest_pending_stat(PDO $pdo): int {
+        try {
+            $row = $pdo->query(
+                "SELECT u.org_id
+                   FROM payroll_finalized f
+                   INNER JOIN users u ON u.id = f.user_id
+                  WHERE f.category = 'Statutory Holiday'
+                    AND COALESCE(f.stat_approval_status,'') = 'pending'
+                    AND u.org_id > 0
+                  ORDER BY f.work_date DESC, f.id DESC
+                  LIMIT 1"
+            )->fetch(PDO::FETCH_ASSOC);
+            return $row ? (int)$row['org_id'] : 0;
+        } catch (Throwable $e) {
+            return 0;
+        }
+    }
+}
+
 if (!function_exists('sh_latest_pending_stat_date')) {
     function sh_latest_pending_stat_date(PDO $pdo, int $orgId): ?string {
         if ($orgId <= 0) {
