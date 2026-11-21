@@ -8,7 +8,8 @@ if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_genera
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // 1. SECURITY & ORG CHECK
-$current_org_id = (int)($_SESSION['org_id'] ?? 0);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$current_org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 0);
 $user_lvl       = (int)($_SESSION['user_level'] ?? 99);
 $is_restricted  = ($_SESSION['access_scope'] === 'restricted');
 $assigned_sites = preg_replace('/[^0-9,]/', '', $_SESSION['assigned_site_ids'] ?? '');

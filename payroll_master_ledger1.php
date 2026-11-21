@@ -7,7 +7,8 @@ if (!isset($_SESSION["user_id"]) || empty($_SESSION["user_id"])) {
     exit;
 }
 $sess_user_level = (int)($_SESSION['user_level'] ?? 99);
-$user_org_id     = (int)($_SESSION['org_id'] ?? 1);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$user_org_id     = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 1);
 
 // GATE 2: CLEARANCE PROTECTION
 if ($sess_user_level >= 30) {

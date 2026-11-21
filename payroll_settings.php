@@ -7,7 +7,8 @@ if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] != 1) {
     header("Location: login.php"); exit; 
 }
 
-$org_id = $_SESSION['org_id'];
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : $_SESSION['org_id'];
 $msg = "";
 
 if (isset($_POST['save_settings'])) {

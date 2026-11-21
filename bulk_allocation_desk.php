@@ -32,7 +32,8 @@ if (is_file(__DIR__ . '/break_waiver_finalize_guard.php')) {
 }
 if (!isset($_SESSION['user_id'])) { die("Access Denied."); }
 
-$org_id = (int)($_SESSION['org_id'] ?? 1);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 1);
 
 // ---- single source of truth for all payroll math ----------------------------
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';

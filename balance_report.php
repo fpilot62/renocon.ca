@@ -3,7 +3,8 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
 
-$org_id = $_SESSION['org_id'];
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : $_SESSION['org_id'];
 
 // Calculate total balance for each user
 $sql = "SELECT u.Name, 

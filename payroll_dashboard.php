@@ -17,7 +17,10 @@ $nav_bar_html = function_exists('generateMenu') ? generateMenu($pdo) : '';
 
 $user_lvl = (int)$_SESSION['user_level'];
 $is_super = ($user_lvl <= 10);
-$current_org_id = $is_super ? intval($_GET['org_filter'] ?? $_SESSION['org_id'] ?? 1) : (int)$_SESSION['org_id'];
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$current_org_id = $is_super
+    ? (int)($_GET['org_filter'] ?? ((function_exists('ps_topbar_org') && ps_topbar_org() > 0) ? ps_topbar_org() : ($_SESSION['org_id'] ?? 1)))
+    : (int)$_SESSION['org_id'];
 
 // Fetch Organizations Map for Superadmin selection labels
 $org_names_map = [];

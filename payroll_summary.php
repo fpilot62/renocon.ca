@@ -5,7 +5,8 @@ require_once 'db.php';
 require_once 'engine/menu_generator.php'; 
 
 // 1. SECURITY & ORG CHECK
-$current_org_id = (int)($_SESSION['org_id'] ?? 0);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$current_org_id = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? 0);
 $user_lvl       = (int)($_SESSION['user_level'] ?? 99);
 
 if (!isset($_SESSION['user_id']) || $user_lvl > 30) { 
@@ -27,7 +28,7 @@ try {
     $params[] = $start_date;
     $params[] = $end_date;
 
-    if (!$is_super) {
+    if (!$is_super || $current_org_id > 0) {
         $where[] = "s.org_id = ?"; 
         $params[] = $current_org_id;
     }

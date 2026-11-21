@@ -16,7 +16,7 @@ $isSuper = ps_is_superadmin();
 $sessionOrg = ps_org_id();
 $requested = (int)($_GET['org_id'] ?? 0);
 if ($isSuper) {
-    $orgId = $requested > 0 ? $requested : $sessionOrg;
+    $orgId = $requested > 0 ? $requested : (ps_topbar_org() ?: $sessionOrg);
 } else {
     $orgId = $sessionOrg;
     if ($requested > 0 && $requested !== $orgId) {

@@ -56,11 +56,19 @@ function ps_selected_org(PDO $pdo): int {
         if ($org <= 0) { http_response_code(403); exit('No organization is assigned to this session.'); }
         return $org;
     }
-    $requested = (int)($_GET['org_id'] ?? $_POST['org_id'] ?? ps_org_id());
-    if ($requested <= 0) {
-        $requested = (int)$pdo->query('SELECT id FROM organizations ORDER BY id LIMIT 1')->fetchColumn();
+    $top = ps_topbar_org();
+    if ($top > 0) {
+        return $top;
     }
-    return $requested;
+    $session = ps_org_id();
+    if ($session > 0) {
+        return $session;
+    }
+    try {
+        return (int)$pdo->query('SELECT id FROM organizations ORDER BY id LIMIT 1')->fetchColumn();
+    } catch (Throwable $e) {
+        return 0;
+    }
 }
 
 /**
@@ -74,11 +82,8 @@ function ps_scope_org_id(): int {
         if ($org <= 0) { http_response_code(403); exit('No organization is assigned to this session.'); }
         return $org;
     }
-    $raw = $_GET['org_id'] ?? $_POST['org_id'] ?? ($_COOKIE['sip_org_id'] ?? '');
-    if ($raw === '' || $raw === 'all') {
-        return 0;
-    }
-    return (int)$raw;
+    $top = ps_topbar_org();
+    return $top > 0 ? $top : 0;
 }
 
 /** Location dropdown / site roster. Superadmin orgId=0 → every site. */

@@ -14,7 +14,8 @@ if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // Extract user privilege contexts from your active architecture
 $sess_user_level = isset($_SESSION['user_level']) ? (int)$_SESSION['user_level'] : 99;
-$user_org_id     = (int)($_SESSION['org_id'] ?? $_SESSION['company_id'] ?? 1);
+if (!function_exists('ps_topbar_org') && is_file(__DIR__ . '/payroll_scope.php')) { require_once __DIR__ . '/payroll_scope.php'; }
+$user_org_id     = function_exists('ps_topbar_org') && ps_topbar_org() > 0 ? ps_topbar_org() : (int)($_SESSION['org_id'] ?? $_SESSION['company_id'] ?? 1);
 
 // Capture dynamic input values from the dashboard control header bar
 $from_date       = $_GET['from_date'] ?? date('Y-m-01');
@@ -22,7 +23,11 @@ $to_date         = $_GET['to_date']   ?? date('Y-m-t');
 
 // Enforce multi-tenant permission bounds around the org filter selection
 if ($sess_user_level <= 10) {
-    $selected_org_id = isset($_GET['org_id']) && $_GET['org_id'] !== 'all' ? (int)$_GET['org_id'] : 'all';
+    if (isset($_GET['org_id']) && $_GET['org_id'] !== '' && $_GET['org_id'] !== 'all') {
+        $selected_org_id = (int)$_GET['org_id'];
+    } else {
+        $selected_org_id = (function_exists('ps_topbar_org') && ps_topbar_org() > 0) ? ps_topbar_org() : 'all';
+    }
 } else {
     $selected_org_id = $user_org_id;
 }
