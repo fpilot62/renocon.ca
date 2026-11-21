@@ -16,6 +16,9 @@ require_once __DIR__ . '/engine/attendance_integrity_lib.php';
 require_once __DIR__ . '/engine/attendance_audit_lib.php';
 payroll_require_admin(false, 'Staff audit is for admins only.');
 require_once 'db.php';
+if (is_file(__DIR__ . '/engine/auto_break_lib.php')) {
+    require_once __DIR__ . '/engine/auto_break_lib.php';
+}
 if (is_file(__DIR__ . '/payroll_scope.php')) {
     require_once __DIR__ . '/payroll_scope.php';
 }
@@ -162,6 +165,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $breaks = $brkSrc->fetchAll(PDO::FETCH_ASSOC);
             
             foreach ($breaks as $b) {
+                if (function_exists('ab_feature_on') && !ab_feature_on() && strtolower(trim((string)($b['source'] ?? ''))) === 'auto') {
+                    continue;
+                }
                 $insBrk = $pdo->prepare("INSERT INTO breaks (shift_id, break_start, break_end, start_selfie, end_selfie, start_lat, start_lng, end_lat, end_lng) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 $insBrk->execute([$new_shift_id, $b['break_start'], $b['break_end'], $b['start_selfie'], $b['end_selfie'], $b['start_lat'], $b['start_lng'], $b['end_lat'], $b['end_lng']]);
             }
@@ -223,8 +229,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $shift_id = (int)$_POST['shift_id'];
         privacy_require_business($pdo, privacy_attendance_org($pdo, $shift_id), 'employee', 'staff_audit.php', false, 20, 'update');
 
-        // Wipe existing child links to overwrite cleanly
-        $pdo->prepare("DELETE FROM breaks WHERE shift_id = ?")->execute([$shift_id]);
+        // Wipe existing child links to overwrite cleanly. Leave system auto rows
+        // alone while the feature is off; the cleanup removes those by source.
+        if (function_exists('ab_feature_on') && !ab_feature_on()) {
+            $pdo->prepare("DELETE FROM breaks WHERE shift_id = ? AND (source IS NULL OR LOWER(source) <> 'auto')")->execute([$shift_id]);
+        } else {
+            $pdo->prepare("DELETE FROM breaks WHERE shift_id = ?")->execute([$shift_id]);
+        }
         
         if (!empty($_POST['break_start'])) {
             foreach ($_POST['break_start'] as $idx => $bStartStr) {

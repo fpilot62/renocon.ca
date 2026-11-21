@@ -19,6 +19,15 @@ if (is_file(__DIR__ . '/engine/auto_break_lib.php')) {
 }
 require_once __DIR__ . '/engine/break_waiver_lib.php';
 
+if (function_exists('ab_feature_on') && !ab_feature_on()) {
+    $back = (string)($_GET['return'] ?? $_POST['return'] ?? 'kiosk.php');
+    if (!preg_match('#^[A-Za-z0-9_]+\.php(?:\?[A-Za-z0-9_&=%.+-]*)?$#', $back)) {
+        $back = 'kiosk.php';
+    }
+    header('Location: ' . $back);
+    exit;
+}
+
 $shiftId = (int)($_GET['shift_id'] ?? $_POST['shift_id'] ?? 0);
 $return = (string)($_POST['return'] ?? $_GET['return'] ?? 'kiosk.php');
 if (!preg_match('#^[A-Za-z0-9_./?-]+=[^:\\s]*$#', $return) && !preg_match('#^[A-Za-z0-9_]+\.php(?:\?[A-Za-z0-9_&=%.+-]*)?$#', $return)) {
