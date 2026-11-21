@@ -174,6 +174,29 @@ try {
 }
 check('the platform superadmin cannot create a grant', $self);
 
+putenv('PLATFORM_SUPERADMIN_FULL_ACCESS=1');
+$_SESSION['user_id'] = 1;
+$_SESSION['user_level'] = 5;
+$_SESSION['org_id'] = 1;
+$opened = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
+$note = $pdo->query("SELECT note FROM privacy_access_log WHERE resource = 'payroll_eht_report.php' ORDER BY id DESC LIMIT 1")->fetchColumn();
+check('the switch lets a superadmin through without a grant', $opened['allow'] && $opened['reason'] === 'platform_full_access' && $note === 'platform_full_access');
+check('the banner names the temporary full access', privacy_banner_html() === '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">Platform full access is ON (temporary until orgs are sold)</div>' || strpos(privacy_banner_html(), 'Platform full access is ON (temporary until orgs are sold)') !== false);
+$_SESSION['user_level'] = 20;
+$_SESSION['org_id'] = 2;
+$adminStill = privacy_access($pdo, 3, 'employee', 'staff_audit.php', 'view', 20, true);
+check('an org admin still cannot open another company', !$adminStill['allow'] && $adminStill['reason'] === 'org');
+$_SESSION['user_level'] = 40;
+$staffStill = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
+check('staff still cannot open payroll', !$staffStill['allow']);
+check('org admins do not see the full-access banner', strpos(privacy_banner_html(), 'Platform full access is ON') === false);
+putenv('PLATFORM_SUPERADMIN_FULL_ACCESS');
+$_SESSION['user_level'] = 5;
+$closedAgain = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
+check('the switch off restores the 72 hour grant', !$closedAgain['allow'] && $closedAgain['reason'] === 'support');
+$eht = file_get_contents(dirname(__DIR__) . '/payroll_eht_report.php');
+check('the EHT report shows the privacy banner', strpos($eht, 'privacy_banner_html') !== false);
+
 $root = dirname(__DIR__);
 $pages = [
     'staff_audit.php' => 'employee',

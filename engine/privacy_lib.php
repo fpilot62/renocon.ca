@@ -5,6 +5,8 @@
  * Platform superadmins (role level 10 and below) do not receive an
  * organization's pay, bank, SIN, employee, report, or attachment data
  * unless an organization admin has an unexpired support grant.
+ * PLATFORM_SUPERADMIN_FULL_ACCESS=1 in the private env file lifts that
+ * grant for superadmins only. Any other value, or a missing key, leaves it on.
  * Inside an organization, a higher role number sees less.
  *
  * This file does not calculate payroll and does not mark anyone paid.
@@ -396,10 +398,17 @@ function privacy_active_grant(PDO $pdo, int $orgId, int $now = 0): ?array
     return $row ?: null;
 }
 
-function privacy_log_file(string $action, string $resource, int $orgId, int $actorId): void
+function privacy_platform_full_access(): bool
+{
+    return privacy_flag_enabled('PLATFORM_SUPERADMIN_FULL_ACCESS');
+}
+
+function privacy_log_file(string $action, string $resource, int $orgId, int $actorId, ?string $note = null): void
 {
     $line = date('c') . ' action=' . $action . ' resource=' . $resource
-        . ' org=' . $orgId . ' actor=' . $actorId . "\n";
+        . ' org=' . $orgId . ' actor=' . $actorId
+        . ($note !== null && $note !== '' ? ' note=' . $note : '')
+        . "\n";
     try {
         $dir = dirname(payroll_resolve_env_file(payroll_app_root()));
     } catch (Throwable $e) {
@@ -414,22 +423,23 @@ function privacy_log_file(string $action, string $resource, int $orgId, int $act
     @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
 }
 
-function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgId, ?int $grantId): void
+function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgId, ?int $grantId, ?string $note = null): void
 {
     $action = substr($action, 0, 32);
     $resource = substr($resource, 0, 128);
+    $note = $note !== null ? substr($note, 0, 255) : null;
     $actor = (int)($_SESSION['user_id'] ?? 0);
     $level = privacy_session_level();
     $ip = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
     try {
         if (!privacy_table_exists($pdo, 'privacy_access_log')) {
-            privacy_log_file($action, $resource, $orgId, $actor);
+            privacy_log_file($action, $resource, $orgId, $actor, $note);
             return;
         }
         $st = $pdo->prepare(
             'INSERT INTO privacy_access_log
                 (created_at, actor_id, actor_level, org_id, action, resource, grant_id, ip, note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)'
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         $st->execute([
             date('Y-m-d H:i:s'),
@@ -440,9 +450,10 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
             $resource,
             $grantId,
             $ip !== '' ? $ip : null,
+            $note,
         ]);
     } catch (Throwable $e) {
-        privacy_log_file($action, $resource, $orgId, $actor);
+        privacy_log_file($action, $resource, $orgId, $actor, $note);
     }
 }
 
@@ -457,6 +468,11 @@ function privacy_remember_access(bool $support, ?array $grant, string $orgName):
 
 function privacy_banner_html(): string
 {
+    if (privacy_platform_full_access() && privacy_session_level() <= 10) {
+        return '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">'
+            . 'Platform full access is ON (temporary until orgs are sold)'
+            . '</div>';
+    }
     $state = $GLOBALS['privacy_access_state'] ?? null;
     if (!is_array($state) || empty($state['support']) || !is_array($state['grant'] ?? null)) {
         return '';
@@ -556,13 +572,21 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
     }
     $decision = privacy_business_decision($level, privacy_session_org(), $orgId, $grant, $dataClass, time(), $maxLevel);
     $decision['grant'] = $decision['support'] ? $grant : null;
+    $full = privacy_platform_full_access() && $level <= 10 && $orgId > 0 && $dataClass !== 'platform';
+    if ($full) {
+        $decision['allow'] = true;
+        $decision['support'] = true;
+        $decision['reason'] = 'platform_full_access';
+        $decision['grant'] = null;
+    }
     if ($log && $decision['reason'] !== 'choose_org') {
         privacy_log_event(
             $pdo,
             $decision['allow'] ? $action : 'deny',
             $resource,
             $orgId,
-            $decision['support'] ? (int)($grant['id'] ?? 0) : null
+            (!$full && $decision['support']) ? (int)($grant['id'] ?? 0) : null,
+            $full ? 'platform_full_access' : null
         );
     }
     if ($decision['allow'] && $decision['support']) {
