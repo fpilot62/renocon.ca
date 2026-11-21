@@ -711,6 +711,35 @@ function abf_self_test(): int
     echo "ok  unfinalized and paid shifts are split from edits\n";
     echo "ok  a line edited after 03:34 is skipped\n";
     echo "ok  corrected employees match within 0.01 h\n";
+    $pdo = new PDO('sqlite::memory:');
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->exec('CREATE TABLE payroll_finalized (id INTEGER PRIMARY KEY, status TEXT, payment_status TEXT, paid_amount REAL, reg_hours REAL, total_gross REAL, hourly_rate REAL)');
+    $pdo->exec("INSERT INTO payroll_finalized (id, status, payment_status, paid_amount, reg_hours, total_gross, hourly_rate) VALUES (9384, 'pending', 'Unpaid', 0, 4.5, 90, 20)");
+    $pdo->exec("INSERT INTO payroll_finalized (id, status, payment_status, paid_amount, reg_hours, total_gross, hourly_rate) VALUES (700, 'paid', 'cheque_printed', 100, 5, 100, 20)");
+    $notes = abf_apply($pdo, [
+        'updates' => [
+            ['id' => 9384, 'hours' => 4.5, 'gross' => 90, 'deductions' => []],
+            ['id' => 700, 'hours' => 6, 'gross' => 120, 'deductions' => []],
+        ],
+    ], ['id', 'status', 'payment_status', 'paid_amount', 'reg_hours', 'total_gross', 'hourly_rate']);
+    $kept = $pdo->query('SELECT reg_hours FROM payroll_finalized WHERE id = 9384')->fetchColumn();
+    $paid = $pdo->query('SELECT reg_hours, payment_status FROM payroll_finalized WHERE id = 700')->fetch(PDO::FETCH_ASSOC);
+    if (abs((float)$kept - 4.5) > 0.001 || $notes === [] || !str_contains($notes[0], '700')) {
+        echo "FAIL a no-change update or a paid line was handled wrong\n";
+        return 1;
+    }
+    if ($paid['payment_status'] !== 'cheque_printed' || abs((float)$paid['reg_hours'] - 5) > 0.001) {
+        echo "FAIL the paid line was changed\n";
+        return 1;
+    }
+    $why = abf_why($plan, $live, 201);
+    if (!str_contains($why, 'planned: hours 4.5')) {
+        echo "FAIL why did not print the planned target\n";
+        return 1;
+    }
+    echo "ok  a zero-change update is accepted when the row already matches\n";
+    echo "ok  a paid line is skipped instead of aborting\n";
+    echo "ok  why prints the planned target\n";
     echo "all passed\n";
     return 0;
 }
@@ -759,11 +788,18 @@ function abf_cnf(): array
 function abf_pdo(array $cnf, string $db): PDO
 {
     $socket = $cnf['socket'] !== '' ? ';unix_socket=' . $cnf['socket'] : '';
+    $options = [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ];
+    if (defined('PDO::MYSQL_ATTR_FOUND_ROWS')) {
+        $options[PDO::MYSQL_ATTR_FOUND_ROWS] = true;
+    }
     return new PDO(
         'mysql:host=' . $cnf['host'] . $socket . ';dbname=' . $db . ';charset=utf8mb4',
         $cnf['user'],
         $cnf['password'],
-        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
+        $options
     );
 }
 
@@ -889,7 +925,38 @@ function abf_engine(PDO $pdo, float $gross, array $line, array $shift): array
     return is_array($ded) ? $ded : [];
 }
 
-function abf_apply(PDO $live, array $plan, array $columns): void
+function abf_row_matches(array $row, array $update, array $have): bool
+{
+    if (isset($have['reg_hours']) && !abf_near((float)($row['reg_hours'] ?? 0), (float)$update['hours'], 0.01)) {
+        return false;
+    }
+    if (isset($have['total_gross']) && abs((float)($row['total_gross'] ?? 0) - (float)$update['gross']) > 0.02) {
+        return false;
+    }
+    if (isset($have['reg_pay']) && !isset($have['total_gross']) && abs((float)($row['reg_pay'] ?? 0) - (float)$update['gross']) > 0.02) {
+        return false;
+    }
+    return true;
+}
+
+function abf_read_line(PDO $live, int $id, array $have): ?array
+{
+    $cols = [];
+    foreach (['id', 'status', 'payment_status', 'paid_amount', 'reg_hours', 'total_gross', 'reg_pay', 'hourly_rate', 'category', 'pay_type', 'updated_at', 'modified_at', 'edited_at'] as $col) {
+        if (isset($have[$col])) {
+            $cols[] = '`' . $have[$col] . '` AS `' . $col . '`';
+        }
+    }
+    if ($cols === []) {
+        return null;
+    }
+    $st = $live->prepare('SELECT ' . implode(', ', $cols) . ' FROM payroll_finalized WHERE id = ?');
+    $st->execute([$id]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function abf_apply(PDO $live, array $plan, array $columns): array
 {
     $map = [
         'reg_hours' => 'hours',
@@ -909,7 +976,19 @@ function abf_apply(PDO $live, array $plan, array $columns): void
     foreach ($columns as $col) {
         $have[strtolower($col)] = $col;
     }
+    $skipped = [];
     foreach ($plan['updates'] as $update) {
+        $before = abf_read_line($live, (int)$update['id'], $have);
+        if ($before === null) {
+            $skipped[] = 'line ' . $update['id'] . ' is not on live; left unchanged';
+            continue;
+        }
+        if (abf_is_locked($before) || abf_is_stat($before)) {
+            $skipped[] = 'line ' . $update['id'] . ' is ' . trim((string)($before['status'] ?? ''))
+                . ' / ' . trim((string)($before['payment_status'] ?? ''))
+                . '; paid or cheque_printed, left unchanged';
+            continue;
+        }
         $sets = [];
         $params = [];
         $ded = $update['deductions'];
@@ -949,10 +1028,66 @@ function abf_apply(PDO $live, array $plan, array $columns): void
         }
         $st = $live->prepare($sql);
         $st->execute($params);
-        if ($st->rowCount() < 1) {
-            abf_fail('Line ' . $update['id'] . ' was not updated. It may have been paid since the plan was built.');
+        $after = abf_read_line($live, (int)$update['id'], $have);
+        if ($after !== null && abf_row_matches($after, $update, $have)) {
+            echo 'line ' . $update['id'] . ' holds target hours ' . $after['reg_hours']
+                . ' (driver reported ' . $st->rowCount() . " affected rows)\n";
+            continue;
+        }
+        if ($after !== null && (abf_is_locked($after) || abf_is_stat($after))) {
+            $skipped[] = 'line ' . $update['id'] . ' became ' . trim((string)($after['status'] ?? ''))
+                . ' / ' . trim((string)($after['payment_status'] ?? ''))
+                . ' during the update; left unchanged';
+            continue;
+        }
+        throw new RuntimeException('Line ' . $update['id'] . ' does not hold the target hours after the update.');
+    }
+    return $skipped;
+}
+
+function abf_why(array $plan, array $live, int $id): string
+{
+    $row = null;
+    foreach ($live['lines'] as $line) {
+        if ((int)($line['id'] ?? 0) === $id) {
+            $row = $line;
+            break;
         }
     }
+    $lines = [];
+    $lines[] = 'WHY line ' . $id;
+    if ($row === null) {
+        $lines[] = 'current: not on live';
+    } else {
+        $bits = [];
+        foreach (['status', 'payment_status', 'paid_amount', 'reg_hours', 'total_gross', 'reg_pay', 'hourly_rate', 'category', 'updated_at', 'modified_at', 'edited_at'] as $col) {
+            if (array_key_exists($col, $row)) {
+                $bits[] = $col . '=' . $row[$col];
+            }
+        }
+        $lines[] = 'current: ' . implode(' ', $bits);
+    }
+    $planned = null;
+    foreach ($plan['updates'] as $update) {
+        if ((int)$update['id'] === $id) {
+            $planned = $update;
+            break;
+        }
+    }
+    if ($planned !== null) {
+        $lines[] = 'planned: hours ' . $planned['hours'] . ' gross ' . $planned['gross']
+            . ' from backup hours ' . $planned['backup_hours'] . ' plus auto ' . $planned['auto_hours'] . 'h';
+    } else {
+        $reason = 'not in the update list';
+        foreach ($plan['skips'] as $skip) {
+            if ((int)$skip['id'] === $id) {
+                $reason = (string)$skip['reason'];
+                break;
+            }
+        }
+        $lines[] = 'planned: no write. ' . $reason;
+    }
+    return implode("\n", $lines);
 }
 
 function abf_main(): void
@@ -975,7 +1110,12 @@ function abf_main(): void
         return abf_engine($livePdo, $gross, $line, $shift);
     };
     $plan = abf_plan($backup, $live, $engine);
-    echo abf_format($plan, $mode === 'dry' || $mode === 'go') . "\n";
+    echo abf_format($plan, $mode === 'dry' || $mode === 'go' || $mode === 'why') . "\n";
+    if ($mode === 'why') {
+        echo abf_why($plan, $live, (int)getenv('FIX_LINE')) . "\n";
+        echo "No changes were written to $liveDb.\n";
+        exit(0);
+    }
     if ($mode !== 'go') {
         echo "No changes were written to $liveDb.\n";
         exit($plan['mismatch'] ? 1 : 0);
@@ -985,7 +1125,10 @@ function abf_main(): void
     }
     try {
         $livePdo->beginTransaction();
-        abf_apply($livePdo, $plan, $live['finalized_columns']);
+        $skippedNow = abf_apply($livePdo, $plan, $live['finalized_columns']);
+        foreach ($skippedNow as $note) {
+            echo 'SKIP ' . $note . "\n";
+        }
         $livePdo->commit();
     } catch (Throwable $e) {
         if ($livePdo->inTransaction()) {
