@@ -6,6 +6,13 @@
 #   bash deploy_stat_preview_guard_v1.sh go
 #   bash deploy_stat_preview_guard_v1.sh rollback <ts>
 set -euo pipefail
+# TARGET=staging|live. Default is live. See ops/deploy_target.inc.sh.
+_ops_dir=$(cd "$(dirname "$0")" && pwd)
+if [[ -f $_ops_dir/deploy_target.inc.sh ]]; then
+  # shellcheck disable=SC1091
+  source "$_ops_dir/deploy_target.inc.sh"
+fi
+unset _ops_dir
 M=${1:-check}
 export PAYROLL_APP=${PAYROLL_APP:-/home/renocon/public_html/payroll}
 APP=$PAYROLL_APP
@@ -173,8 +180,10 @@ case "$M" in
       restore_files "$TS"
       exit 1
     fi
-    smoke https://payroll.ecommi.com/ L || echo "SMOKE_WARN ecommi"
-    smoke https://payroll.renocon.ca/ plain || echo "SMOKE_WARN renocon (308 without -L is expected)"
+    smoke "${PAYROLL_URL:-https://payroll.ecommi.com}/" L || echo "SMOKE_WARN primary"
+    if [[ ${TARGET:-live} == live ]]; then
+      smoke https://payroll.renocon.ca/ plain || echo "SMOKE_WARN renocon (308 without -L is expected)"
+    fi
     echo "Installed Stat Holiday Pay page from $PINNED. Rollback: bash $0 rollback $TS"
     ;;
   rollback)

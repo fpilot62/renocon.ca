@@ -171,7 +171,10 @@ try {
 		if (!empty($thread['customer_email']) && filter_var($thread['customer_email'], FILTER_VALIDATE_EMAIL)) {
 			$subject = 'Reply from payroll support';
 			$body = "Hi " . $thread['customer_name'] . ",\n\n" . $message . "\n\nYou can also continue this chat on the payroll site.\n";
-			@mail($thread['customer_email'], $subject, $body, "From: " . SUPPORT_CHAT_FROM_EMAIL . "\r\n");
+			require_once __DIR__ . '/../engine/staging.php';
+			if (!payroll_staging_outbound_blocked('mail')) {
+				@mail($thread['customer_email'], $subject, $body, "From: " . SUPPORT_CHAT_FROM_EMAIL . "\r\n");
+			}
 		}
 		support_chat_respond(array(
 			'ok' => true,

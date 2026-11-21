@@ -6,6 +6,13 @@
 #   bash deploy_ledger_expand_v2.sh go
 #   bash deploy_ledger_expand_v2.sh rollback <ts>
 set -euo pipefail
+# TARGET=staging|live. Default is live. See ops/deploy_target.inc.sh.
+_ops_dir=$(cd "$(dirname "$0")" && pwd)
+if [[ -f $_ops_dir/deploy_target.inc.sh ]]; then
+  # shellcheck disable=SC1091
+  source "$_ops_dir/deploy_target.inc.sh"
+fi
+unset _ops_dir
 M=${1:-check}
 export PAYROLL_APP=${PAYROLL_APP:-/home/renocon/public_html/payroll}
 APP=$PAYROLL_APP

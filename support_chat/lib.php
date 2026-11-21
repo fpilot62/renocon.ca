@@ -173,6 +173,10 @@ function support_chat_notify($thread, $text) {
 	$body .= "Reply in the inbox: /support_chat/inbox.php\n";
 	$headers = "From: " . SUPPORT_CHAT_FROM_EMAIL . "\r\n";
 	$headers .= "Reply-To: " . $thread['customer_email'] . "\r\n";
+	require_once __DIR__ . '/../engine/staging.php';
+	if (payroll_staging_outbound_blocked('mail')) {
+		return;
+	}
 	@mail($to, $subject, $body, $headers);
 }
 

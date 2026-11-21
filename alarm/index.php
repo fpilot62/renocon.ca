@@ -54,7 +54,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             $headers = "MIME-Version: 1.0\r\nContent-type:text/html;charset=UTF-8\r\nFrom: RenoCon Alarms <noreply@renocon.ca>";
             $msg = "<html><body><h2>New Task: {$title}</h2><p>Assigned by: {$current_user_name}</p><a href='" . alarmpulse_page_url('') . "'>Accept Task</a></body></html>";
-            mail($email, "New Alarm Assignment", $msg, $headers);
+            require_once __DIR__ . '/../engine/staging.php';
+            if (!payroll_staging_outbound_blocked('mail')) {
+                mail($email, "New Alarm Assignment", $msg, $headers);
+            }
         }
 
         $sql = "INSERT INTO alarm_tasks (created_by, title, assigned_email, task_date, task_time, address, ringtone, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')";

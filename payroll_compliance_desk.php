@@ -65,6 +65,11 @@ foreach ($raw_payroll_dataset as $row) {
 
 // Handle Bank Auto-Deposit File Generation
 if ($report_type === 'download_eft') {
+    require_once __DIR__ . '/engine/staging.php';
+    if (payroll_staging_outbound_blocked('eft')) {
+        http_response_code(403);
+        exit('Staging does not create or send bank files.');
+    }
     header('Content-Type: text/plain');
     header('Content-Disposition: attachment; filename="COMPANY_WISE_EFT_' . $selected_start . '_TO_' . $selected_end . '.txt"');
     

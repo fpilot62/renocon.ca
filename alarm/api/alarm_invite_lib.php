@@ -180,6 +180,14 @@ function alarm_invite_public(array $row): array {
 }
 
 function alarm_invite_http(string $url, array $headers, string $body, string $user, string $pass): array {
+  $host = strtolower((string)parse_url($url, PHP_URL_HOST));
+  if ($host === 'api.twilio.com' || $host === 'api.resend.com') {
+    require_once __DIR__ . '/../../engine/staging.php';
+    $channel = $host === 'api.twilio.com' ? 'sms' : 'mail';
+    if (payroll_staging_outbound_blocked($channel)) {
+      return ['ok' => false, 'status' => 0, 'error' => 'staging_blocked'];
+    }
+  }
   if (!function_exists('curl_init')) return ['ok' => false, 'status' => 0, 'error' => 'unavailable'];
   $ch = curl_init($url);
   if ($ch === false) return ['ok' => false, 'status' => 0, 'error' => 'unavailable'];
@@ -203,6 +211,10 @@ function alarm_invite_http(string $url, array $headers, string $body, string $us
 }
 
 function alarm_invite_send_sms(string $to, string $text): array {
+  require_once __DIR__ . '/../../engine/staging.php';
+  if (payroll_staging_outbound_blocked('sms')) {
+    return ['ok' => false, 'skipped' => true, 'error' => 'staging_blocked'];
+  }
   $sid = alarm_invite_env('TWILIO_ACCOUNT_SID');
   $token = alarm_invite_env('TWILIO_AUTH_TOKEN');
   $from = alarm_invite_env('TWILIO_FROM');
@@ -219,6 +231,10 @@ function alarm_invite_send_sms(string $to, string $text): array {
 }
 
 function alarm_invite_send_email(string $to, string $subject, string $text): array {
+  require_once __DIR__ . '/../../engine/staging.php';
+  if (payroll_staging_outbound_blocked('mail')) {
+    return ['ok' => false, 'skipped' => true, 'error' => 'staging_blocked'];
+  }
   $key = alarm_invite_env('RESEND_API_KEY');
   $from = alarm_invite_env('RESEND_FROM');
   if ($key === '' || $from === '') return ['ok' => false, 'skipped' => true, 'error' => 'email_not_configured'];

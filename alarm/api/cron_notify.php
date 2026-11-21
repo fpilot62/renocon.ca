@@ -152,6 +152,10 @@ function alarm_save_receipt_queue(array $items): void {
 }
 
 function alarm_expo_post(string $url, array $body): ?array {
+  require_once __DIR__ . '/../../engine/staging.php';
+  if (payroll_staging_outbound_blocked('push')) {
+    return null;
+  }
   $ch = curl_init($url);
   if ($ch === false) return null;
   curl_setopt_array($ch, [
