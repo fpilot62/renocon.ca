@@ -53,6 +53,26 @@ const AB_LABEL = 'Auto break';
 const AB_ONLOAD_ORG = 2;
 const AB_ONLOAD_EXCLUDE_SITES = '0,99,999';
 
+/**
+ * Config switch. Missing file, or any value other than true, means the feature is off.
+ * Off skips Staff Audit load, finalize, split, edit, backfill, and clock-out inserts.
+ */
+function ab_feature_on(): bool
+{
+    static $on = null;
+    if ($on !== null) {
+        return $on;
+    }
+    $path = __DIR__ . '/auto_break_switch.php';
+    if (!is_file($path)) {
+        $on = false;
+        return false;
+    }
+    $value = include $path;
+    $on = $value === true;
+    return $on;
+}
+
 function ab_insert_log_line(int $breakId, int $shiftId, int $siteId): string
 {
     return gmdate('c') . ' inserted_id=' . $breakId . ' shift_id=' . $shiftId . ' org=' . AB_ONLOAD_ORG . ' site=' . $siteId;
@@ -226,6 +246,10 @@ function ab_legacy_break_recorded(array $row): bool
 function ab_plan(array $shift, array $breaks, bool $inPayrollFinalized): array
 {
     $empty = ['action' => 'skip', 'reason' => '', 'window' => null, 'auto_ids' => []];
+    if (!ab_feature_on()) {
+        $empty['reason'] = 'feature off';
+        return $empty;
+    }
     if (ab_is_deleted($shift)) {
         $empty['reason'] = 'deleted';
         return $empty;
@@ -565,6 +589,9 @@ function ab_visible_candidate_sql(bool $hasDeleted, bool $hasFinalized, bool $ha
  */
 function ab_ensure_visible(PDO $pdo, ?string $from, ?string $to, array $siteIds = []): array
 {
+    if (!ab_feature_on()) {
+        return ['inserted' => [], 'error' => ''];
+    }
     try {
         return ab_ensure_visible_write($pdo, $from, $to, $siteIds);
     } catch (Throwable $e) {
@@ -579,6 +606,9 @@ function ab_ensure_visible(PDO $pdo, ?string $from, ?string $to, array $siteIds 
  */
 function ab_ensure_shift_ids(PDO $pdo, array $ids): array
 {
+    if (!ab_feature_on()) {
+        return ['inserted' => [], 'error' => ''];
+    }
     try {
         $clean = [];
         foreach ($ids as $id) {
@@ -837,6 +867,9 @@ function ab_in_payroll_finalized(PDO $pdo, int $shiftId): bool
 
 function ab_insert_break(PDO $pdo, int $shiftId, string $start, string $end, string $source): void
 {
+    if (ab_is_auto_source($source) && !ab_feature_on()) {
+        return;
+    }
     $source = ab_is_auto_source($source) ? 'auto' : 'manual';
     if (ab_has_source($pdo)) {
         $st = $pdo->prepare('INSERT INTO breaks (shift_id, break_start, break_end, source) VALUES (?, ?, ?, ?)');
@@ -1018,6 +1051,9 @@ function ab_copy_breaks(PDO $pdo, int $fromShift, int $toShift): void
     $placeholders = implode(', ', array_fill(0, count($fields) + 1, '?'));
     $ins = $pdo->prepare('INSERT INTO breaks (shift_id, ' . $cols . ') VALUES (' . $placeholders . ')');
     foreach ($rows as $row) {
+        if (!ab_feature_on() && ab_is_auto_source($row['source'] ?? null)) {
+            continue;
+        }
         $vals = [$toShift];
         foreach ($fields as $field) {
             if ($field === 'source') {
@@ -1053,8 +1089,9 @@ function ab_save_editor_breaks(PDO $pdo, int $shiftId, array $starts, array $end
     if (ab_is_finalized($shift, ab_in_payroll_finalized($pdo, $shiftId))) {
         return ['ok' => false, 'error' => 'That shift is finalized. Breaks were not changed.'];
     }
-    $rows = ab_editor_rows(ab_collect_breaks($starts, $ends, $sources, true));
-    $own = !$pdo->inTransaction();
+        $rows = ab_editor_rows(ab_collect_breaks($starts, $ends, $sources, ab_feature_on()));
+        $featureOn = ab_feature_on();
+        $own = !$pdo->inTransaction();
     if ($own) {
         $pdo->beginTransaction();
     }
@@ -1077,7 +1114,11 @@ function ab_save_editor_breaks(PDO $pdo, int $shiftId, array $starts, array $end
                 return ['ok' => false, 'error' => $error . ' Breaks were not changed.'];
             }
         }
-        $pdo->prepare('DELETE FROM breaks WHERE shift_id = ?')->execute([$shiftId]);
+        if ($featureOn) {
+            $pdo->prepare('DELETE FROM breaks WHERE shift_id = ?')->execute([$shiftId]);
+        } else {
+            $pdo->prepare("DELETE FROM breaks WHERE shift_id = ? AND (source IS NULL OR LOWER(source) <> 'auto')")->execute([$shiftId]);
+        }
         foreach ($rows as $row) {
             ab_insert_break($pdo, $shiftId, $row['break_start'], $row['break_end'], $row['source']);
         }
@@ -1098,6 +1139,9 @@ function ab_save_editor_breaks(PDO $pdo, int $shiftId, array $starts, array $end
  */
 function ab_backfill(PDO $pdo, ?int $orgId, bool $apply, array $excludeSites = []): array
 {
+    if (!ab_feature_on()) {
+        return ['counts' => ['add' => 0, 'move' => 0, 'remove' => 0], 'by_org' => [], 'by_site' => [], 'lines' => [], 'apply' => false];
+    }
     if (!ab_has_source($pdo)) {
         throw new RuntimeException('Run migrations/20261111_break_source.sql before auto breaks can be written.');
     }

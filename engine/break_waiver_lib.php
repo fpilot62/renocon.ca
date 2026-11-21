@@ -131,6 +131,9 @@ function bwr_has_real_break(array $shift, array $breaks): bool
 
 function bwr_is_eligible_shift(array $shift, array $breaks): bool
 {
+    if (function_exists('ab_feature_on') && !ab_feature_on()) {
+        return false;
+    }
     if (function_exists('ab_is_deleted') && ab_is_deleted($shift)) {
         return false;
     }
@@ -299,6 +302,9 @@ function bwr_fetch_breaks(PDO $pdo, int $shiftId): array
  */
 function bwr_create_pending(PDO $pdo, int $shiftId, int $userId): array
 {
+    if (function_exists('ab_feature_on') && !ab_feature_on()) {
+        return ['ok' => false, 'error' => 'Automatic breaks are off. No request is needed.'];
+    }
     $shift = bwr_fetch_shift($pdo, $shiftId);
     if ($shift === null) {
         return ['ok' => false, 'error' => 'That shift could not be found.'];
@@ -348,6 +354,9 @@ function bwr_create_pending(PDO $pdo, int $shiftId, int $userId): array
 
 function bwr_clockout_redirect(PDO $pdo, int $shiftId, string $fallback): ?string
 {
+    if (function_exists('ab_feature_on') && !ab_feature_on()) {
+        return null;
+    }
     $shift = bwr_fetch_shift($pdo, $shiftId);
     if ($shift === null) {
         return null;
@@ -369,6 +378,9 @@ function bwr_clockout_redirect(PDO $pdo, int $shiftId, string $fallback): ?strin
  */
 function bwr_pending_for_shifts(PDO $pdo, array $attendanceIds): array
 {
+    if (function_exists('ab_feature_on') && !ab_feature_on()) {
+        return [];
+    }
     $ids = array_values(array_unique(array_filter(array_map('intval', $attendanceIds), static fn($v) => $v > 0)));
     if ($ids === []) {
         return [];
@@ -581,6 +593,12 @@ function bwr_decide(PDO $pdo, int $requestId, string $decision, int $minutes, in
 
 function bwr_apply_break_outcome(PDO $pdo, int $shiftId, array $shift, string $decision, int $minutes): void
 {
+    if (function_exists('ab_feature_on') && !ab_feature_on()) {
+        if ($decision === 'custom') {
+            bwr_ensure_custom_break($pdo, $shiftId, $shift, $minutes, 'manual');
+        }
+        return;
+    }
     if (function_exists('ab_apply_to_shift')) {
         try {
             // Enrich happens inside ab_apply_to_shift after this request is saved.

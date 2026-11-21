@@ -9,6 +9,12 @@
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     return;
 }
+if (is_file(__DIR__ . '/engine/auto_break_lib.php')) {
+    require_once __DIR__ . '/engine/auto_break_lib.php';
+}
+if (function_exists('ab_feature_on') && !ab_feature_on()) {
+    return;
+}
 if (!is_file(__DIR__ . '/engine/break_waiver_lib.php')) {
     return;
 }
