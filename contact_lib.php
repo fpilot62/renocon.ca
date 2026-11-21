@@ -75,6 +75,10 @@ if (!function_exists('contact_digits')) {
             . "Text messages are not set up, so this code is sent by email only.\n\n"
             . "If you did not ask for this, ignore this email.\n";
         $headers = "From: eCommi <noreply@ecommi.com>\r\nContent-Type: text/plain; charset=utf-8";
+        require_once __DIR__ . '/engine/staging.php';
+        if (payroll_staging_outbound_blocked('mail')) {
+            return false;
+        }
         return mail($target, 'Confirm your email and mobile', $body, $headers);
     }
 

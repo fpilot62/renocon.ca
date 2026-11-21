@@ -11,6 +11,13 @@
 # A live file that differs from the pinned base only by the one-line
 # org-scope guard is CLEAN. Any other live drift is a CONFLICT.
 set -euo pipefail
+# TARGET=staging|live. Default is live. See ops/deploy_target.inc.sh.
+_ops_dir=$(cd "$(dirname "$0")" && pwd)
+if [[ -f $_ops_dir/deploy_target.inc.sh ]]; then
+  # shellcheck disable=SC1091
+  source "$_ops_dir/deploy_target.inc.sh"
+fi
+unset _ops_dir
 
 MODE=${1:-}
 TSARG=${2:-}

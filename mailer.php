@@ -13,6 +13,8 @@
  *                  if (!$r['ok']) { ... $r['error'] ... }
  */
 
+require_once __DIR__ . '/engine/staging.php';
+
 // ---- CONFIG -----------------------------------------------------------------
 define('MAIL_MODE',      'mail');                    // 'mail'  or  'smtp'
 define('MAIL_FROM',      'noreply@renocon.ca');      // must be a REAL mailbox on this domain
@@ -30,6 +32,9 @@ define('SMTP_PASS', 'PUT-MAILBOX-PASSWORD-HERE');
  * Send one HTML email. Returns ['ok'=>bool, 'error'=>string].
  */
 function send_mail(string $to, string $subject, string $html, string $to_name = '', array $attachments = []): array {
+    if (payroll_staging_outbound_blocked('mail')) {
+        return ['ok' => false, 'error' => 'Staging does not send mail.', 'blocked' => true];
+    }
     $to = trim($to);
     if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
         return ['ok' => false, 'error' => 'No valid email address on file.'];
@@ -90,6 +95,9 @@ function _mail_body(string $html, array $attachments, string &$headers): string
  * Requires /phpmailer/{PHPMailer.php, SMTP.php, Exception.php}
  */
 function _send_via_smtp(string $to, string $subject, string $html, string $to_name, array $attachments = []): array {
+    if (payroll_staging_outbound_blocked('mail')) {
+        return ['ok' => false, 'error' => 'Staging does not send mail.', 'blocked' => true];
+    }
     $dir = __DIR__ . '/phpmailer';
     if (!file_exists("$dir/PHPMailer.php")) {
         return ['ok' => false, 'error' => "SMTP mode is on but PHPMailer is not installed in $dir"];

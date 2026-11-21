@@ -11,6 +11,7 @@
  */
 
 require_once __DIR__ . '/payroll_db_config.php';
+require_once __DIR__ . '/staging.php';
 
 const PRIVACY_ENC_PREFIX = 'enc:v1:';
 const PRIVACY_IDLE_SECONDS = 1800;
@@ -668,6 +669,9 @@ function privacy_owner_emails(PDO $pdo, int $orgId): array
  */
 function privacy_notify_owners(PDO $pdo, int $orgId, array $message, ?callable $sender = null): array
 {
+    if (payroll_staging_outbound_blocked('mail')) {
+        return ['sent' => 0, 'note' => 'staging does not send mail'];
+    }
     $emails = privacy_owner_emails($pdo, $orgId);
     if (!$emails) {
         return ['sent' => 0, 'note' => 'no owner email on file'];

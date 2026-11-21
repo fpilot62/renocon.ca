@@ -198,6 +198,11 @@ foreach ($bySite as $siteId => $rowsForSite) {
 $onlySite = (int)($_POST['site_id'] ?? 0);
 
 $sendFile = static function (array $bundle) use ($pdo, $issue): void {
+    require_once __DIR__ . '/engine/staging.php';
+    if (payroll_staging_outbound_blocked('eft')) {
+        http_response_code(403);
+        exit('Staging does not create or send bank files.');
+    }
     $profile = $bundle['profile'];
     $seq = dd_take_file_seq($pdo, (int)$profile['site_id'], (int)$profile['file_seq']);
     $body = dd_cpa005_build($profile, $bundle['rows'], $issue, $seq);

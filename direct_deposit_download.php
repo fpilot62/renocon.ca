@@ -56,6 +56,12 @@ if (!$abs) {
     exit('File missing');
 }
 
+require_once __DIR__ . '/engine/staging.php';
+if (payroll_staging_outbound_blocked('eft')) {
+    http_response_code(403);
+    exit('Staging does not serve bank files.');
+}
+
 $orig = (string)($row['direct_deposit_orig_name'] ?: basename($abs));
 $ext = strtolower(pathinfo($abs, PATHINFO_EXTENSION));
 $mime = 'application/octet-stream';
