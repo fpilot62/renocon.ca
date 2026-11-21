@@ -68,6 +68,7 @@ $pdo->exec("INSERT INTO payroll_masters (id, status, exported_at) VALUES (9, 'ex
 
 $report = abo_summarize($pdo);
 $text = abo_format_report($report);
+check('the report names the columns it used', strpos($text, 'detected breaks source column: source') !== false && strpos($text, 'detected attendance date column: clock_in') !== false);
 check('all auto breaks are counted', $report['all']['breaks'] === 2 && $report['all']['shifts'] === 2 && $report['all']['employees'] === 1);
 check('the split is before and after 18 Nov', $report['before']['breaks'] === 1 && $report['after']['breaks'] === 1);
 check('the report names pending, paid, and cheque lines', strpos($text, 'pending: 1') !== false && strpos($text, 'cheque_printed: 1') !== false && strpos($text, 'stat lines left unchanged: 1') !== false);

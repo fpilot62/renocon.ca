@@ -6,8 +6,13 @@
  *   php ops/auto_break_off.php go
  * Does not mark anything paid. Punched breaks are not deleted.
  */
+function abo_say(string $message): void
+{
+    echo $message . "\n";
+}
+
 if (PHP_SAPI !== 'cli') {
-    fwrite(STDERR, "This runner is command line only.\n");
+    abo_say('This runner is command line only.');
     exit(1);
 }
 $mode = $argv[1] ?? 'check';
@@ -17,12 +22,17 @@ if (getenv('ABO_SKIP_DB') === '1') {
     exit(0);
 }
 if (!is_file($app . '/db.php')) {
-    fwrite(STDERR, "Missing db.php under $app\n");
+    abo_say("count error: missing db.php under $app");
     exit(1);
 }
-require_once $app . '/db.php';
+try {
+    require_once $app . '/db.php';
+} catch (Throwable $e) {
+    abo_say('count error: db.php failed: ' . $e->getMessage());
+    exit(1);
+}
 if (!isset($pdo) || !($pdo instanceof PDO)) {
-    fwrite(STDERR, "db.php did not provide a connection.\n");
+    abo_say('count error: db.php did not provide a connection.');
     exit(1);
 }
 $engine = $app . '/payroll_engine/payroll_engine.php';
@@ -33,11 +43,16 @@ require_once __DIR__ . '/../engine/auto_break_off_lib.php';
 
 try {
     if ($mode === 'check') {
-        echo abo_format_report(abo_summarize($pdo)) . "\n";
+        $report = abo_summarize($pdo);
+        echo abo_format_report($report) . "\n";
+        if (!empty($report['error'])) {
+            abo_say('check failed: ' . $report['error']);
+            exit(1);
+        }
         exit(0);
     }
     if ($mode !== 'dry' && $mode !== 'go') {
-        fwrite(STDERR, "Usage: php ops/auto_break_off.php check|dry|go\n");
+        abo_say('Usage: php ops/auto_break_off.php check|dry|go');
         exit(1);
     }
     $pdo->beginTransaction();
@@ -45,7 +60,8 @@ try {
     echo abo_format_apply($result, $mode) . "\n";
     if ($mode === 'dry') {
         $pdo->rollBack();
-        $left = (int)$pdo->query("SELECT COUNT(*) FROM breaks WHERE LOWER(TRIM(COALESCE(source,''))) = 'auto'")->fetchColumn();
+        $source = abo_ident((string)(abo_schema($pdo)['source'] ?? 'source'));
+        $left = (int)$pdo->query("SELECT COUNT(*) FROM breaks WHERE LOWER(TRIM(COALESCE($source,''))) = 'auto'")->fetchColumn();
         echo "auto breaks still present after rollback: $left\n";
         exit(0);
     }
@@ -56,6 +72,6 @@ try {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
-    fwrite(STDERR, "auto-break off failed: " . $e->getMessage() . "\n");
+    abo_say('auto-break off failed: ' . $e->getMessage());
     exit(1);
 }
