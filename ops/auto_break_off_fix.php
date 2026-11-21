@@ -59,9 +59,77 @@ function abf_money(float $hours, float $rate, float $oldHours, float $oldGross):
     return round($oldGross, 2);
 }
 
-function abf_near(float $a, float $b, float $tol = 0.001): bool
+function abf_near(float $a, float $b, float $tol = 0.01): bool
 {
-    return abs($a - $b) <= $tol;
+    if (abs($a - $b) <= $tol) {
+        return true;
+    }
+    return abs(round($a, 2) - round($b, 2)) <= 0.005;
+}
+
+function abf_is_cheque(array $line): bool
+{
+    $blob = strtolower(trim((string)($line['payment_status'] ?? '') . ' ' . (string)($line['status'] ?? '')));
+    return str_contains($blob, 'cheque');
+}
+
+function abf_edit_column(array $lines): string
+{
+    foreach ($lines as $line) {
+        foreach (['updated_at', 'modified_at', 'edited_at'] as $col) {
+            if (array_key_exists($col, $line)) {
+                return $col;
+            }
+        }
+    }
+    return '';
+}
+
+function abf_no_pending(array $group): array
+{
+    if ($group === []) {
+        return [
+            'bucket' => 'unfinalized',
+            'detail' => 'unfinalized',
+            'reason' => 'no finalized line on this shift; hours are computed from the clock and breaks when it is finalized',
+        ];
+    }
+    $paid = 0;
+    $cheque = 0;
+    $stat = 0;
+    foreach ($group as $line) {
+        if (abf_is_stat($line)) {
+            $stat++;
+            continue;
+        }
+        if (abf_is_cheque($line)) {
+            $cheque++;
+            continue;
+        }
+        if (abf_is_locked($line)) {
+            $paid++;
+        }
+    }
+    if ($cheque > 0 || $paid > 0) {
+        $kind = $cheque > 0 ? 'cheque_printed' : 'paid';
+        return [
+            'bucket' => 'other',
+            'detail' => 'paid',
+            'reason' => 'paid or cheque_printed (' . $kind . '); top-up needed, not rewritten',
+        ];
+    }
+    if ($stat === count($group)) {
+        return [
+            'bucket' => 'other',
+            'detail' => 'stat',
+            'reason' => 'only statutory lines on this shift; those amounts stay as stored',
+        ];
+    }
+    return [
+        'bucket' => 'other',
+        'detail' => 'other',
+        'reason' => 'no pending unpaid line on this shift',
+    ];
 }
 
 /**
@@ -133,22 +201,38 @@ function abf_plan(array $backup, array $live, ?callable $engine = null): array
         $autoHours = $autoSeconds / 3600;
         $userId = (int)($shift['user_id'] ?? ($target['user_id'] ?? 0));
         if ($target === null) {
+            $kind = abf_no_pending($group);
             $skips[] = [
                 'id' => 0,
                 'user_id' => $userId,
                 'shift_id' => $shiftId,
-                'reason' => 'no pending unpaid line on this shift, so the auto-break minutes were not added',
+                'bucket' => $kind['bucket'],
+                'detail' => $kind['detail'],
+                'auto_hours' => $autoHours,
+                'reason' => $kind['reason'],
             ];
             $skippedAuto[$userId] = ($skippedAuto[$userId] ?? 0) + $autoHours;
             continue;
         }
         $liveLine = $liveById[(int)$target['id']] ?? null;
-        $reason = abf_skip_reason($target, $liveLine, $cleanupHours);
+        $reason = abf_skip_reason($target, $liveLine, $cleanupHours, abf_edit_column($live['lines']));
         if ($reason !== '') {
+            $bucket = 'edited';
+            $detail = 'edited';
+            if ($liveLine !== null && abf_is_stat($liveLine)) {
+                $bucket = 'other';
+                $detail = 'stat';
+            } elseif ($liveLine !== null && (abf_is_locked($liveLine) || str_contains($reason, 'no longer a pending'))) {
+                $bucket = 'other';
+                $detail = 'paid';
+            }
             $skips[] = [
                 'id' => (int)$target['id'],
                 'user_id' => (int)$target['user_id'],
                 'shift_id' => $shiftId,
+                'bucket' => $bucket,
+                'detail' => $detail,
+                'auto_hours' => $autoHours,
                 'reason' => $reason,
             ];
             $skippedAuto[$userId] = ($skippedAuto[$userId] ?? 0) + $autoHours;
@@ -322,10 +406,81 @@ function abf_plan(array $backup, array $live, ?callable $engine = null): array
             'hours_added' => round(array_sum($fixedAuto) > 0 ? array_sum(array_map(static fn($row) => $row['hours_added'], $employees)) : 0, 4),
         ],
         'mismatch' => $mismatch,
+        'edit_check' => abf_edit_note(abf_edit_column($live['lines'])),
+        'buckets' => abf_buckets($updates, $skips, $autoByShift),
     ];
 }
 
-function abf_skip_reason(array $backupLine, ?array $liveLine, float $cleanupHours): string
+function abf_edit_note(string $column): string
+{
+    if ($column === '') {
+        return 'edit check: no updated_at, modified_at, or edited_at column. Hours within 0.01 of the cleanup value, or equal once both are rounded to 2 decimals, are not an edit.';
+    }
+    return 'edit check: ' . $column . ' column found. A time after ' . ABF_EDIT_AFTER . ' is recorded, and the line is skipped only when the stored hours also differ from the cleanup value by more than 0.01.';
+}
+
+function abf_buckets(array $updates, array $skips, array $autoByShift): array
+{
+    $buckets = [
+        'applied' => ['shifts' => count($updates), 'hours' => 0.0],
+        'unfinalized' => ['shifts' => 0, 'hours' => 0.0],
+        'edited' => ['shifts' => 0, 'hours' => 0.0],
+        'other' => ['shifts' => 0, 'hours' => 0.0],
+    ];
+    $detail = [
+        'paid' => ['shifts' => 0, 'hours' => 0.0],
+        'stat' => ['shifts' => 0, 'hours' => 0.0],
+        'other' => ['shifts' => 0, 'hours' => 0.0],
+    ];
+    foreach ($updates as $update) {
+        $buckets['applied']['hours'] += (float)$update['auto_hours'];
+    }
+    foreach ($skips as $skip) {
+        $bucket = (string)($skip['bucket'] ?? 'other');
+        if (!isset($buckets[$bucket])) {
+            $bucket = 'other';
+        }
+        $buckets[$bucket]['shifts']++;
+        $buckets[$bucket]['hours'] += (float)($skip['auto_hours'] ?? 0);
+        if ($bucket === 'other') {
+            $key = (string)($skip['detail'] ?? 'other');
+            if (!isset($detail[$key])) {
+                $key = 'other';
+            }
+            $detail[$key]['shifts']++;
+            $detail[$key]['hours'] += (float)($skip['auto_hours'] ?? 0);
+        }
+    }
+    $total = 0.0;
+    foreach ($autoByShift as $seconds) {
+        $total += ((int)$seconds) / 3600;
+    }
+    return ['parts' => $buckets, 'detail' => $detail, 'total' => $total];
+}
+
+function abf_reconcile(array $plan): string
+{
+    $b = $plan['buckets']['parts'];
+    $d = $plan['buckets']['detail'];
+    $fmt = static fn(float $hours): string => number_format($hours, 2, '.', '');
+    $total = (float)$plan['buckets']['total'];
+    $lines = [];
+    $lines[] = 'auto hours total ' . $fmt($total)
+        . ' = applied ' . $fmt($b['applied']['hours'])
+        . ' + unfinalized (no line) ' . $fmt($b['unfinalized']['hours'])
+        . ' + edited-skip ' . $fmt($b['edited']['hours'])
+        . ' + other ' . $fmt($b['other']['hours']);
+    $lines[] = '  applied: ' . $b['applied']['shifts'] . ' shifts, ' . $fmt($b['applied']['hours']) . ' h';
+    $lines[] = '  unfinalized (no line): ' . $b['unfinalized']['shifts'] . ' shifts, ' . $fmt($b['unfinalized']['hours']) . ' h';
+    $lines[] = '  edited-skip: ' . $b['edited']['shifts'] . ' shifts, ' . $fmt($b['edited']['hours']) . ' h';
+    $lines[] = '  other: ' . $b['other']['shifts'] . ' shifts, ' . $fmt($b['other']['hours']) . ' h';
+    $lines[] = '    paid or cheque_printed: ' . $d['paid']['shifts'] . ' shifts, ' . $fmt($d['paid']['hours']) . ' h';
+    $lines[] = '    statutory lines only: ' . $d['stat']['shifts'] . ' shifts, ' . $fmt($d['stat']['hours']) . ' h';
+    $lines[] = '    anything else: ' . $d['other']['shifts'] . ' shifts, ' . $fmt($d['other']['hours']) . ' h';
+    return implode("\n", $lines);
+}
+
+function abf_skip_reason(array $backupLine, ?array $liveLine, float $cleanupHours, string $editColumn): string
 {
     if ($liveLine === null) {
         return 'edited since 03:34 UTC: the line is in the backup and not on live';
@@ -333,28 +488,23 @@ function abf_skip_reason(array $backupLine, ?array $liveLine, float $cleanupHour
     if (abf_is_locked($liveLine) || abf_is_stat($liveLine)) {
         return 'the line is no longer a pending unpaid line';
     }
-    $stamp = '';
-    foreach (['updated_at', 'modified_at', 'edited_at'] as $col) {
-        if (!empty($liveLine[$col])) {
-            $stamp = (string)$liveLine[$col];
-            break;
-        }
-    }
+    $stamp = ($editColumn !== '' && !empty($liveLine[$editColumn])) ? (string)$liveLine[$editColumn] : '';
     $liveHours = (float)($liveLine['reg_hours'] ?? 0);
     $liveGross = (float)($liveLine['total_gross'] ?? $liveLine['reg_pay'] ?? 0);
     $rate = (float)($backupLine['hourly_rate'] ?? 0);
     $bakGross = (float)($backupLine['total_gross'] ?? $backupLine['reg_pay'] ?? 0);
     $bakHours = (float)($backupLine['reg_hours'] ?? 0);
     $cleanupGross = abf_money($cleanupHours, $rate, $bakHours, $bakGross);
-    $hoursMatch = abf_near($liveHours, $cleanupHours);
-    $grossMatch = abs($liveGross - $cleanupGross) <= 0.05;
+    $hoursMatch = abf_near($liveHours, $cleanupHours, 0.01);
+    $grossSlack = max(0.15, abs($rate) * 0.02);
+    $grossMatch = abs($liveGross - $cleanupGross) <= $grossSlack;
     if ($hoursMatch && $grossMatch) {
-        if ($stamp !== '' && strcmp($stamp, ABF_EDIT_AFTER) > 0 && !$hoursMatch) {
-            return 'edited since 03:34 UTC (' . $stamp . ')';
-        }
         return '';
     }
-    $when = ($stamp !== '' && strcmp($stamp, ABF_EDIT_AFTER) > 0) ? ' (' . $stamp . ')' : '';
+    $when = ($stamp !== '' && strcmp($stamp, ABF_EDIT_AFTER) > 0) ? ' ' . $editColumn . ' ' . $stamp : '';
+    if ($editColumn === '') {
+        $when = ' (no updated_at column; hours differ by more than 0.01)';
+    }
     return 'edited since 03:34 UTC' . $when . ': live hours ' . $liveHours . ' are not the cleanup clock-span value ' . $cleanupHours;
 }
 
@@ -371,6 +521,8 @@ function abf_format(array $plan, bool $lines): string
 {
     $out = [];
     $out[] = 'AUTO BREAK FIX — add back only the removed auto-break hours';
+    $out[] = $plan['edit_check'];
+    $out[] = abf_reconcile($plan);
     $out[] = 'employees';
     if ($plan['employees'] === []) {
         $out[] = '  (none)';
@@ -445,17 +597,29 @@ function abf_self_test(): int
         ];
     };
     $backup = [
-        'names' => [2 => 'Span', 4 => 'Sibling', 9 => 'Edited'],
-        'shifts' => [2 => $shift(2, 2), 4 => $shift(4, 4), 9 => $shift(9, 9)],
+        'names' => [2 => 'Span', 4 => 'Sibling', 5 => 'Open', 6 => 'Paid', 7 => 'Round', 9 => 'Edited'],
+        'shifts' => [
+            2 => $shift(2, 2),
+            4 => $shift(4, 4),
+            5 => $shift(5, 5),
+            6 => $shift(6, 6),
+            7 => ['user_id' => 7, 'site_id' => 12, 'org_id' => 2, 'clock_in' => '2026-11-07 08:00:00', 'clock_out' => '2026-11-07 20:25:00'],
+            9 => $shift(9, 9),
+        ],
         'breaks' => [
             ['shift_id' => 2, 'source' => 'auto', 'seconds' => 1800],
             ['shift_id' => 4, 'source' => 'auto', 'seconds' => 1800],
+            ['shift_id' => 5, 'source' => 'auto', 'seconds' => 1800],
+            ['shift_id' => 6, 'source' => 'auto', 'seconds' => 1800],
+            ['shift_id' => 7, 'source' => 'auto', 'seconds' => 1500],
             ['shift_id' => 9, 'source' => 'auto', 'seconds' => 1800],
         ],
         'lines' => [
             $line(201, 2, 2, 4.0),
             $line(401, 4, 4, 7.0),
             $line(402, 4, 4, 0.5),
+            $line(601, 6, 6, 7.5),
+            $line(701, 7, 7, 12.0),
             $line(901, 9, 9, 7.5),
         ],
     ];
@@ -465,9 +629,14 @@ function abf_self_test(): int
         $line(201, 2, 2, 8.0),
         $line(401, 4, 4, 7.5),
         $line(402, 4, 4, 0.5),
+        $line(601, 6, 6, 8.0),
+        $line(701, 7, 7, 12.42),
         $line(901, 9, 9, 9.0),
     ];
-    $live['lines'][3]['updated_at'] = '2026-11-21 05:00:00';
+    $live['lines'][3]['payment_status'] = 'paid';
+    $live['lines'][3]['paid_amount'] = 160;
+    $live['lines'][4]['total_gross'] = round(12.42 * 20, 2);
+    $live['lines'][5]['updated_at'] = '2026-11-21 05:00:00';
     $engine = static function (float $gross): array {
         return ['cpp' => round($gross * 0.01, 2), 'ei' => 1.0, 'income_tax' => 2.0, 'wcb' => 0.5, 'vac' => 0.0, 'cpp_er' => 0.2, 'ei_er' => 1.4];
     };
@@ -492,6 +661,20 @@ function abf_self_test(): int
     }
     if (isset($byId[901])) {
         echo "FAIL an edited line was included\n";
+        $fail++;
+    }
+    if (!isset($byId[701]) || abs($byId[701]['hours'] - 12.4167) > 0.001) {
+        echo "FAIL a 2-decimal stored hour was treated as an edit\n";
+        $fail++;
+    }
+    $parts = $plan['buckets']['parts'];
+    $sum = $parts['applied']['hours'] + $parts['unfinalized']['hours'] + $parts['edited']['hours'] + $parts['other']['hours'];
+    if (abs($sum - $plan['buckets']['total']) > 0.001) {
+        echo "FAIL auto hours do not reconcile: $sum vs {$plan['buckets']['total']}\n";
+        $fail++;
+    }
+    if ($parts['unfinalized']['shifts'] !== 1 || $plan['buckets']['detail']['paid']['shifts'] !== 1) {
+        echo "FAIL unfinalized and paid shifts were not split\n";
         $fail++;
     }
     $skipped = array_column($plan['skips'], 'id');
@@ -524,6 +707,8 @@ function abf_self_test(): int
     echo "ok  a capped line gets only the auto-break minutes back\n";
     echo "ok  deductions follow the corrected gross\n";
     echo "ok  the smaller line is not rewritten\n";
+    echo "ok  a 2-decimal hour is not a false edit\n";
+    echo "ok  unfinalized and paid shifts are split from edits\n";
     echo "ok  a line edited after 03:34 is skipped\n";
     echo "ok  corrected employees match within 0.01 h\n";
     echo "all passed\n";
