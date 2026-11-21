@@ -32,17 +32,69 @@ function abo_has(array $cols, string $name): bool
     return in_array($name, $cols, true);
 }
 
-function abo_seconds_expr(PDO $pdo): string
+function abo_pick(array $cols, array $candidates): ?string
 {
-    if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
-        return "CAST(strftime('%s', b.break_end) AS INTEGER) - CAST(strftime('%s', b.break_start) AS INTEGER)";
+    $byLower = [];
+    foreach ($cols as $col) {
+        $byLower[strtolower((string)$col)] = (string)$col;
     }
-    return 'TIMESTAMPDIFF(SECOND, b.break_start, b.break_end)';
+    foreach ($candidates as $candidate) {
+        $key = strtolower($candidate);
+        if (isset($byLower[$key])) {
+            return $byLower[$key];
+        }
+    }
+    return null;
 }
 
-function abo_auto_where(): string
+function abo_ident(string $name): string
 {
-    return "LOWER(TRIM(COALESCE(b.source,''))) = 'auto'";
+    return '`' . str_replace('`', '', $name) . '`';
+}
+
+function abo_schema(PDO $pdo): array
+{
+    static $cache = [];
+    $key = spl_object_id($pdo);
+    if (isset($cache[$key])) {
+        return $cache[$key];
+    }
+    $breaks = abo_columns($pdo, 'breaks');
+    $attendance = abo_columns($pdo, 'attendance');
+    $sites = abo_columns($pdo, 'sites');
+    $cache[$key] = [
+        'breaks' => $breaks,
+        'attendance' => $attendance,
+        'source' => abo_pick($breaks, ['source', 'break_source']),
+        'shift_id' => abo_pick($breaks, ['shift_id', 'attendance_id']),
+        'break_start' => abo_pick($breaks, ['break_start', 'start_time', 'started_at']),
+        'break_end' => abo_pick($breaks, ['break_end', 'end_time', 'ended_at']),
+        'date' => abo_pick($attendance, ['clock_in', 'work_date', 'shift_date', 'date', 'created_at']),
+        'user_id' => abo_pick($attendance, ['user_id', 'employee_id']),
+        'site_id' => abo_pick($attendance, ['site_id']),
+        'att_id' => abo_pick($attendance, ['id']),
+        'site_key' => abo_pick($sites, ['SId', 'sid', 'id', 'site_id']),
+        'site_name' => abo_pick($sites, ['nick_name', 'name', 'site_name']),
+    ];
+    return $cache[$key];
+}
+
+function abo_seconds_expr(PDO $pdo, ?array $schema = null): string
+{
+    $schema = $schema ?? abo_schema($pdo);
+    $start = abo_ident((string)($schema['break_start'] ?? 'break_start'));
+    $end = abo_ident((string)($schema['break_end'] ?? 'break_end'));
+    if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+        return "CAST(strftime('%s', b.$end) AS INTEGER) - CAST(strftime('%s', b.$start) AS INTEGER)";
+    }
+    return "TIMESTAMPDIFF(SECOND, b.$start, b.$end)";
+}
+
+function abo_auto_where(PDO $pdo, ?array $schema = null): string
+{
+    $schema = $schema ?? abo_schema($pdo);
+    $source = abo_ident((string)$schema['source']);
+    return "LOWER(TRIM(COALESCE(b.$source,''))) = 'auto'";
 }
 
 /**
@@ -50,13 +102,31 @@ function abo_auto_where(): string
  */
 function abo_summarize(PDO $pdo, string $split = ABO_SPLIT): array
 {
-    $secs = abo_seconds_expr($pdo);
-    $where = abo_auto_where();
-    $base = "FROM breaks b INNER JOIN attendance a ON a.id = b.shift_id WHERE $where";
-    $one = function (string $extra) use ($pdo, $base, $secs): array {
+    $schema = abo_schema($pdo);
+    if ($schema['source'] === null || $schema['shift_id'] === null || $schema['date'] === null || $schema['att_id'] === null) {
+        return [
+            'split' => $split,
+            'schema' => $schema,
+            'error' => 'Detected columns are not enough to count auto breaks.',
+            'all' => ['breaks' => 0, 'employees' => 0, 'shifts' => 0, 'minutes' => 0, 'hours' => 0],
+            'before' => ['breaks' => 0, 'employees' => 0, 'shifts' => 0, 'minutes' => 0, 'hours' => 0],
+            'after' => ['breaks' => 0, 'employees' => 0, 'shifts' => 0, 'minutes' => 0, 'hours' => 0],
+            'sites' => [],
+            'lines' => ['pending' => 0, 'paid' => 0, 'cheque_printed' => 0, 'other' => 0, 'stat_pending' => 0, 'stat_approved' => 0, 'stat_lines' => 0, 'payrun_locked' => 0],
+            'topups' => [],
+        ];
+    }
+    $secs = abo_seconds_expr($pdo, $schema);
+    $where = abo_auto_where($pdo, $schema);
+    $shiftCol = abo_ident((string)$schema['shift_id']);
+    $attId = abo_ident((string)$schema['att_id']);
+    $dateCol = abo_ident((string)$schema['date']);
+    $userCol = abo_ident((string)($schema['user_id'] ?? 'user_id'));
+    $base = "FROM breaks b INNER JOIN attendance a ON a.$attId = b.$shiftCol WHERE $where";
+    $one = function (string $extra) use ($pdo, $base, $secs, $userCol, $shiftCol): array {
         $sql = "SELECT COUNT(*) AS breaks,
-                       COUNT(DISTINCT a.user_id) AS employees,
-                       COUNT(DISTINCT b.shift_id) AS shifts,
+                       COUNT(DISTINCT a.$userCol) AS employees,
+                       COUNT(DISTINCT b.$shiftCol) AS shifts,
                        COALESCE(SUM(CASE WHEN ($secs) > 0 THEN ($secs) ELSE 0 END), 0) AS seconds
                 $base $extra";
         $row = $pdo->query($sql)->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -69,24 +139,48 @@ function abo_summarize(PDO $pdo, string $split = ABO_SPLIT): array
             'hours' => round($seconds / 3600, 2),
         ];
     };
+    $siteSelect = '0 AS site_id';
+    $siteJoin = '';
+    $siteGroup = '';
+    if ($schema['site_id'] !== null) {
+        $siteCol = abo_ident((string)$schema['site_id']);
+        $siteSelect = "a.$siteCol AS site_id";
+        $siteGroup = "a.$siteCol";
+        if ($schema['site_key'] !== null) {
+            $siteKey = abo_ident((string)$schema['site_key']);
+            $nameExpr = $schema['site_name'] !== null
+                ? 'COALESCE(s.' . abo_ident((string)$schema['site_name']) . ", '')"
+                : "''";
+            $siteSelect .= ", $nameExpr AS site_name";
+            $siteJoin = " LEFT JOIN sites s ON s.$siteKey = a.$siteCol";
+            $siteGroup .= ', ' . ($schema['site_name'] !== null ? 's.' . abo_ident((string)$schema['site_name']) : 'site_id');
+        } else {
+            $siteSelect .= ", '' AS site_name";
+        }
+    } else {
+        $siteSelect .= ", '' AS site_name";
+        $siteGroup = 'site_id';
+    }
     $sites = $pdo->query(
-        "SELECT a.site_id AS site_id, COALESCE(s.nick_name, '') AS site_name,
+        "SELECT $siteSelect,
                 COUNT(*) AS breaks,
                 COALESCE(SUM(CASE WHEN ($secs) > 0 THEN ($secs) ELSE 0 END), 0) AS seconds
          FROM breaks b
-         INNER JOIN attendance a ON a.id = b.shift_id
-         LEFT JOIN sites s ON s.SId = a.site_id
+         INNER JOIN attendance a ON a.$attId = b.$shiftCol
+         $siteJoin
          WHERE $where
-         GROUP BY a.site_id, s.nick_name
-         ORDER BY a.site_id"
+         GROUP BY $siteGroup
+         ORDER BY site_id"
     )->fetchAll(PDO::FETCH_ASSOC);
 
     $lines = abo_line_counts($pdo);
     return [
         'split' => $split,
+        'schema' => $schema,
+        'error' => '',
         'all' => $one(''),
-        'before' => $one("AND DATE(a.clock_in) < " . $pdo->quote($split)),
-        'after' => $one("AND DATE(a.clock_in) >= " . $pdo->quote($split)),
+        'before' => $one('AND DATE(a.' . $dateCol . ') < ' . $pdo->quote($split)),
+        'after' => $one('AND DATE(a.' . $dateCol . ') >= ' . $pdo->quote($split)),
         'sites' => $sites,
         'lines' => $lines,
         'topups' => abo_topups($pdo),
@@ -111,7 +205,7 @@ function abo_line_counts(PDO $pdo): array
         "SELECT f.id, f.attendance_id, f.category, f.status, $payCol, $paidCol, $runCol, $statCol
          FROM payroll_finalized f
          WHERE f.attendance_id IN (
-            SELECT b.shift_id FROM breaks b WHERE " . abo_auto_where() . "
+            SELECT b." . abo_ident((string)(abo_schema($pdo)['shift_id'] ?? 'shift_id')) . " FROM breaks b WHERE " . abo_auto_where($pdo) . "
          )"
     )->fetchAll(PDO::FETCH_ASSOC);
     $exported = abo_exported_payroll_ids($pdo);
@@ -226,7 +320,7 @@ function abo_topups(PDO $pdo): array
          INNER JOIN attendance a ON a.id = f.attendance_id
          LEFT JOIN users u ON u.id = f.user_id
          LEFT JOIN sites s ON s.SId = f.site_id
-         WHERE f.attendance_id IN (SELECT b.shift_id FROM breaks b WHERE " . abo_auto_where() . ")
+         WHERE f.attendance_id IN (SELECT b." . abo_ident((string)(abo_schema($pdo)['shift_id'] ?? 'shift_id')) . " FROM breaks b WHERE " . abo_auto_where($pdo) . ")
          ORDER BY f.user_id, f.work_date, f.id"
     )->fetchAll(PDO::FETCH_ASSOC);
     $out = [];
@@ -255,9 +349,24 @@ function abo_format_bucket(string $label, array $bucket): string
         . '  shifts: ' . $bucket['shifts'];
 }
 
+function abo_format_detected(array $schema): string
+{
+    $lines = [];
+    $lines[] = 'detected breaks columns: ' . ($schema['breaks'] === [] ? '(none)' : implode(', ', $schema['breaks']));
+    $lines[] = 'detected attendance columns: ' . ($schema['attendance'] === [] ? '(none)' : implode(', ', $schema['attendance']));
+    $lines[] = 'detected breaks source column: ' . ($schema['source'] ?? 'NOT FOUND');
+    $lines[] = 'detected attendance date column: ' . ($schema['date'] ?? 'NOT FOUND');
+    $lines[] = 'detected break shift column: ' . ($schema['shift_id'] ?? 'NOT FOUND');
+    return implode("\n", $lines);
+}
+
 function abo_format_report(array $report): string
 {
     $lines = [];
+    $lines[] = abo_format_detected($report['schema']);
+    if (!empty($report['error'])) {
+        $lines[] = 'count error: ' . $report['error'];
+    }
     $lines[] = 'AUTO BREAKS OFF — read only';
     $lines[] = abo_format_bucket('all dates', $report['all']);
     $lines[] = 'by site:';
@@ -317,10 +426,12 @@ function abo_net_hours(?string $clockIn, ?string $clockOut, int $breakSeconds): 
 function abo_break_seconds(PDO $pdo, int $shiftId, bool $includeAuto): int
 {
     $secs = abo_seconds_expr($pdo);
+    $schema = abo_schema($pdo);
+    $shiftCol = abo_ident((string)($schema['shift_id'] ?? 'shift_id'));
     $sql = "SELECT COALESCE(SUM(CASE WHEN ($secs) > 0 THEN ($secs) ELSE 0 END), 0)
-            FROM breaks b WHERE b.shift_id = ?";
-    if (!$includeAuto) {
-        $sql .= " AND NOT (" . abo_auto_where() . ")";
+            FROM breaks b WHERE b.$shiftCol = ?";
+    if (!$includeAuto && $schema['source'] !== null) {
+        $sql .= " AND NOT (" . abo_auto_where($pdo, $schema) . ")";
     }
     $st = $pdo->prepare($sql);
     $st->execute([$shiftId]);
@@ -340,13 +451,16 @@ function abo_apply(PDO $pdo): array
     foreach ($topups as $row) {
         $blockedShifts[(int)$row['attendance_id']] = true;
     }
-    $autoIds = $pdo->query("SELECT id, shift_id FROM breaks b WHERE " . abo_auto_where())->fetchAll(PDO::FETCH_ASSOC);
+    $schema = abo_schema($pdo);
+    $shiftCol = (string)($schema['shift_id'] ?? 'shift_id');
+    $autoIds = $pdo->query('SELECT id, ' . abo_ident($shiftCol) . ' AS shift_id FROM breaks b WHERE ' . abo_auto_where($pdo, $schema))->fetchAll(PDO::FETCH_ASSOC);
     $shiftIds = [];
     foreach ($autoIds as $row) {
         $shiftIds[(int)$row['shift_id']] = true;
     }
     if ($autoIds !== []) {
-        $pdo->exec("DELETE FROM breaks WHERE LOWER(TRIM(COALESCE(source,''))) = 'auto'");
+        $sourceCol = abo_ident((string)$schema['source']);
+        $pdo->exec("DELETE FROM breaks WHERE LOWER(TRIM(COALESCE($sourceCol,''))) = 'auto'");
     }
     $cols = abo_columns($pdo, 'payroll_finalized');
     $employees = [];
