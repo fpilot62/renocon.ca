@@ -8,6 +8,7 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require_once 'db.php';
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 29, 'fence' => ['user_id' => 'user', 'uid' => 'user', 'site_id' => 'site', 'sid' => 'site']]); // org-scope audit Nov 2026
 require_once 'engine/menu_generator.php';
 if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
     require_once __DIR__ . '/payroll_engine/payroll_engine.php';
