@@ -8,6 +8,7 @@ ob_start();
 ini_set('display_errors', 1); error_reporting(E_ALL);
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php'; 
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 30, 'fence' => ['employee_id' => 'user', 'user_id' => 'user', 'primary_restaurant_id' => 'site', 'org_id' => 'org']]); // org-scope audit Nov 2026
 require_once 'engine/menu_generator.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'employee_selfserve_lib.php';
@@ -325,6 +326,11 @@ $eh_show_org_on_sites = ($user_level <= 10);
 // 2. CAPTURE CHOSEN TARGET ORG FILTER (Exclusively for Super Admins)
 // Default to 'all' for Super Admin global view, or local org for standard Admins
 $target_org_filter = isset($_GET['org_filter']) ? $_GET['org_filter'] : ($user_level <= 10 ? 'all' : $session_org);
+if ($user_level <= 10 && (isset($_GET['org_id']) || !isset($_GET['org_filter']))) {
+    // Hub org scope Nov 2026: follow the header org picker (?org_id / sip_org_id cookie) like the kiosk; header "All orgs" = all.
+    $eh_hdr_org = osg_scope_org();
+    $target_org_filter = $eh_hdr_org > 0 ? (string)$eh_hdr_org : 'all';
+}
 if ($user_level > 10) { $target_org_filter = $session_org; } // Strict enforcement safeguard
 
 $target_site_filter = isset($_GET['site_filter']) ? trim((string)$_GET['site_filter']) : 'all';
@@ -832,6 +838,195 @@ if (!function_exists('eh_clock_label')) {
     }
 }
 
+// EH_LIST_PARTS_BEGIN — Live search Nov 2026: the list rows, "Showing X of Y" text and pager are
+// rendered by these functions for both the full page and the ?ajax=list fragment, so both share one template.
+if (!function_exists('eh_list_rows_html')) {
+    function eh_list_rows_html(array $users, int $user_level, array $site_by_id): string {
+        ob_start();
+?>
+            <?php if (!empty($users)): foreach($users as $u): ?>
+            <tr class="staff-row">
+                <td><input type="checkbox" name="selected_users[]" value="<?= (int)$u['id'] ?>" class="user-cb" onchange="checkBulk()"></td>
+                <td>
+                    <strong class="staff-name" style="color: #1e293b; font-size: 14px;"><?= htmlspecialchars($u['Name'] ?? '') ?></strong><br>
+                    <small class="text-muted"><?= htmlspecialchars($u['email'] ?? '') ?></small>
+                </td>
+                <td><span style="font-weight:700; color:#334155;">@<?= htmlspecialchars($u['user'] ?? 'n/a') ?></span></td>
+                <?php if ($user_level <= 10): ?>
+                    <td>
+                        <span class="badge badge-secondary p-2 text-uppercase font-weight-bold" style="background:#e2e8f0; color:#475569; font-size:10px;">
+                            <?= htmlspecialchars($u['org_name'] ?? 'Unassigned Org') ?> (#<?= (int)$u['org_id'] ?>)
+                        </span>
+                    </td>
+                <?php endif; ?>
+                <td style="font-size:11px; color:#2563eb; font-weight:700;">
+                    <i class="fa fa-map-location-dot mr-1"></i> <?= htmlspecialchars(eh_format_assigned_sites($u['assigned_site_ids'] ?? '', $site_by_id)) ?>
+                </td>
+                <td><span style="padding:4px 8px; background:#f1f5f9; border-radius:4px; font-size:11px; font-weight:700; color: #334155;"><?= htmlspecialchars($u['role_name'] ?? 'Staff') ?></span></td>
+                <?php
+                    $etype = function_exists('pe_normalize_employee_type')
+                        ? pe_normalize_employee_type($u['employee_type'] ?? 'hourly')
+                        : 'hourly';
+                    $elabel = function_exists('pe_employee_type_label') ? pe_employee_type_label($etype) : ucfirst($etype);
+                    $ecolor = $etype === 'contract' ? '#b45309' : ($etype === 'monthly' ? '#1d4ed8' : '#334155');
+                    $ebg = $etype === 'contract' ? '#fef3c7' : ($etype === 'monthly' ? '#dbeafe' : '#f1f5f9');
+                ?>
+                <td><span style="padding:4px 8px; background:<?= $ebg ?>; border-radius:4px; font-size:11px; font-weight:800; color:<?= $ecolor ?>;"><?= htmlspecialchars($elabel) ?></span><?php if (!empty($u['ei_exempt'])): ?> <span style="display:inline-block; margin-left:4px; padding:4px 8px; background:#ffedd5; border-radius:4px; font-size:11px; font-weight:800; color:#9a3412;">Skip EI</span><?php endif; ?></td>
+                <td><strong style="color: #0f172a;">$<?= number_format((float)($u['hourly_rate'] ?? 0), 2) ?></strong><?php if (!empty($u['rate_effective_date'])): ?><div style="font-size:11px;color:#0f766e;font-weight:700;">from <?= htmlspecialchars((string)$u['rate_effective_date']) ?></div><?php endif; ?></td>
+                <td><span style="color:<?= $u['active'] ? '#16a34a' : '#dc2626' ?>; font-weight:800; font-size: 11px;"><?= $u['active'] ? 'ACTIVE' : 'OFF' ?></span>
+                    <?php if (!empty($u['direct_deposit_upload_pending'])): ?>
+                        <div style="margin-top:4px;"><span style="background:#fef3c7;color:#b45309;font-size:10px;font-weight:800;padding:2px 6px;border-radius:999px;">DD PENDING VERIFY</span></div>
+                    <?php endif; ?>
+                </td>
+                <?php [$clock_lbl, $clock_color] = eh_clock_label($u['live_status'] ?? null); ?>
+                <td><span style="color:<?= $clock_color ?>; font-weight:800; font-size:11px;"><?= $clock_lbl ?></span></td>
+                <td style="text-align:right; padding-right: 25px;">
+                    <button type="button" class="pay-btn pay-btn-primary" style="padding:6px 12px; font-size:12px;" onclick="editUser(<?= htmlspecialchars(json_encode(eh_edit_payload($u)), ENT_QUOTES, 'UTF-8') ?>)">Edit profile</button>
+                    <?php if (!empty($u['direct_deposit_file'])): ?>
+                        <a class="pay-btn" href="direct_deposit_download.php?user_id=<?= (int)$u['id'] ?>" style="padding:6px 10px;font-size:11px;background:#0891b2;color:#fff;text-decoration:none;border-radius:6px;font-weight:700;">DD file</a>
+                    <?php endif; ?>
+                </td>
+            </tr>
+            <?php endforeach; else: ?>
+            <tr>
+                <td colspan="<?= $user_level <= 10 ? '11' : '10' ?>" style="text-align:center; color:#64748b; padding:36px 16px; font-size:13px; background:#f8fafc;">
+                    No employees match this search.
+                </td>
+            </tr>
+            <?php endif; ?>
+<?php
+        return (string)ob_get_clean();
+    }
+}
+
+if (!function_exists('eh_list_showing_html')) {
+    function eh_list_showing_html(array $c): string {
+        $total_match = (int)$c['total_match'];
+        $shown_from = (int)$c['shown_from'];
+        $shown_to = (int)$c['shown_to'];
+        $search_term = (string)$c['search_term'];
+        $target_site_filter = (string)$c['target_site_filter'];
+        $target_org_filter = (string)$c['target_org_filter'];
+        $site_by_id = (array)$c['site_by_id'];
+        $org_total = (int)$c['org_total'];
+        ob_start();
+?>
+                <?php if ($total_match === 0): ?>
+                    Showing 0 of 0 employees
+                <?php elseif ($shown_from === $shown_to): ?>
+                    Showing <?= (int)$shown_from ?> of <?= (int)$total_match ?> employees
+                <?php else: ?>
+                    Showing <?= (int)$shown_from ?>–<?= (int)$shown_to ?> of <?= (int)$total_match ?> employees
+                <?php endif; ?>
+                <?php if ($search_term !== ''): ?> matching “<?= htmlspecialchars($search_term) ?>”<?php endif; ?>
+                <?php if ($target_site_filter !== 'all'): ?>
+                    <?php
+                    $site_filter_label = 'site #' . $target_site_filter;
+                    if (isset($site_by_id[$target_site_filter])) {
+                        $site_filter_label = eh_site_option_label($site_by_id[$target_site_filter], false);
+                    }
+                    ?>
+                    <span style="color:#64748b; font-weight:600;"> at <?= htmlspecialchars($site_filter_label) ?></span>
+                <?php endif; ?>
+                <?php if ($org_total > 0 && ($search_term !== '' || $total_match !== $org_total || $target_site_filter !== 'all')): ?>
+                    <span style="color:#64748b; font-weight:600;"> (<?= (int)$org_total ?> in <?= $target_org_filter === 'all' ? 'all orgs' : 'this org' ?>)</span>
+                <?php endif; ?>
+<?php
+        return (string)ob_get_clean();
+    }
+}
+
+if (!function_exists('eh_list_pager_html')) {
+    function eh_list_pager_html(array $c): string {
+        $total_pages = (int)$c['total_pages'];
+        $page = (int)$c['page'];
+        $search_term = (string)$c['search_term'];
+        $target_org_filter = (string)$c['target_org_filter'];
+        $target_site_filter = (string)$c['target_site_filter'];
+        $per_page_opt = (string)$c['per_page_opt'];
+        $user_level = (int)$c['user_level'];
+        $sort_key = (string)$c['sort_key'];
+        $sort_dir = (string)$c['sort_dir'];
+        ob_start();
+?>
+    <?php if ($total_pages > 1): ?>
+    <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; margin:-32px 0 40px; flex-wrap:wrap;">
+        <?php
+        $eh_qs = static function (array $over) use ($search_term, $target_org_filter, $target_site_filter, $per_page_opt, $user_level, $sort_key, $sort_dir): string {
+            $q = ['per_page' => $per_page_opt];
+            if ($search_term !== '') {
+                $q['search'] = $search_term;
+            }
+            if ($user_level <= 10) {
+                $q['org_filter'] = (string)$target_org_filter;
+            }
+            if ($target_site_filter !== 'all') {
+                $q['site_filter'] = (string)$target_site_filter;
+            }
+            if ($sort_key !== 'name') {
+                $q['sort'] = $sort_key;
+            }
+            if ($sort_dir === 'desc') {
+                $q['dir'] = 'desc';
+            }
+            $q = array_merge($q, $over);
+            return 'employee_hub.php?' . http_build_query($q);
+        };
+        ?>
+        <?php if ($page > 1): ?>
+            <a class="pay-btn pay-btn-secondary" href="<?= htmlspecialchars($eh_qs(['page' => $page - 1])) ?>">Prev</a>
+        <?php endif; ?>
+        <span style="font-size:12px; font-weight:700; color:#64748b;">Page <?= (int)$page ?> / <?= (int)$total_pages ?></span>
+        <?php if ($page < $total_pages): ?>
+            <a class="pay-btn pay-btn-secondary" href="<?= htmlspecialchars($eh_qs(['page' => $page + 1])) ?>">Next</a>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
+<?php
+        return (string)ob_get_clean();
+    }
+}
+// EH_LIST_PARTS_END
+
+$eh_list_ctx = [
+    'total_match' => $total_match,
+    'shown_from' => $shown_from,
+    'shown_to' => $shown_to,
+    'search_term' => $search_term,
+    'target_site_filter' => $target_site_filter,
+    'target_org_filter' => $target_org_filter,
+    'site_by_id' => $site_by_id,
+    'org_total' => $org_total,
+    'total_pages' => $total_pages,
+    'page' => $page,
+    'per_page_opt' => $per_page_opt,
+    'user_level' => $user_level,
+    'sort_key' => $sort_key,
+    'sort_dir' => $sort_dir,
+];
+
+// Live search (GET ?ajax=list): same guard, org/site scope, restricted-scope, search, sort and paging as the
+// page above — only the output differs (JSON with the rendered rows, count text and pager).
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && (string)($_GET['ajax'] ?? '') === 'list') {
+    $eh_list_json = json_encode([
+        'ok' => true,
+        'rows' => eh_list_rows_html($users, (int)$user_level, $site_by_id),
+        'showing' => eh_list_showing_html($eh_list_ctx),
+        'pager' => eh_list_pager_html($eh_list_ctx),
+        'total' => (int)$total_match,
+        'search' => $search_term,
+        'page' => (int)$page,
+    ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE);
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, private');
+    header('X-Content-Type-Options: nosniff');
+    echo $eh_list_json === false ? '{"ok":false}' : $eh_list_json;
+    exit;
+}
+
 $all_roles = $pdo->query("SELECT role_id, role_name FROM roles ORDER BY role_id ASC")->fetchAll(PDO::FETCH_ASSOC);
 $role_choices = [];
 foreach ($all_roles as $r) {
@@ -938,10 +1133,8 @@ try {
             <p style="margin:0 0 10px; font-size:13px;"><a href="app_activity.php">Last 30 days signups &amp; logins</a> · <a href="app_activity.php?view=archive">Archive</a></p>
             <p style="margin:0 0 10px; font-size:13px; color:#64748b; font-weight:600;">Single staff screen — login, rates, sites, role, and status. Edit everything here.</p>
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                <input type="text" id="hubSearch" class="search-bar" placeholder="Search name, user, email…" value="<?= htmlspecialchars($search_term) ?>" onkeyup="searchDebounce(this.value)">
-                <?php if ($search_term !== ''): ?>
-                    <button type="button" class="pay-btn pay-btn-secondary" style="height:40px;" onclick="clearHubSearch()">Clear search</button>
-                <?php endif; ?>
+                <input type="text" id="hubSearch" class="search-bar" placeholder="Search name, user, email…" value="<?= htmlspecialchars($search_term) ?>" oninput="searchDebounce(this.value)" onkeydown="hubSearchKey(event)" autocomplete="off">
+                <button type="button" id="hubClearSearch" class="pay-btn pay-btn-secondary" style="height:40px;<?= $search_term === '' ? ' display:none;' : '' ?>" onclick="clearHubSearch()">Clear search</button>
                 <?php if ($user_level <= 10): ?>
                     <select id="orgFilterSelect" class="org-selector" onchange="executeOrgFilterRoute(this.value)">
                         <option value="all" <?= $target_org_filter === 'all' ? 'selected' : '' ?>>All organizations</option>
@@ -966,28 +1159,7 @@ try {
                     <?php endforeach; ?>
                 </select>
             </div>
-            <p id="hubShowing" style="margin:10px 0 0; font-size:13px; font-weight:700; color:#0f172a;">
-                <?php if ($total_match === 0): ?>
-                    Showing 0 of 0 employees
-                <?php elseif ($shown_from === $shown_to): ?>
-                    Showing <?= (int)$shown_from ?> of <?= (int)$total_match ?> employees
-                <?php else: ?>
-                    Showing <?= (int)$shown_from ?>–<?= (int)$shown_to ?> of <?= (int)$total_match ?> employees
-                <?php endif; ?>
-                <?php if ($search_term !== ''): ?> matching “<?= htmlspecialchars($search_term) ?>”<?php endif; ?>
-                <?php if ($target_site_filter !== 'all'): ?>
-                    <?php
-                    $site_filter_label = 'site #' . $target_site_filter;
-                    if (isset($site_by_id[$target_site_filter])) {
-                        $site_filter_label = eh_site_option_label($site_by_id[$target_site_filter], false);
-                    }
-                    ?>
-                    <span style="color:#64748b; font-weight:600;"> at <?= htmlspecialchars($site_filter_label) ?></span>
-                <?php endif; ?>
-                <?php if ($org_total > 0 && ($search_term !== '' || $total_match !== $org_total || $target_site_filter !== 'all')): ?>
-                    <span style="color:#64748b; font-weight:600;"> (<?= (int)$org_total ?> in <?= $target_org_filter === 'all' ? 'all orgs' : 'this org' ?>)</span>
-                <?php endif; ?>
-            </p>
+            <p id="hubShowing" style="margin:10px 0 0; font-size:13px; font-weight:700; color:#0f172a;" aria-live="polite"><?= eh_list_showing_html($eh_list_ctx) ?>            </p>
         </div>
         <button class="pay-btn pay-btn-success" style="height:40px;" onclick="openAdd()">+ Add staff</button>
         <a class="pay-btn" href="direct_deposit_pending.php"
@@ -1027,92 +1199,10 @@ try {
                 <th style="text-align:right; padding-right: 25px; cursor:default;">Actions</th>
             </tr>
         </thead>
-        <tbody>
-            <?php if (!empty($users)): foreach($users as $u): ?>
-            <tr class="staff-row">
-                <td><input type="checkbox" name="selected_users[]" value="<?= $u['id'] ?>" class="user-cb" onchange="checkBulk()"></td>
-                <td>
-                    <strong class="staff-name" style="color: #1e293b; font-size: 14px;"><?= htmlspecialchars($u['Name'] ?? '') ?></strong><br>
-                    <small class="text-muted"><?= htmlspecialchars($u['email'] ?? '') ?></small>
-                </td>
-                <td><span style="font-weight:700; color:#334155;">@<?= htmlspecialchars($u['user'] ?? 'n/a') ?></span></td>
-                <?php if ($user_level <= 10): ?>
-                    <td>
-                        <span class="badge badge-secondary p-2 text-uppercase font-weight-bold" style="background:#e2e8f0; color:#475569; font-size:10px;">
-                            <?= htmlspecialchars($u['org_name'] ?? 'Unassigned Org') ?> (#<?= $u['org_id'] ?>)
-                        </span>
-                    </td>
-                <?php endif; ?>
-                <td style="font-size:11px; color:#2563eb; font-weight:700;">
-                    <i class="fa fa-map-location-dot mr-1"></i> <?= htmlspecialchars(eh_format_assigned_sites($u['assigned_site_ids'] ?? '', $site_by_id)) ?>
-                </td>
-                <td><span style="padding:4px 8px; background:#f1f5f9; border-radius:4px; font-size:11px; font-weight:700; color: #334155;"><?= htmlspecialchars($u['role_name'] ?? 'Staff') ?></span></td>
-                <?php
-                    $etype = function_exists('pe_normalize_employee_type')
-                        ? pe_normalize_employee_type($u['employee_type'] ?? 'hourly')
-                        : 'hourly';
-                    $elabel = function_exists('pe_employee_type_label') ? pe_employee_type_label($etype) : ucfirst($etype);
-                    $ecolor = $etype === 'contract' ? '#b45309' : ($etype === 'monthly' ? '#1d4ed8' : '#334155');
-                    $ebg = $etype === 'contract' ? '#fef3c7' : ($etype === 'monthly' ? '#dbeafe' : '#f1f5f9');
-                ?>
-                <td><span style="padding:4px 8px; background:<?= $ebg ?>; border-radius:4px; font-size:11px; font-weight:800; color:<?= $ecolor ?>;"><?= htmlspecialchars($elabel) ?></span><?php if (!empty($u['ei_exempt'])): ?> <span style="display:inline-block; margin-left:4px; padding:4px 8px; background:#ffedd5; border-radius:4px; font-size:11px; font-weight:800; color:#9a3412;">Skip EI</span><?php endif; ?></td>
-                <td><strong style="color: #0f172a;">$<?= number_format((float)($u['hourly_rate'] ?? 0), 2) ?></strong><?php if (!empty($u['rate_effective_date'])): ?><div style="font-size:11px;color:#0f766e;font-weight:700;">from <?= htmlspecialchars((string)$u['rate_effective_date']) ?></div><?php endif; ?></td>
-                <td><span style="color:<?= $u['active'] ? '#16a34a' : '#dc2626' ?>; font-weight:800; font-size: 11px;"><?= $u['active'] ? 'ACTIVE' : 'OFF' ?></span>
-                    <?php if (!empty($u['direct_deposit_upload_pending'])): ?>
-                        <div style="margin-top:4px;"><span style="background:#fef3c7;color:#b45309;font-size:10px;font-weight:800;padding:2px 6px;border-radius:999px;">DD PENDING VERIFY</span></div>
-                    <?php endif; ?>
-                </td>
-                <?php [$clock_lbl, $clock_color] = eh_clock_label($u['live_status'] ?? null); ?>
-                <td><span style="color:<?= $clock_color ?>; font-weight:800; font-size:11px;"><?= $clock_lbl ?></span></td>
-                <td style="text-align:right; padding-right: 25px;">
-                    <button type="button" class="pay-btn pay-btn-primary" style="padding:6px 12px; font-size:12px;" onclick="editUser(<?= htmlspecialchars(json_encode(eh_edit_payload($u)), ENT_QUOTES, 'UTF-8') ?>)">Edit profile</button>
-                    <?php if (!empty($u['direct_deposit_file'])): ?>
-                        <a class="pay-btn" href="direct_deposit_download.php?user_id=<?= (int)$u['id'] ?>" style="padding:6px 10px;font-size:11px;background:#0891b2;color:#fff;text-decoration:none;border-radius:6px;font-weight:700;">DD file</a>
-                    <?php endif; ?>
-                </td>
-            </tr>
-            <?php endforeach; else: ?>
-            <tr>
-                <td colspan="<?= $user_level <= 10 ? '11' : '10' ?>" style="text-align:center; color:#64748b; padding:36px 16px; font-size:13px; background:#f8fafc;">
-                    No employees match this search.
-                </td>
-            </tr>
-            <?php endif; ?>
-        </tbody>
+        <tbody id="hubRows">
+<?= eh_list_rows_html($users, (int)$user_level, $site_by_id) ?>        </tbody>
     </table>
-    <?php if ($total_pages > 1): ?>
-    <div style="display:flex; gap:8px; align-items:center; justify-content:flex-end; margin:-32px 0 40px; flex-wrap:wrap;">
-        <?php
-        $eh_qs = static function (array $over) use ($search_term, $target_org_filter, $target_site_filter, $per_page_opt, $user_level, $sort_key, $sort_dir): string {
-            $q = ['per_page' => $per_page_opt];
-            if ($search_term !== '') {
-                $q['search'] = $search_term;
-            }
-            if ($user_level <= 10) {
-                $q['org_filter'] = (string)$target_org_filter;
-            }
-            if ($target_site_filter !== 'all') {
-                $q['site_filter'] = (string)$target_site_filter;
-            }
-            if ($sort_key !== 'name') {
-                $q['sort'] = $sort_key;
-            }
-            if ($sort_dir === 'desc') {
-                $q['dir'] = 'desc';
-            }
-            $q = array_merge($q, $over);
-            return 'employee_hub.php?' . http_build_query($q);
-        };
-        ?>
-        <?php if ($page > 1): ?>
-            <a class="pay-btn pay-btn-secondary" href="<?= htmlspecialchars($eh_qs(['page' => $page - 1])) ?>">Prev</a>
-        <?php endif; ?>
-        <span style="font-size:12px; font-weight:700; color:#64748b;">Page <?= (int)$page ?> / <?= (int)$total_pages ?></span>
-        <?php if ($page < $total_pages): ?>
-            <a class="pay-btn pay-btn-secondary" href="<?= htmlspecialchars($eh_qs(['page' => $page + 1])) ?>">Next</a>
-        <?php endif; ?>
-    </div>
-    <?php endif; ?>
+    <div id="hubPager"><?= eh_list_pager_html($eh_list_ctx) ?></div>
     </form>
 </div>
 
@@ -1425,21 +1515,91 @@ function hubQs(extra) {
     return window.location.pathname + (qs ? ('?' + qs) : '');
 }
 
+// Live search Nov 2026: filter the list in place (no page reload). The server runs the same query and
+// access rules as the full page (?ajax=list) and sends back the rendered rows, count text and pager.
 let searchTimeout;
+let ehListCtrl = null;
+let ehListSeq = 0;
+let ehLastSearch = (function () {
+    const el = document.getElementById('hubSearch');
+    return el ? el.value.trim() : '';
+})();
 function searchDebounce(val) {
     clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => {
-        const next = (val || '').trim();
-        const cur = new URLSearchParams(window.location.search).get('search') || '';
-        if (next === cur) return;
-        window.location.href = hubQs({ search: next, page: '1' });
-    }, 400);
+    searchTimeout = setTimeout(() => { ehLiveSearch(false); }, 250);
+}
+function hubSearchKey(e) {
+    if (e && e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(searchTimeout);
+        ehLiveSearch(true);
+    }
+}
+function ehLiveSearch(force) {
+    const input = document.getElementById('hubSearch');
+    if (!input) return;
+    const next = input.value.trim();
+    if (!force && next === ehLastSearch) return;
+    ehLastSearch = next;
+    const url = hubQs({ search: next, page: '1' });
+    if (ehListCtrl) {
+        try { ehListCtrl.abort(); } catch (e) {}
+    }
+    const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    ehListCtrl = ctrl;
+    const seq = ++ehListSeq;
+    const table = document.getElementById('hubTable');
+    if (table) table.setAttribute('aria-busy', 'true');
+    const opts = { credentials: 'same-origin', cache: 'no-store', headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' } };
+    if (ctrl) opts.signal = ctrl.signal;
+    fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'ajax=list', opts)
+        .then((r) => {
+            const ct = r.headers.get('Content-Type') || '';
+            if (!r.ok || ct.indexOf('application/json') === -1) throw new Error('list_failed');
+            return r.json();
+        })
+        .then((data) => {
+            if (seq !== ehListSeq) return;
+            if (!data || data.ok !== true) throw new Error('list_failed');
+            ehApplyList(data, url);
+        })
+        .catch((err) => {
+            if (err && err.name === 'AbortError') return;
+            if (seq !== ehListSeq) return;
+            // Session expired or server error: fall back to the old full-page search.
+            window.location.href = url;
+        })
+        .finally(() => {
+            if (seq !== ehListSeq) return;
+            ehListCtrl = null;
+            if (table) table.removeAttribute('aria-busy');
+        });
+}
+function ehApplyList(data, url) {
+    const body = document.getElementById('hubRows');
+    const showing = document.getElementById('hubShowing');
+    const pager = document.getElementById('hubPager');
+    if (body) body.innerHTML = String(data.rows || '');
+    if (showing) showing.innerHTML = String(data.showing || '');
+    if (pager) pager.innerHTML = String(data.pager || '');
+    const clearBtn = document.getElementById('hubClearSearch');
+    if (clearBtn) clearBtn.style.display = (String(data.search || '') !== '') ? '' : 'none';
+    const allBox = document.querySelector('#hubTable thead input[type=checkbox]');
+    if (allBox) allBox.checked = false;
+    checkBulk();
+    try { window.history.replaceState(window.history.state, '', url); } catch (e) {}
 }
 
 function clearHubSearch() {
     const input = document.getElementById('hubSearch');
-    if (input) input.value = '';
-    window.location.href = hubQs({ search: '', page: '1' });
+    if (!input) {
+        window.location.href = hubQs({ search: '', page: '1' });
+        return;
+    }
+    input.value = '';
+    clearTimeout(searchTimeout);
+    ehLiveSearch(true);
+    try { input.focus(); } catch (e) {}
 }
 
 function changePerPage(val) {
