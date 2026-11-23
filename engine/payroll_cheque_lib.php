@@ -401,6 +401,7 @@ function pcr_apply_payment(
     pcr_ensure($pdo);
     $paymentId = null;
     $method = pcr_payment_method($method);
+    $notPending = function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, 'f') : '';
     $q = $pdo->prepare(
         "SELECT f.id AS line_id, f.attendance_id, f.user_id, f.site_id, f.payroll_id, f.work_date,
                 f.pay_period, f.pay_period_end, f.total_gross, f.paid_amount AS db_paid_amount,
@@ -409,7 +410,7 @@ function pcr_apply_payment(
          FROM payroll_finalized f
          INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
          INNER JOIN sites s ON s.SId=f.site_id AND s.org_id=u.org_id
-         WHERE f.id = ? AND " . att_finalized_live_predicate($pdo, 'f') . " LIMIT 1"
+         WHERE f.id = ? AND " . att_finalized_live_predicate($pdo, 'f') . $notPending . " LIMIT 1"
     );
     $q->execute([$orgId, $lineId]);
     $line = $q->fetch(PDO::FETCH_ASSOC);

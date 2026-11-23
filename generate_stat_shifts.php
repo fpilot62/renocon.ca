@@ -54,7 +54,7 @@ if (!$periodHaveCur && $periodFrom !== '' && $periodTo !== '') {
 }
 
 $orgProvQ = $pdo->prepare("SELECT DISTINCT UPPER(TRIM(province)) p FROM sites
-    WHERE org_id=? AND UPPER(TRIM(province)) IN ('ON','SK') ORDER BY p");
+    WHERE org_id=? AND UPPER(TRIM(province)) IN ('BC','ON','SK') ORDER BY p");
 $orgProvQ->execute([$orgId]);
 $orgProvinces = array_values(array_filter(array_map('strval', $orgProvQ->fetchAll(PDO::FETCH_COLUMN))));
 if (!$orgProvinces) { $orgProvinces = sh_supported_stat_provinces(); }
@@ -459,6 +459,18 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
 
 $message = '';
 $actorId = (int)($_SESSION['user_id'] ?? 0);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_pending_rows'])) {
+    ps_require_csrf();
+    $postFrom = (string)($_POST['from_date'] ?? $periodFrom);
+    $postTo = (string)($_POST['to_date'] ?? $periodTo);
+    $postSite = (int)($_POST['site_id'] ?? $siteFilter);
+    try {
+        $made = sh_generate_period_candidates($pdo, $orgId, $postFrom . '|' . $postTo, $actorId);
+        stat_redirect_period($orgId, $postFrom, $postTo, $postSite, 'Created ' . (int)$made['posted'] . ' pending stat line(s). ' . (int)$made['already'] . ' already on the ledger. Approve them here before they can be paid. Nothing was marked paid.');
+    } catch (Throwable $e) {
+        $message = 'Could not create pending rows: ' . $e->getMessage();
+    }
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['approve_line']) || isset($_POST['bulk_approve']) || isset($_POST['exclude_line']))) {
     ps_require_csrf();
     $postFrom = (string)($_POST['from_date'] ?? $periodFrom);
@@ -635,9 +647,9 @@ body.stat-flat .stat-emp-row{display:table-row !important}
     </div>
     <div class="col-md-3"><label>Work site</label>
       <select class="form-control" name="site_id">
-        <option value="0">All ON/SK sites</option>
+        <option value="0">All BC/ON/SK sites</option>
         <?php
-        $allSitesQ = $pdo->prepare("SELECT SId, nick_name, province FROM sites WHERE org_id=? AND UPPER(TRIM(province)) IN ('ON','SK') ORDER BY nick_name");
+        $allSitesQ = $pdo->prepare("SELECT SId, nick_name, province FROM sites WHERE org_id=? AND UPPER(TRIM(province)) IN ('BC','ON','SK') ORDER BY nick_name");
         $allSitesQ->execute([$orgId]);
         foreach ($allSitesQ->fetchAll(PDO::FETCH_ASSOC) as $s):
         ?>
@@ -645,8 +657,17 @@ body.stat-flat .stat-emp-row{display:table-row !important}
         <?php endforeach;?>
       </select>
     </div>
-    <div class="col-md-3"><button class="btn btn-primary btn-block" name="preview_period" value="1" id="statPreviewPeriodBtn">Preview all holidays in period</button></div>
+    <div class="col-md-2"><button class="btn btn-primary btn-block" name="preview_period" value="1" id="statPreviewPeriodBtn">Preview all holidays in period</button></div>
   </div>
+</form>
+<form method="post" class="mb-3" onsubmit="return confirm('Create pending stat lines for every eligible employee in this period? This does not approve or pay them.');">
+  <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
+  <input type="hidden" name="from_date" value="<?=htmlspecialchars($periodFrom)?>">
+  <input type="hidden" name="to_date" value="<?=htmlspecialchars($periodTo)?>">
+  <input type="hidden" name="site_id" value="<?= (int)$siteFilter ?>">
+  <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+  <button class="btn btn-outline-primary" name="create_pending_rows" value="1" id="statCreatePendingBtn">Create pending rows</button>
+  <span class="small-note ml-2">Posts a pending line for each eligible person. Approval stays a separate admin action.</span>
 </form>
 
 <?php if($periodFrom && $periodTo):?>

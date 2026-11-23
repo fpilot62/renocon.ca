@@ -97,6 +97,19 @@ if (!$summaries) {
     }
     echo "<div class='log-entry'>[SYSTEM] Batch complete. All records linked.</div>";
 }
+$genOrgs = [];
+foreach ($summaries as $row) {
+    $genOrgs[(int)$row['org_id']] = true;
+}
+$genStart = substr((string)$start_date, 0, 10);
+$genEnd = substr((string)$end_date, 0, 10);
+foreach (array_keys($genOrgs) as $genOrg) {
+    if ($genOrg <= 0 || !function_exists('sh_generate_period_candidates')) {
+        continue;
+    }
+    $made = sh_generate_period_candidates($pdo, (int)$genOrg, $genStart . '|' . $genEnd, 0);
+    echo "<div class='log-entry'>[STAT] Org $genOrg pending lines created: " . (int)$made['posted'] . ". Nothing was approved or paid.</div>";
+}
 
 echo "</div>"; // Close log
 echo "<div class='mt-4 text-center'>";

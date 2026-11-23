@@ -81,6 +81,29 @@ if (isset($_POST['confirm_finalize']) && !empty($_POST['final_ids'])) {
             $day = !empty($row['clock_in']) ? date('Y-m-d', strtotime($row['clock_in'])) : date('Y-m-d');
             sh_after_finalize($pdo, (int)$row['user_id'], (int)$row['site_id'], $day, (int)$_SESSION['user_id']);
         }
+        $periodKeys = [];
+        foreach ($rows as $row) {
+            $org = (int)($row['org_id'] ?? 0);
+            $sid = (int)($row['site_id'] ?? 0);
+            $day = !empty($row['clock_in']) ? date('Y-m-d', strtotime($row['clock_in'])) : date('Y-m-d');
+            if ($org <= 0 && $sid > 0) {
+                $orgQ = $pdo->prepare('SELECT org_id FROM sites WHERE SId=? LIMIT 1');
+                $orgQ->execute([$sid]);
+                $org = (int)$orgQ->fetchColumn();
+            }
+            if ($org <= 0 || !function_exists('pe_period_window')) {
+                continue;
+            }
+            $mode = function_exists('pe_period_mode_for_site') ? pe_period_mode_for_site($pdo, $sid, $org) : 'semi_monthly';
+            $anchor = function_exists('pe_period_anchor_for_org') ? pe_period_anchor_for_org($pdo, $org) : '2024-01-01';
+            [$ps, $pe] = pe_period_window($day, $mode, $anchor);
+            $periodKeys[$org . '|' . $ps . '|' . $pe] = [$org, $ps . '|' . $pe];
+        }
+        foreach ($periodKeys as [$org, $span]) {
+            if (function_exists('sh_generate_period_candidates')) {
+                sh_generate_period_candidates($pdo, $org, $span, (int)$_SESSION['user_id']);
+            }
+        }
         $pdo->commit();
         header("Location: staff_audit.php?msg=Processed"); exit;
     } catch (Exception $e) { $pdo->rollBack(); die("Error: " . $e->getMessage()); }

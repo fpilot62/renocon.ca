@@ -1,6 +1,6 @@
 <?php
 /**
- * Post missing ON/SK statutory holiday lines for one org (default org 4).
+ * Post missing BC/ON/SK statutory holiday lines for one org (default org 4).
  *
  * A holiday is posted even when that fortnight is already paid or has no
  * other finalized lines. The work date stays the holiday. If that fortnight
@@ -140,7 +140,7 @@ function stat_bf_plan(PDO $pdo, int $orgId, string $from, string $to): array {
     $mapped = [];
     foreach ($sites->fetchAll(PDO::FETCH_ASSOC) as $site) {
         $prov = function_exists('sh_normalize_province') ? sh_normalize_province((string)$site['province']) : strtoupper(trim((string)$site['province']));
-        if (!in_array($prov, ['ON', 'SK'], true)) {
+        if (!in_array($prov, ['BC', 'ON', 'SK'], true)) {
             $unmapped[] = ['id' => (int)$site['SId'], 'name' => (string)$site['nick_name'], 'province' => (string)$site['province']];
             continue;
         }
@@ -148,7 +148,7 @@ function stat_bf_plan(PDO $pdo, int $orgId, string $from, string $to): array {
         $mapped[] = $site;
     }
     $holidays = [];
-    foreach (['ON', 'SK'] as $prov) {
+    foreach (['BC', 'ON', 'SK'] as $prov) {
         foreach (sh_calendar_holidays($prov, $from, $to) as $h) {
             $holidays[] = $h;
         }

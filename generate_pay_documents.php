@@ -77,37 +77,7 @@ function paydocs_postal($z): string {
     if (preg_match('/^([A-Z]\d[A-Z])(\d[A-Z]\d)$/', $z, $m)) return $m[1] . ' ' . $m[2];
     return (string)$z;
 }
-function paydocs_is_stat_worked(string $cat, string $label): bool {
-    $t = strtolower($cat . ' ' . $label);
-    return (bool)preg_match('/stat\s*day\s*worked|stat\s*worked|worked\s*(the\s*)?(stat|holiday)|holiday\s*premium/', $t);
-}
-function paydocs_is_public_holiday(string $cat, string $label): bool {
-    if (paydocs_is_stat_worked($cat, $label)) return false;
-    $t = strtolower($cat . ' ' . $label);
-    return (bool)preg_match('/public\s*holiday|stat\s*holiday|statutory|\bph\b|stat\s*pay|holiday\s*pay/', $t);
-}
-function paydocs_is_bonus(string $cat, string $label): bool {
-    $t = strtolower($cat . ' ' . $label);
-    return (bool)preg_match('/bonus/', $t);
-}
-function paydocs_is_car_allowance(string $cat, string $label): bool {
-    $t = strtolower($cat . ' ' . $label);
-    return (bool)preg_match('/\b(?:car|auto|automobile|vehicle|motor\s+vehicle)\s+allowance\b/', $t);
-}
-/** Pull bonus / car allowance out of regular pay so each prints on its own stub line. */
-function paydocs_peel_special(array &$bucket, string $cat, string $label, float $gross, float $bonusPay, float $regPay, bool $bonusAlreadySummed = false): void {
-    if (!isset($bucket['car_allow'])) $bucket['car_allow'] = 0.0;
-    if (paydocs_is_car_allowance($cat, $label)) {
-        $bucket['car_allow'] += $gross;
-        if ($regPay > 0.004) $bucket['reg_pay'] -= $regPay;
-        return;
-    }
-    if (!$bonusAlreadySummed) $bucket['bonus'] += $bonusPay;
-    if (paydocs_is_bonus($cat, $label) && $bonusPay < 0.005) {
-        $bucket['bonus'] += $gross;
-        if ($regPay > 0.004) $bucket['reg_pay'] -= $regPay;
-    }
-}
+require_once __DIR__ . '/engine/paydocs_earn.php';
 function paydocs_split_unit(string $street, string $unit): array {
     $street = trim($street);
     $unit = trim($unit);
@@ -295,7 +265,7 @@ foreach ($rows as $r) {
             'show_zero_stat' => (int)($r['paystub_show_zero_stat'] ?? 0) === 1,
             'period_end' => $r['pay_period_end'],
             'reg_h'=>0,'ot_h'=>0,'trav_h'=>0,
-            'reg_pay'=>0,'bonus'=>0,'car_allow'=>0,'ph_pay'=>0,'stat_worked'=>0,
+            'reg_pay'=>0,'bonus'=>0,'car_allow'=>0,'ph_pay'=>0,'ph_h'=>0,'stat_worked'=>0,
             'benefit_lines'=>[],'deduct_lines'=>[],
             'gross'=>0,'ee_cpp'=>0,'ee_cpp2'=>0,'ee_ei'=>0,'ee_tax'=>0,
             'er_cpp'=>0,'er_cpp2'=>0,'er_ei'=>0,'er_wcb'=>0,'er_vac'=>0,
@@ -334,7 +304,9 @@ foreach ($rows as $r) {
         $g, $cat, $lab,
         (float)$r['total_gross'],
         (float)($r['bonus_pay'] ?? 0),
-        (float)($r['reg_pay'] ?? 0)
+        (float)($r['reg_pay'] ?? 0),
+        false,
+        (float)$r['reg_hours']
     );
     }
     if ($r['work_date'] < $g['wstart']) $g['wstart'] = $r['work_date'];
@@ -483,19 +455,20 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
     $out = [
         'reg_h'=>0.0,'ot_h'=>0.0,'trav_h'=>0.0,'reg_pay'=>0.0,'vac'=>0.0,'bonus'=>0.0,'car_allow'=>0.0,
         'benefit_lines'=>[],'deduct_lines'=>[],
-        'ph'=>0.0,'stat'=>0.0,'gross'=>0.0,'cpp'=>0.0,'cpp2'=>0.0,'ei'=>0.0,'tax'=>0.0,'paid'=>0.0,
+        'ph'=>0.0,'ph_h'=>0.0,'stat'=>0.0,'gross'=>0.0,'cpp'=>0.0,'cpp2'=>0.0,'ei'=>0.0,'tax'=>0.0,'paid'=>0.0,
         'sick_avail'=>0.0,'vac_avail'=>0.0,'vac_used'=>0.0,
     ];
     $fCols = paydocs_fin_cols($pdo);
     $regPaySel = !empty($fCols['reg_pay']) ? 'COALESCE(SUM(reg_pay),0)' : '0';
     $bonusSel = !empty($fCols['bonus_pay']) ? 'COALESCE(SUM(bonus_pay),0)' : '0';
+    $skipPending = function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : '';
     $st = $pdo->prepare(
         "SELECT COALESCE(SUM(reg_hours),0) rh, COALESCE(SUM(overtime_hours),0) ot, COALESCE(SUM(travel_hours),0) th,
                 $regPaySel rp, COALESCE(SUM(vac),0) vac, $bonusSel bonus,
                 COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                 COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
            FROM payroll_finalized
-          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?"
+          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ? $skipPending"
     );
     $st->execute([$uid, $sid, $from, $asof]);
     $r = $st->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -506,9 +479,9 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
     $out['vac_used'] = $vac_paid_mode ? $out['vac'] : 0.0;
 
     $st2 = $pdo->prepare(
-        "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
+        "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(reg_hours),0) rh
            FROM payroll_finalized
-          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
+          WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ? $skipPending
           GROUP BY category, display_label"
     );
     try {
@@ -525,14 +498,14 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
             } else {
             if (paydocs_is_public_holiday($cat, $lab)) $out['ph'] += (float)$row['g'];
             if (paydocs_is_stat_worked($cat, $lab)) $out['stat'] += (float)$row['g'];
-            paydocs_peel_special($out, $cat, $lab, (float)$row['g'], (float)$row['b'], (float)$row['rp'], true);
+            paydocs_peel_special($out, $cat, $lab, (float)$row['g'], (float)$row['b'], (float)$row['rp'], true, (float)($row['rh'] ?? 0));
             }
         }
     } catch (Throwable $e) {
         $st2 = $pdo->prepare(
-            "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(reg_pay),0) rp
+            "SELECT category, display_label, COALESCE(SUM(total_gross),0) g, COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(reg_hours),0) rh
                FROM payroll_finalized
-              WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?
+              WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ? $skipPending
               GROUP BY category, display_label"
         );
         $st2->execute([$uid, $sid, $from, $asof]);
@@ -548,7 +521,7 @@ function paydocs_ytd(PDO $pdo, array $g, bool $vac_paid_mode): array {
             } else {
             if (paydocs_is_public_holiday($cat, $lab)) $out['ph'] += (float)$row['g'];
             if (paydocs_is_stat_worked($cat, $lab)) $out['stat'] += (float)$row['g'];
-            paydocs_peel_special($out, $cat, $lab, (float)$row['g'], 0.0, (float)$row['rp'], true);
+            paydocs_peel_special($out, $cat, $lab, (float)$row['g'], 0.0, (float)$row['rp'], true, (float)($row['rh'] ?? 0));
             }
         }
     }
@@ -615,13 +588,14 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
     $out['vac_used'] = (float)$o['ytd_vac'];
 
     try {
+        $ytdPending = function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : '';
         $st2 = $pdo->prepare(
             "SELECT COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(vac),0) vac,
                     COALESCE(SUM(bonus_pay),0) bonus, COALESCE(SUM(total_gross),0) g,
                     COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei,
                     COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(paid_amount),0) paid
                FROM payroll_finalized
-              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?"
+              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ? $ytdPending"
         );
         $st2->execute([$uid, $sid, $snap, $asof]);
         $add = $st2->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -637,9 +611,9 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
 
         $st3 = $pdo->prepare(
             "SELECT category, display_label, COALESCE(SUM(total_gross),0) g,
-                    COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp
+                    COALESCE(SUM(bonus_pay),0) b, COALESCE(SUM(reg_pay),0) rp, COALESCE(SUM(reg_hours),0) rh
                FROM payroll_finalized
-              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ?
+              WHERE user_id=? AND site_id=? AND work_date > ? AND work_date <= ? $ytdPending
               GROUP BY category, display_label"
         );
         $st3->execute([$uid, $sid, $snap, $asof]);
@@ -653,7 +627,7 @@ function paydocs_apply_stub_ytd(PDO $pdo, array $g, array $out, string $asof): a
                 $out['stat'] += (float)$row['g'];
             }
             if (function_exists('paydocs_peel_special')) {
-                paydocs_peel_special($out, $cat, $lab, (float)$row['g'], (float)$row['b'], (float)$row['rp'], true);
+                paydocs_peel_special($out, $cat, $lab, (float)$row['g'], (float)$row['b'], (float)$row['rp'], true, (float)($row['rh'] ?? 0));
             }
         }
     } catch (Throwable $e) {
@@ -793,7 +767,8 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     if ($vac_paid_mode || $vac_curr > 0.009 || $vac_ytd > 0.009) {
         $earn('VacPay-Paid Out', '', '', $vac_curr, $vac_ytd, true);
     }
-    $earn('Public Holiday', '', '', (float)$g['ph_pay'], (float)$ytd['ph'], false, true);
+    $statHours = (float)($g['ph_h'] ?? 0);
+    $earn('Stat Holiday Pay', $statHours > 0.009 ? paydocs_hhmm($statHours) : '', '', (float)$g['ph_pay'], (float)$ytd['ph'], false, true);
     if ((float)$g['bonus'] > 0.009 || (float)$ytd['bonus'] > 0.009) {
         $earn('Bonus', '', '', (float)$g['bonus'], (float)$ytd['bonus']);
     }
@@ -927,7 +902,7 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     if (!empty($vac_paid_mode) && $g['vac_earn'] > 0.009) {
         $row_line('Vacation', null, $g['vac_earn']);
     }
-    if ((float)($g['ph_pay'] ?? 0) > 0.009) $row_line('Public Holiday', null, $g['ph_pay'], true);
+    if ((float)($g['ph_pay'] ?? 0) > 0.009) $row_line('Stat Holiday Pay', ((float)($g['ph_h'] ?? 0) > 0.009 ? (float)$g['ph_h'] : null), $g['ph_pay'], true);
     if ((float)($g['stat_worked'] ?? 0) > 0.009) $row_line('Stat Day Worked', null, $g['stat_worked'], true);
     if ((float)($g['bonus'] ?? 0) > 0.009) $row_line('Bonus', null, $g['bonus']);
     if ((float)($g['car_allow'] ?? 0) > 0.009) $row_line('Car allowance', null, $g['car_allow']);

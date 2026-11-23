@@ -538,7 +538,7 @@ $raw = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // Pay Period is the top-level date filter (from/to + period_mode already narrow $raw).
 // Build a nested tree:  Site  ->  Employee  ->  Shifts
 // with rolled-up totals at the period (grand), site, and employee levels.
-$period_tot = ['gross'=>0,'net'=>0,'paid'=>0,'rem'=>0,'reg_h'=>0,'ot_h'=>0,'travel_h'=>0,'stat_h'=>0,'stat_cost'=>0,
+$period_tot = ['gross'=>0,'net'=>0,'paid'=>0,'rem'=>0,'reg_h'=>0,'ot_h'=>0,'travel_h'=>0,'stat_h'=>0,'stat_cost'=>0,'await'=>0,
                'ee'=>0,'ee_tax'=>0,'ee_cpp'=>0,'ee_ei'=>0,
                'er'=>0,'er_cpp'=>0,'er_ei'=>0,'er_wcb'=>0,'er_vac'=>0];
 $sites_tree = []; // [site_name] => ['name','site_id','t_*','emps'=>[user_id=>['name','user_id','t_*','lines'=>[]]]]
@@ -572,62 +572,81 @@ foreach ($raw as $r) {
 
     if (!isset($sites_tree[$sname])) {
         $sites_tree[$sname] = ['name'=>$sname, 'site_id'=>$r['site_id'],
-                               't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,
+                               't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,'t_await'=>0,
                                't_ee'=>0,'t_ee_tax'=>0,'t_ee_cpp'=>0,'t_ee_ei'=>0,
                                't_er'=>0,'t_er_cpp'=>0,'t_er_ei'=>0,'t_er_wcb'=>0,'t_er_vac'=>0, 'emps'=>[]];
     }
     if (!isset($sites_tree[$sname]['emps'][$uid])) {
         $sites_tree[$sname]['emps'][$uid] = ['name'=>$r['employee_name'], 'user_id'=>$uid,
                                              'pay_method'=>(string)($r['payment_method'] ?? ''),
-                                             't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,
+                                             't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_reg_h'=>0,'t_ot_h'=>0,'t_travel_h'=>0,'t_stat_h'=>0,'t_stat_cost'=>0,'t_await'=>0,
                                              't_ee'=>0,'t_ee_tax'=>0,'t_ee_cpp'=>0,'t_ee_ei'=>0,
                                              't_er'=>0,'t_er_cpp'=>0,'t_er_ei'=>0,'t_er_wcb'=>0,'t_er_vac'=>0,
                                              'has_stat'=>false, 't_stat_alloc'=>0, 'lines'=>[]];
     }
 
-    if ($is_alloc) {
+    $lineGross = $needsApproval ? 0.0 : (float)$r['total_gross'];
+    $lineNet = $needsApproval ? 0.0 : $net;
+    $linePaid = $needsApproval ? 0.0 : $paid;
+    $lineAwait = $needsApproval ? (float)$r['total_gross'] : 0.0;
+    $lineEe = $needsApproval ? 0.0 : $r['_ee'];
+    $lineTax = $needsApproval ? 0.0 : (float)$r['ee_tax'];
+    $lineCpp = $needsApproval ? 0.0 : (float)$r['ee_cpp'];
+    $lineEi = $needsApproval ? 0.0 : (float)$r['ee_ei'];
+    $lineEr = $needsApproval ? 0.0 : $r['_er'];
+    $lineErCpp = $needsApproval ? 0.0 : (float)$r['er_cpp'];
+    $lineErEi = $needsApproval ? 0.0 : (float)$r['er_ei'];
+    $lineWcb = $needsApproval ? 0.0 : (float)$r['er_wcb'];
+    $lineVac = $needsApproval ? 0.0 : (float)$r['er_vac'];
+    if ($needsApproval) {
+        $reg_h = 0.0;
+        $stat_h = 0.0;
+    }
+    if ($is_alloc && !$needsApproval) {
         $sites_tree[$sname]['emps'][$uid]['has_stat'] = true;
         $sites_tree[$sname]['emps'][$uid]['t_stat_alloc'] += (float)$r['total_gross'];
     }
     $sites_tree[$sname]['emps'][$uid]['lines'][] = $r;
     foreach ([[&$sites_tree[$sname]], [&$sites_tree[$sname]['emps'][$uid]]] as $ref) {
-        $ref[0]['t_gross']    += (float)$r['total_gross'];
-        $ref[0]['t_net']      += $net;
-        $ref[0]['t_paid']     += $paid;
+        $ref[0]['t_gross']    += $lineGross;
+        $ref[0]['t_net']      += $lineNet;
+        $ref[0]['t_paid']     += $linePaid;
         $ref[0]['t_rem']      += $payRemaining;
         $ref[0]['t_reg_h']    += $reg_h;
-        $ref[0]['t_ot_h']     += $ot_h;
-        $ref[0]['t_travel_h'] += $trav_h;
+        $ref[0]['t_ot_h']     += $needsApproval ? 0.0 : $ot_h;
+        $ref[0]['t_travel_h'] += $needsApproval ? 0.0 : $trav_h;
         $ref[0]['t_stat_h']   += $stat_h;
-        $ref[0]['t_stat_cost']+= $is_stat ? (float)$r['total_gross'] : 0;
-        $ref[0]['t_ee']       += $r['_ee'];
-        $ref[0]['t_ee_tax']   += (float)$r['ee_tax'];
-        $ref[0]['t_ee_cpp']   += (float)$r['ee_cpp'];
-        $ref[0]['t_ee_ei']    += (float)$r['ee_ei'];
-        $ref[0]['t_er']       += $r['_er'];
-        $ref[0]['t_er_cpp']   += (float)$r['er_cpp'];
-        $ref[0]['t_er_ei']    += (float)$r['er_ei'];
-        $ref[0]['t_er_wcb']   += (float)$r['er_wcb'];
-        $ref[0]['t_er_vac']   += (float)$r['er_vac'];
+        $ref[0]['t_stat_cost']+= ($is_stat && !$needsApproval) ? (float)$r['total_gross'] : 0;
+        $ref[0]['t_await']    += $lineAwait;
+        $ref[0]['t_ee']       += $lineEe;
+        $ref[0]['t_ee_tax']   += $lineTax;
+        $ref[0]['t_ee_cpp']   += $lineCpp;
+        $ref[0]['t_ee_ei']    += $lineEi;
+        $ref[0]['t_er']       += $lineEr;
+        $ref[0]['t_er_cpp']   += $lineErCpp;
+        $ref[0]['t_er_ei']    += $lineErEi;
+        $ref[0]['t_er_wcb']   += $lineWcb;
+        $ref[0]['t_er_vac']   += $lineVac;
     }
-    $period_tot['gross']    += (float)$r['total_gross'];
-    $period_tot['net']      += $net;
+    $period_tot['gross']    += $lineGross;
+    $period_tot['net']      += $lineNet;
     $period_tot['reg_h']    += $reg_h;
-    $period_tot['ot_h']     += $ot_h;
-    $period_tot['travel_h'] += $trav_h;
+    $period_tot['ot_h']     += $needsApproval ? 0.0 : $ot_h;
+    $period_tot['travel_h'] += $needsApproval ? 0.0 : $trav_h;
     $period_tot['stat_h']   += $stat_h;
-    $period_tot['stat_cost']+= $is_stat ? (float)$r['total_gross'] : 0;
-    $period_tot['paid']  += $paid;
+    $period_tot['stat_cost']+= ($is_stat && !$needsApproval) ? (float)$r['total_gross'] : 0;
+    $period_tot['await']    += $lineAwait;
+    $period_tot['paid']  += $linePaid;
     $period_tot['rem']   += $payRemaining;
-    $period_tot['ee']     += $r['_ee'];
-    $period_tot['ee_tax'] += (float)$r['ee_tax'];
-    $period_tot['ee_cpp'] += (float)$r['ee_cpp'];
-    $period_tot['ee_ei']  += (float)$r['ee_ei'];
-    $period_tot['er']     += $r['_er'];
-    $period_tot['er_cpp'] += (float)$r['er_cpp'];
-    $period_tot['er_ei']  += (float)$r['er_ei'];
-    $period_tot['er_wcb'] += (float)$r['er_wcb'];
-    $period_tot['er_vac'] += (float)$r['er_vac'];
+    $period_tot['ee']     += $lineEe;
+    $period_tot['ee_tax'] += $lineTax;
+    $period_tot['ee_cpp'] += $lineCpp;
+    $period_tot['ee_ei']  += $lineEi;
+    $period_tot['er']     += $lineEr;
+    $period_tot['er_cpp'] += $lineErCpp;
+    $period_tot['er_ei']  += $lineErEi;
+    $period_tot['er_wcb'] += $lineWcb;
+    $period_tot['er_vac'] += $lineVac;
 }
 // Base CPP is stored once per pay period. Shift rows stay at $0; roll that period amount into the totals.
 // CPP2 is already split onto the shift rows, so it is not added again here.
@@ -974,7 +993,7 @@ function ledgerOnOrgChange(sel){
                         <td class="text-left" colspan="2">
                             <i class="far fa-calendar-alt"></i> Pay Period: <strong><?=htmlspecialchars(date('M j', strtotime($from_date)))?> – <?=htmlspecialchars(date('M j, Y', strtotime($to_date)))?></strong>
                             <span class="sub"> · <?=ucfirst(str_replace('_',' ',$period_mode))?></span>
-                            <div class="sub">Regular <?=number_format($period_tot['reg_h'],2)?>h · OT <?=number_format($period_tot['ot_h'],2)?>h · Travel <?=number_format($period_tot['travel_h'],2)?>h<?php if (ledger_stat_visible((float)$period_tot['stat_h'])): ?> · Statutory <?=number_format($period_tot['stat_h'],2)?>h<?php endif; ?></div>
+                            <div class="sub">Regular <?=number_format($period_tot['reg_h'],2)?>h · OT <?=number_format($period_tot['ot_h'],2)?>h · Travel <?=number_format($period_tot['travel_h'],2)?>h<?php if (ledger_stat_visible((float)$period_tot['stat_h'])): ?> · Statutory <?=number_format($period_tot['stat_h'],2)?>h<?php endif; ?><?php if (ledger_stat_visible((float)($period_tot['await'] ?? 0))): ?> · awaiting approval $<?=number_format($period_tot['await'],2)?><?php endif; ?></div>
                         </td>
                         <td>$<?=number_format($period_tot['gross'],2)?></td>
                         <td class="text-left">
@@ -1029,7 +1048,7 @@ function ledgerOnOrgChange(sel){
                                 <td class="name-cell" style="text-align:left;">
                                     <span class="chev" id="chev-<?=$eid?>" onclick="toggleRow('<?=$eid?>')">&#9656;</span>
                                     <i class="fa fa-user" style="color:#94a3b8;"></i> <?=htmlspecialchars($emp['name'])?>
-                                    <span class="sub"> · <?=count($emp['lines'])?> shift(s)<?php if ($emp['t_travel_h'] > 0): ?> · <i class="fa fa-car" style="color:#b45309;"></i> <?=number_format($emp['t_travel_h'],2)?>h travel<?php endif; ?></span>
+                                    <span class="sub"> · <?=count($emp['lines'])?> shift(s)<?php if ($emp['t_travel_h'] > 0): ?> · <i class="fa fa-car" style="color:#b45309;"></i> <?=number_format($emp['t_travel_h'],2)?>h travel<?php endif; ?><?php if (($emp['t_await'] ?? 0) > 0.009): ?> · awaiting approval $<?=number_format($emp['t_await'],2)?><?php endif; ?></span>
                                     <?php $isDirect = (($emp['pay_method'] ?? '') === 'direct_deposit'); ?>
                                     <label class="eft-toggle" style="margin-left:10px; font-size:9px; font-weight:700; color:#2563eb; cursor:pointer;" title="Pay this person by direct deposit. The cheque is skipped and they are included in the bank file.">
                                         <input type="checkbox" class="eft-check" data-user="<?=(int)$emp['user_id']?>" <?= $isDirect ? 'checked' : '' ?> style="vertical-align:middle;"> Direct deposit

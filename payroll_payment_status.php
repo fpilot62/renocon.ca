@@ -132,7 +132,7 @@ $q = $pdo->prepare(
      INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
      INNER JOIN sites s ON s.SId = f.site_id AND s.org_id = u.org_id
      WHERE f.work_date BETWEEN ? AND ?
-       AND " . att_finalized_live_predicate($pdo, 'f') . "
+       AND " . att_finalized_live_predicate($pdo, 'f') . (function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, 'f') : '') . "
      ORDER BY s.nick_name ASC, u.Name ASC, f.work_date ASC, f.id ASC"
 );
 $q->execute([$orgId, $startIn, $endIn]);
