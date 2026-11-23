@@ -8,6 +8,7 @@ ob_start();
 ini_set('display_errors', 1); error_reporting(E_ALL);
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php'; 
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 30, 'fence' => ['employee_id' => 'user', 'user_id' => 'user', 'primary_restaurant_id' => 'site', 'org_id' => 'org']]); // org-scope audit Nov 2026
 require_once 'engine/menu_generator.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once 'employee_selfserve_lib.php';
@@ -325,6 +326,11 @@ $eh_show_org_on_sites = ($user_level <= 10);
 // 2. CAPTURE CHOSEN TARGET ORG FILTER (Exclusively for Super Admins)
 // Default to 'all' for Super Admin global view, or local org for standard Admins
 $target_org_filter = isset($_GET['org_filter']) ? $_GET['org_filter'] : ($user_level <= 10 ? 'all' : $session_org);
+if ($user_level <= 10 && (isset($_GET['org_id']) || !isset($_GET['org_filter']))) {
+    // Hub org scope Nov 2026: follow the header org picker (?org_id / sip_org_id cookie) like the kiosk; header "All orgs" = all.
+    $eh_hdr_org = osg_scope_org();
+    $target_org_filter = $eh_hdr_org > 0 ? (string)$eh_hdr_org : 'all';
+}
 if ($user_level > 10) { $target_org_filter = $session_org; } // Strict enforcement safeguard
 
 $target_site_filter = isset($_GET['site_filter']) ? trim((string)$_GET['site_filter']) : 'all';
