@@ -58,14 +58,17 @@ $orgProvQ = $pdo->prepare("SELECT DISTINCT UPPER(TRIM(province)) p FROM sites
 $orgProvQ->execute([$orgId]);
 $orgProvinces = array_values(array_filter(array_map('strval', $orgProvQ->fetchAll(PDO::FETCH_COLUMN))));
 if (!$orgProvinces) { $orgProvinces = sh_supported_stat_provinces(); }
+$provinceFilter = strtoupper(trim((string)($_GET['province'] ?? $_POST['province'] ?? 'ALL')));
+if (!in_array($provinceFilter, ['BC', 'ON', 'SK'], true)) { $provinceFilter = 'ALL'; }
+$boardProvinces = $provinceFilter === 'ALL' ? $orgProvinces : [$provinceFilter];
 
 $yearStart = ($periodFrom !== '' ? substr($periodFrom, 0, 4) : date('Y')) . '-01-01';
 $yearEnd = ($periodTo !== '' ? substr($periodTo, 0, 4) : date('Y')) . '-12-31';
 if ($periodFrom !== '' && $periodTo !== '') {
-    $calendarHolidays = sh_holidays_for_provinces($pdo, $orgProvinces, $periodFrom, $periodTo);
-    $yearHolidays = sh_holidays_for_provinces($pdo, $orgProvinces, $yearStart, $yearEnd);
+    $calendarHolidays = sh_holidays_for_provinces($pdo, $boardProvinces, $periodFrom, $periodTo);
+    $yearHolidays = sh_holidays_for_provinces($pdo, $boardProvinces, $yearStart, $yearEnd);
 } else {
-    $yearHolidays = sh_holidays_for_provinces($pdo, $orgProvinces, $yearStart, $yearEnd);
+    $yearHolidays = sh_holidays_for_provinces($pdo, $boardProvinces, $yearStart, $yearEnd);
     $calendarHolidays = $yearHolidays;
 }
 
@@ -73,6 +76,17 @@ $holidayDate = (string)($_GET['holiday_date'] ?? $_POST['holiday_date'] ?? '');
 $holidayName = trim((string)($_GET['holiday_name'] ?? $_POST['holiday_name'] ?? ''));
 $holidayKey = (string)($_GET['holiday_key'] ?? $_POST['holiday_key'] ?? '');
 $siteFilter = (int)($_GET['site_id'] ?? $_POST['site_id'] ?? 0);
+if ($siteFilter > 0 && $provinceFilter !== 'ALL') {
+    try {
+        $siteProvQ = $pdo->prepare('SELECT province FROM sites WHERE SId=? AND org_id=? LIMIT 1');
+        $siteProvQ->execute([$siteFilter, $orgId]);
+        if (sh_normalize_province((string)$siteProvQ->fetchColumn()) !== $provinceFilter) {
+            $siteFilter = 0;
+        }
+    } catch (Throwable $e) {
+        $siteFilter = 0;
+    }
+}
 $previewPeriod = isset($_GET['preview_period']) || isset($_POST['preview_period']) || $periodNav === 'prev' || $periodNav === 'next';
 
 if ($holidayKey !== '' && preg_match('/^(\d{4}-\d{2}-\d{2})\|(.+)$/', $holidayKey, $km)) {
@@ -120,7 +134,7 @@ function stat_holiday_provinces_for(PDO $pdo, array $orgProvinces, string $holid
     return [$holidayProvinces, $holidayName];
 }
 
-[$holidayProvinces, $holidayName] = stat_holiday_provinces_for($pdo, $orgProvinces, $holidayDate, $holidayName);
+[$holidayProvinces, $holidayName] = stat_holiday_provinces_for($pdo, $boardProvinces, $holidayDate, $holidayName);
 
 function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, array $holidayProvinces): ?array {
     $q = $pdo->prepare("SELECT u.id, u.Name, u.hourly_rate, u.active, s.SId, s.nick_name, UPPER(TRIM(s.province)) province,
@@ -335,8 +349,11 @@ function stat_period_board(PDO $pdo, int $orgId, array $orgProvinces, string $fr
 }
 
 function stat_redirect_period(int $orgId, string $from, string $to, int $siteFilter, string $message): void {
+    $prov = strtoupper(trim((string)($_POST['province'] ?? $_GET['province'] ?? 'ALL')));
+    if (!in_array($prov, ['BC', 'ON', 'SK'], true)) { $prov = 'ALL'; }
     $qs = http_build_query([
         'from_date' => $from, 'to_date' => $to, 'site_id' => $siteFilter,
+        'province' => $prov,
         'org_id' => $orgId, 'preview_period' => 1, 'msg' => $message,
     ]);
     header('Location: generate_stat_shifts.php?' . $qs);
@@ -494,7 +511,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['approve_line']) || i
             sh_drop_unapproved_stat($pdo, $orgId, $userId, $siteId, $day);
             stat_redirect_period($orgId, $postFrom, $postTo, $postSite, 'Excluded. That holiday will not be offered again.');
         }
-        $board = stat_period_board($pdo, $orgId, $orgProvinces, $postFrom, $postTo, $postSite);
+        $board = stat_period_board($pdo, $orgId, $boardProvinces, $postFrom, $postTo, $postSite);
         if (isset($_POST['approve_line'])) {
             $userId = (int)($_POST['user_id'] ?? 0);
             $siteId = (int)($_POST['site_id_line'] ?? 0);
@@ -527,8 +544,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['approve_line']) || i
         $n = 0;
         $total = 0.0;
         $skippedFlag = 0;
+        $limitToPick = isset($_POST['pick_on']);
+        $picked = [];
+        if ($limitToPick) {
+            foreach ((array)($_POST['pick'] ?? []) as $one) {
+                $picked[(string)$one] = true;
+            }
+        }
         foreach ($board as $row) {
             if (!in_array($row['kind'], ['candidate', 'pending'], true)) {
+                continue;
+            }
+            $pickKey = (int)$row['id'] . '|' . (int)$row['SId'] . '|' . (string)$row['holiday_date'];
+            if ($limitToPick && !isset($picked[$pickKey])) {
                 continue;
             }
             if (trim((string)$row['stat_flag']) !== '') {
@@ -549,7 +577,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['approve_line']) || i
 }
 
 $message = $message ?: (string)($_GET['msg'] ?? '');
-$board = ($periodFrom !== '' && $periodTo !== '') ? stat_period_board($pdo, $orgId, $orgProvinces, $periodFrom, $periodTo, $siteFilter) : [];
+$board = ($periodFrom !== '' && $periodTo !== '') ? stat_period_board($pdo, $orgId, $boardProvinces, $periodFrom, $periodTo, $siteFilter) : [];
 $bulkN = 0;
 $bulkAmt = 0.0;
 $hiddenN = 0;
@@ -575,6 +603,7 @@ tr.stat-approved td{background:#dcfce7 !important}
 tr.stat-paid td{background:#e5e7eb !important}
 tr.stat-excluded td{background:#fee2e2 !important}
 tr.stat-ineligible td{background:#f8fafc !important}
+tr.stat-totals-foot td{position:sticky;bottom:0;background:#0f172a !important;color:#fff;z-index:4;font-weight:700;text-align:left;box-shadow:0 -2px 6px rgba(15,23,42,.25)}
 tr.stat-hidden{display:none}
 body.stat-show-hidden tr.stat-hidden{display:table-row}
 tr.stat-worked td:first-child{box-shadow:inset 4px 0 0 #2563eb}
@@ -645,12 +674,21 @@ body.stat-flat .stat-emp-row{display:table-row !important}
       </div>
       <div class="small-note mt-1"><?=htmlspecialchars($periodModeLabel)?> · <?=htmlspecialchars($periodFrom)?> → <?=htmlspecialchars($periodTo)?></div>
     </div>
+    <div class="col-md-2"><label>Province</label>
+      <select class="form-control" name="province" id="statProvince" onchange="var s=this.form.querySelector('[name=site_id]'); if(s) s.value='0'; this.form.submit();">
+        <?php foreach (['ALL' => 'All', 'BC' => 'BC', 'ON' => 'ON', 'SK' => 'SK'] as $code => $label): ?>
+        <option value="<?= $code ?>" <?= $provinceFilter === $code ? 'selected' : '' ?>><?= $label ?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
     <div class="col-md-3"><label>Work site</label>
       <select class="form-control" name="site_id">
-        <option value="0">All BC/ON/SK sites</option>
+        <option value="0"><?= $provinceFilter === 'ALL' ? 'All BC/ON/SK sites' : 'All ' . htmlspecialchars($provinceFilter) . ' sites' ?></option>
         <?php
-        $allSitesQ = $pdo->prepare("SELECT SId, nick_name, province FROM sites WHERE org_id=? AND UPPER(TRIM(province)) IN ('BC','ON','SK') ORDER BY nick_name");
-        $allSitesQ->execute([$orgId]);
+        $siteProvIn = $provinceFilter === 'ALL' ? ['BC', 'ON', 'SK'] : [$provinceFilter];
+        $siteMarks = implode(',', array_fill(0, count($siteProvIn), '?'));
+        $allSitesQ = $pdo->prepare("SELECT SId, nick_name, province FROM sites WHERE org_id=? AND UPPER(TRIM(province)) IN ($siteMarks) ORDER BY nick_name");
+        $allSitesQ->execute(array_merge([$orgId], $siteProvIn));
         foreach ($allSitesQ->fetchAll(PDO::FETCH_ASSOC) as $s):
         ?>
         <option value="<?=(int)$s['SId']?>" <?=$siteFilter===(int)$s['SId']?'selected':''?>><?=htmlspecialchars($s['nick_name'].' ['.$s['province'].']')?></option>
@@ -665,6 +703,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
   <input type="hidden" name="from_date" value="<?=htmlspecialchars($periodFrom)?>">
   <input type="hidden" name="to_date" value="<?=htmlspecialchars($periodTo)?>">
   <input type="hidden" name="site_id" value="<?= (int)$siteFilter ?>">
+  <input type="hidden" name="province" value="<?= htmlspecialchars($provinceFilter) ?>">
   <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
   <button class="btn btn-outline-primary" name="create_pending_rows" value="1" id="statCreatePendingBtn">Create pending rows</button>
   <span class="small-note ml-2">Posts a pending line for each eligible person. Approval stays a separate admin action.</span>
@@ -679,21 +718,22 @@ body.stat-flat .stat-emp-row{display:table-row !important}
   <span class="stat-excluded">Excluded</span>
   <span class="stat-worked-key">Worked the holiday, 1.5×</span>
 </div>
-<label class="stat-group-toggle"><input type="checkbox" id="statShowHidden" onchange="document.body.classList.toggle('stat-show-hidden', this.checked)"> Show excluded / not eligible<?php if($hiddenN):?> (<?= (int)$hiddenN ?>)<?php endif; ?></label>
+<label class="stat-group-toggle"><input type="checkbox" id="statShowHidden" onchange="document.body.classList.toggle('stat-show-hidden', this.checked); if (window.statBoardTotals) statBoardTotals();"> Show excluded / not eligible<?php if($hiddenN):?> (<?= (int)$hiddenN ?>)<?php endif; ?></label>
 <?php if($bulkN > 0):?>
-<form method="post" class="d-inline" onsubmit="return confirm('Approve <?= (int)$bulkN ?> unflagged line(s), total $<?= number_format($bulkAmt, 2) ?>? Flagged lines stay for individual approval. Nothing is marked paid.');">
+<form method="post" class="d-inline" id="statBulkApprove" onsubmit="return statConfirmBulk(this);">
   <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
   <input type="hidden" name="from_date" value="<?=htmlspecialchars($periodFrom)?>">
   <input type="hidden" name="to_date" value="<?=htmlspecialchars($periodTo)?>">
   <input type="hidden" name="site_id" value="<?= (int)$siteFilter ?>">
+  <input type="hidden" name="province" value="<?= htmlspecialchars($provinceFilter) ?>">
   <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
   <button class="btn btn-success mb-2" name="bulk_approve" value="1">Approve all unflagged</button>
 </form>
 <?php endif; ?>
 <table class="table table-sm table-bordered bg-white stat-hol-table" id="statBoard">
-<thead class="thead-light"><tr><th>Holiday</th><th>Employee</th><th>Site</th><th>Flag / reason</th><th>Calculated</th><th>Amount</th><th>Hours</th><th>On the holiday</th><th>Reason if changed</th><th></th></tr></thead>
+<thead class="thead-light"><tr><th><input type="checkbox" id="statSelectAll" title="Select all visible rows" aria-label="Select all visible rows"></th><th>Holiday</th><th>Employee</th><th>Site</th><th>Flag / reason</th><th>Calculated</th><th>Amount</th><th>Hours</th><th>On the holiday</th><th>Reason if changed</th><th></th></tr></thead>
 <tbody>
-<?php if(!$board):?><tr><td colspan="10" class="text-muted">No statutory holidays in this pay period.</td></tr><?php endif; ?>
+<?php if(!$board):?><tr><td colspan="11" class="text-muted">No statutory holidays in this pay period.</td></tr><?php endif; ?>
 <?php foreach ($board as $r):
     $kind = (string)$r['kind'];
     $flag = trim((string)$r['stat_flag']);
@@ -708,8 +748,11 @@ body.stat-flat .stat-emp-row{display:table-row !important}
     if (!empty($r['worked_holiday'])) $cls .= ' stat-worked';
     $editable = in_array($kind, ['candidate','pending'], true);
     $reasonText = $kind === 'excluded' ? (string)$r['exclude_reason'] : ($kind === 'ineligible' ? (string)$r['hide_reason'] : $flag);
+    $pickKey = (int)$r['id'] . '|' . (int)$r['SId'] . '|' . (string)$r['holiday_date'];
+    $statBucket = in_array($kind, ['approved', 'paid'], true) ? 'approved' : (in_array($kind, ['candidate', 'pending'], true) ? 'pending' : '');
 ?>
-<tr class="<?= $cls ?>" data-stat-amt="<?= htmlspecialchars(number_format((float)$r['amount'], 2, '.', '')) ?>" data-stat-ready="<?= $editable && $flag === '' ? '1' : '0' ?>">
+<tr class="<?= $cls ?>" data-user="<?= (int)$r['id'] ?>" data-stat-kind="<?= htmlspecialchars($statBucket) ?>" data-stat-amt="<?= htmlspecialchars(number_format((float)$r['amount'], 2, '.', '')) ?>" data-stat-hours="<?= htmlspecialchars(number_format((float)$r['equiv_hours'], 2, '.', '')) ?>" data-stat-ready="<?= $editable && $flag === '' ? '1' : '0' ?>">
+  <td><input type="checkbox" class="stat-pick" value="<?= htmlspecialchars($pickKey) ?>" aria-label="Select <?= htmlspecialchars((string)$r['Name']) ?>"></td>
   <td><?= htmlspecialchars($r['holiday_date'].' '.$r['holiday_name']) ?></td>
   <td><?= htmlspecialchars((string)$r['Name']) ?></td>
   <td><?= htmlspecialchars((string)$r['nick_name'].' ['.$r['province'].']') ?></td>
@@ -722,6 +765,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
       <input type="hidden" name="from_date" value="<?= htmlspecialchars($periodFrom) ?>">
       <input type="hidden" name="to_date" value="<?= htmlspecialchars($periodTo) ?>">
       <input type="hidden" name="site_id" value="<?= (int)$siteFilter ?>">
+      <input type="hidden" name="province" value="<?= htmlspecialchars($provinceFilter) ?>">
       <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
       <input type="hidden" name="user_id" value="<?= (int)$r['id'] ?>">
       <input type="hidden" name="site_id_line" value="<?= (int)$r['SId'] ?>">
@@ -754,9 +798,103 @@ body.stat-flat .stat-emp-row{display:table-row !important}
 </tr>
 <?php endforeach; ?>
 </tbody>
+<tfoot>
+<tr class="stat-totals-foot">
+  <td colspan="11">
+    <div id="statSelectedTotals">Selected: 0 employees · 0.00 h · $0.00</div>
+    <div id="statListedTotals">All listed — pending: 0 employees · 0.00 h · $0.00 · approved: 0 employees · 0.00 h · $0.00</div>
+  </td>
+</tr>
+</tfoot>
 </table>
 <?php endif; ?>
 <script>
+function statMoney2(n){
+  var v = Math.round((Number(n) || 0) * 100) / 100;
+  var sign = v < 0 ? '-' : '';
+  var parts = Math.abs(v).toFixed(2).split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return sign + '$' + parts.join('.');
+}
+function statRowVisible(tr){
+  if (!tr) return false;
+  if (tr.classList.contains('stat-hidden') && !document.body.classList.contains('stat-show-hidden')) return false;
+  if (tr.style.display === 'none') return false;
+  return true;
+}
+function statRowAmount(tr){
+  var inp = tr.querySelector('input[name="amount"]');
+  if (inp) return parseFloat(String(inp.value).replace(/[$,\s]/g, '')) || 0;
+  return parseFloat(tr.getAttribute('data-stat-amt') || '0') || 0;
+}
+function statRowHours(tr){
+  var inp = tr.querySelector('input[name="hours"]');
+  if (inp) return parseFloat(String(inp.value).replace(/[,\s]/g, '')) || 0;
+  return parseFloat(tr.getAttribute('data-stat-hours') || '0') || 0;
+}
+function statBucketLine(label, rows){
+  var users = {}, hours = 0, amount = 0, n = 0;
+  rows.forEach(function(tr){
+    users[tr.getAttribute('data-user') || ''] = true;
+    hours += statRowHours(tr);
+    amount += statRowAmount(tr);
+    n++;
+  });
+  var people = Object.keys(users).filter(function(k){ return k !== ''; }).length;
+  return label + ': ' + people + ' employee' + (people === 1 ? '' : 's') + ' · ' + hours.toFixed(2) + ' h · ' + statMoney2(amount);
+}
+function statBoardTotals(){
+  var selected = document.getElementById('statSelectedTotals');
+  var listed = document.getElementById('statListedTotals');
+  var table = document.getElementById('statBoard');
+  if (!table || !selected || !listed) return;
+  var checked = [], pending = [], approved = [], visiblePicks = 0, checkedPicks = 0;
+  table.querySelectorAll('tbody tr.stat-emp-row').forEach(function(tr){
+    if (!statRowVisible(tr)) return;
+    var kind = tr.getAttribute('data-stat-kind') || '';
+    if (kind === 'pending') pending.push(tr);
+    else if (kind === 'approved') approved.push(tr);
+    var cb = tr.querySelector('.stat-pick');
+    if (!cb) return;
+    visiblePicks++;
+    if (cb.checked) { checked.push(tr); checkedPicks++; }
+  });
+  selected.textContent = 'Selected: ' + statBucketLine('', checked).replace(/^: /, '');
+  listed.textContent = 'All listed — pending: ' + statBucketLine('', pending).replace(/^: /, '') + ' · approved: ' + statBucketLine('', approved).replace(/^: /, '');
+  var all = document.getElementById('statSelectAll');
+  if (all) {
+    all.checked = visiblePicks > 0 && checkedPicks === visiblePicks;
+    all.indeterminate = checkedPicks > 0 && checkedPicks < visiblePicks;
+  }
+}
+function statConfirmBulk(form){
+  form.querySelectorAll('input[name="pick_on"], input[name="pick[]"]').forEach(function(el){ el.remove(); });
+  var any = false, ready = [], amount = 0;
+  document.querySelectorAll('#statBoard tbody tr.stat-emp-row').forEach(function(tr){
+    var cb = tr.querySelector('.stat-pick');
+    if (!cb || !cb.checked || !statRowVisible(tr)) return;
+    any = true;
+    if (tr.getAttribute('data-stat-ready') === '1') {
+      ready.push(cb.value);
+      amount += statRowAmount(tr);
+    }
+  });
+  var msg;
+  if (!any) {
+    msg = 'Approve every unflagged line? Flagged lines stay for individual approval. Nothing is marked paid.';
+  } else {
+    var mark = document.createElement('input');
+    mark.type = 'hidden'; mark.name = 'pick_on'; mark.value = '1';
+    form.appendChild(mark);
+    ready.forEach(function(value){
+      var hid = document.createElement('input');
+      hid.type = 'hidden'; hid.name = 'pick[]'; hid.value = value;
+      form.appendChild(hid);
+    });
+    msg = 'Approve ' + ready.length + ' selected unflagged line(s), ' + statMoney2(amount) + '? Flagged lines stay for individual approval. Nothing is marked paid.';
+  }
+  return confirm(msg);
+}
 function statMoney(n){ return '$' + (Math.round(n * 100) / 100).toFixed(2); }
 function statReveal(el, n){
   var box = el && el.closest ? el.closest('.stat-pay-show') : null;
@@ -819,7 +957,23 @@ function statRefreshTotals(){
   document.querySelectorAll('.stat-single-n').forEach(function(el){ el.textContent = String(sN); });
 }
 document.addEventListener('change', function(e){
-  if (e.target && (e.target.name === 'period_items[]' || e.target.name === 'items[]')) statRefreshTotals();
+  if (!e.target) return;
+  if (e.target.id === 'statSelectAll') {
+    var on = e.target.checked;
+    document.querySelectorAll('#statBoard tbody tr.stat-emp-row').forEach(function(tr){
+      if (!statRowVisible(tr)) return;
+      var cb = tr.querySelector('.stat-pick');
+      if (cb) cb.checked = on;
+    });
+    statBoardTotals();
+    return;
+  }
+  if (e.target.classList && e.target.classList.contains('stat-pick')) statBoardTotals();
+  if (e.target.name === 'period_items[]' || e.target.name === 'items[]') statRefreshTotals();
+  if (e.target.name === 'amount' || e.target.name === 'hours') statBoardTotals();
+});
+document.addEventListener('input', function(e){
+  if (e.target && (e.target.name === 'amount' || e.target.name === 'hours')) statBoardTotals();
 });
 function statSetGroupBySite(on){
   document.body.classList.toggle('stat-flat', !on);
@@ -863,6 +1017,7 @@ document.addEventListener('DOMContentLoaded', function(){
     });
   });
   statRefreshTotals();
+  statBoardTotals();
 });
 </script>
 </body></html>

@@ -30,6 +30,8 @@ foreach ([
     $src = (string)file_get_contents($root . '/' . $rel);
     check($rel . ' skips lines waiting for approval', strpos($src, 'pe_not_pending_sql') !== false);
 }
+check('payment desk keeps the live org-scope guard', strpos((string)file_get_contents($root . '/payroll_payment_desk.php'), 'orgscope_guard.php') !== false);
+check('print payrun keeps the live org-scope guard', strpos((string)file_get_contents($root . '/print_payrun.php'), 'orgscope_guard.php') !== false);
 $docs = (string)file_get_contents($root . '/generate_pay_documents.php');
 check('both stub layouts say Stat Holiday Pay', substr_count($docs, 'Stat Holiday Pay') >= 2);
 check('Stat Day Worked stays its own line', substr_count($docs, 'Stat Day Worked') >= 2);
@@ -40,6 +42,11 @@ check('ledger totals leave pending stat out of gross', strpos($ledger, '$needsAp
 $page = (string)file_get_contents($root . '/generate_stat_shifts.php');
 check('the holiday page has a Create pending rows button', strpos($page, 'create_pending_rows') !== false && strpos($page, 'Create pending rows') !== false);
 check('the holiday page includes BC sites', strpos($page, "'BC','ON','SK'") !== false);
+check('the holiday page filters the table by province', strpos($page, 'name="province"') !== false && strpos($page, '$boardProvinces') !== false && strpos($page, "'province'") !== false);
+check('the holiday table has a select-all and a row checkbox', strpos($page, 'id="statSelectAll"') !== false && strpos($page, 'class="stat-pick"') !== false);
+check('the holiday table has a sticky selected and listed footer', strpos($page, 'stat-totals-foot') !== false && strpos($page, 'id="statSelectedTotals"') !== false && strpos($page, 'id="statListedTotals"') !== false && strpos($page, 'position:sticky;bottom:0') !== false);
+check('footer totals follow ticks and amount edits', strpos($page, 'function statBoardTotals') !== false && strpos($page, "e.target.name === 'amount'") !== false);
+check('bulk approve can be limited to the selection and still skips flagged lines', strpos($page, 'pick_on') !== false && strpos($page, 'data-stat-ready') !== false && strpos($page, "trim((string)\$row['stat_flag'])") !== false);
 $backfill = (string)file_get_contents($root . '/ops/t4127_stat_backfill.php');
 check('backfill includes BC sites', strpos($backfill, "['BC', 'ON', 'SK']") !== false);
 $gen = (string)file_get_contents($root . '/payroll_gen.php');

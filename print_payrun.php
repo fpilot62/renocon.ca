@@ -3,6 +3,7 @@
 // Hide warnings for a clean print
 ini_set('display_errors', 0); 
 require_once 'db.php';
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 10]); // org-scope audit Nov 2026
 if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
     require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 }
