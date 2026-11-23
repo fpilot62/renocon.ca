@@ -5,6 +5,7 @@
 require_once 'db.php';
 require_once 'engine/menu_generator.php';
 require_once 'engine/page_rollback_lib.php';
+require_once 'engine/dal_period_lines.php';
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
@@ -268,7 +269,18 @@ function dal_find_existing($root, $rid, $ym, $kind, $date = '', $period = '') {
         'format' => $fmt,
         'unclear' => !empty($meta['unclear']),
         'unclear_reason' => (string)($meta['unclear_reason'] ?? ''),
+        'sales_typed' => !empty($meta['sales_typed']),
+        'sales_typed_amount' => $meta['sales_typed_amount'] ?? null,
+        'sales_typed_at' => (string)($meta['sales_typed_at'] ?? ''),
     ];
+}
+
+/** The POS file that belongs to a line: Weekly/Monthly POS for period lines, Daily POS for daily lines. */
+function dal_line_pos_file($root, $rid, $date, $period) {
+    if ($period === 'weekly' || $period === 'monthly') {
+        return dal_find_period_file($root, $rid, $date, 'pos', $period);
+    }
+    return dal_find_for_row($root, $rid, $date, 'pos');
 }
 
 function dal_find_for_row($root, $rid, $reportDate, $kind) {
@@ -444,9 +456,8 @@ function dal_read_period_verify($root, $rid, $period, $endDate) {
 }
 
 function dal_period_days_sum(PDO $pdo, $rid, $from, $to) {
-    $st = $pdo->prepare("SELECT COALESCE(SUM(pos_sales),0) FROM daily_report WHERE restaurant_id = ? AND report_date BETWEEN ? AND ? AND (remarks IS NULL OR (remarks NOT LIKE '%week_split%' AND remarks NOT LIKE '%mtd_split%'))");
-    $st->execute([(int)$rid, $from, $to]);
-    return round((float)$st->fetchColumn(), 2);
+    // Daily lines only; Weekly/Monthly lines are never added in (engine/dal_period_lines.php).
+    return dal_daily_lines_sum($pdo, $rid, (string)$from, (string)$to);
 }
 
 function dal_period_row_sales(PDO $pdo, $rid, $endDate, $period) {
@@ -884,6 +895,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
                 if ($manualSales !== null) {
                     $notes[] = 'Sales $' . number_format($sales, 2) . ' typed (image unread or override).';
+                    $typedPos = dal_line_pos_file($DAL_UPLOAD_ROOT, $rest_id, $r_date, $periodRaw);
+                    if ($typedPos && !empty($typedPos['path'])) {
+                        dal_mark_sales_typed((string)$typedPos['path'], (float)$sales, (int)$user_id);
+                    }
                 }
                 if ($manualPaid !== null) {
                     $notes[] = 'Paid Out $' . number_format((float)$writePaid, 2) . ' typed.';
@@ -943,6 +958,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $writtenIds = [];
             $writtenTypes = [];
             $needSalesIds = [];
+            $needSalesPeriods = [];
             $lastVerify = null;
             $lastFrom = $r_date;
             $primaryPeriod = $types[0];
@@ -976,6 +992,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 if ($applyManual && $manualSales !== null) {
                     $sales = $manualSales;
                     $notes[] = 'Sales $' . number_format($sales, 2) . ' typed (image unread or override).';
+                    $typedPos = dal_line_pos_file($DAL_UPLOAD_ROOT, $rest_id, $r_date, $type);
+                    if ($typedPos && !empty($typedPos['path'])) {
+                        dal_mark_sales_typed((string)$typedPos['path'], (float)$sales, (int)$user_id);
+                    }
                 }
                 if ($sales === null) {
                     $sales = (float)($exist['pos_sales'] ?? 0);
@@ -1002,6 +1022,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $lastPaid = (float)$paidOut;
                 if ($lastSales < 0.005) {
                     $needSalesIds[] = $rowId;
+                    $needSalesPeriods[] = $type;
                 }
                 $lab = ($type === 'weekly') ? 'Weekly' : (($type === 'monthly') ? 'Monthly' : 'Daily');
                 $notes[] = $lab . ' $' . number_format((float)$sales, 2) . ($exist ? ' updated' : ' saved') . ' for ' . $r_date . '.';
@@ -1031,7 +1052,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
 
             if ($needSalesIds) {
-                $notes[] = 'POS did not read Sales $. Type it in red on that row.';
+                $notes[] = dal_need_sales_note($needSalesPeriods);
             }
             echo json_encode([
                 'success' => true,
@@ -1094,7 +1115,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
         if ($_POST['action'] === 'update') {
             $rep_id = (int)$_POST['report_id'];
-            $val    = (float)$_POST['value'];
+            // Accept 12,410.21 or $12410.21; refuse blank/non-numbers instead of silently saving $0.00.
+            $valRaw = str_replace([',', '$', ' ', "\xc2\xa0"], '', trim((string)($_POST['value'] ?? '')));
+            if ($valRaw === '' || !is_numeric($valRaw) || (float)$valRaw < 0) {
+                echo json_encode(['success' => false, 'error' => 'Type the amount as a number, for example 12410.21.']);
+                exit;
+            }
+            $val    = round((float)$valRaw, 2);
             $field  = (string)($_POST['field'] ?? 'pos_sales');
             $allowedFields = ['pos_sales', 'paid_out'];
 
@@ -1122,10 +1149,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
 
             if ($is_super) {
-                $look = $pdo->prepare("SELECT restaurant_id, report_date FROM daily_report WHERE report_id = ?");
+                $look = $pdo->prepare("SELECT restaurant_id, report_date, remarks FROM daily_report WHERE report_id = ?");
                 $look->execute([$rep_id]);
             } else {
-                $look = $pdo->prepare("SELECT restaurant_id, report_date FROM daily_report WHERE report_id = ? AND FIND_IN_SET(restaurant_id, ?)");
+                $look = $pdo->prepare("SELECT restaurant_id, report_date, remarks FROM daily_report WHERE report_id = ? AND FIND_IN_SET(restaurant_id, ?)");
                 $look->execute([$rep_id, $assigned_csv]);
             }
             $exist = $look->fetch(PDO::FETCH_ASSOC);
@@ -1133,10 +1160,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 echo json_encode(['success' => false, 'error' => 'Entry not found.']);
                 exit;
             }
-            $posErr = dal_pos_required_error($DAL_UPLOAD_ROOT, (int)$exist['restaurant_id'], (string)$exist['report_date']);
-            if ($posErr !== '') {
-                echo json_encode(['success' => false, 'error' => $posErr]);
-                exit;
+            // dal-period-lines-20261122: Weekly/Monthly lines take their own period total; never ask for a Daily POS.
+            $linePeriod = dal_line_period($exist['remarks'] ?? '');
+            if (dal_sales_edit_needs_daily_pos($linePeriod)) {
+                $posErr = dal_pos_required_error($DAL_UPLOAD_ROOT, (int)$exist['restaurant_id'], (string)$exist['report_date']);
+                if ($posErr !== '') {
+                    echo json_encode(['success' => false, 'error' => $posErr]);
+                    exit;
+                }
             }
 
             if ($is_super) {
@@ -1147,7 +1178,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $upd->execute([$val, $rep_id, $assigned_csv]);
             }
 
-            echo json_encode(['success' => true, 'message' => 'Saved $' . number_format($val, 2) . '.', 'field' => $field, 'value' => $val, 'report_id' => $rep_id]);
+            $updMsg = 'Saved $' . number_format($val, 2) . '.';
+            $updVerify = null;
+            if ($field === 'pos_sales') {
+                // Typed Sales $ on an uploaded line: keep the POS file, mark the line as entered by hand.
+                $typedPos = dal_line_pos_file($DAL_UPLOAD_ROOT, (int)$exist['restaurant_id'], substr((string)$exist['report_date'], 0, 10), $linePeriod);
+                if ($typedPos && !empty($typedPos['path'])) {
+                    dal_mark_sales_typed((string)$typedPos['path'], (float)$val, (int)$user_id);
+                    $updMsg = 'Saved $' . number_format($val, 2) . ' typed by hand. POS file kept.';
+                }
+            }
+            if ($field === 'pos_sales' && ($linePeriod === 'weekly' || $linePeriod === 'monthly')) {
+                // Comparison is a warning only; the typed period total is already saved.
+                require_once __DIR__ . '/engine/mtd_allocate.php';
+                $lineTitle = dal_line_title($linePeriod);
+                $lineRid = (int)$exist['restaurant_id'];
+                $lineDate = substr((string)$exist['report_date'], 0, 10);
+                $lineDays = sip_days_for_period($lineDate, $linePeriod);
+                if (!$lineDays) {
+                    $lineDays = [$lineDate];
+                }
+                $lineDaysSum = dal_period_days_sum($pdo, $lineRid, $lineDays[0], $lineDate);
+                $updVerify = dal_period_compare_apply(sip_period_verify((float)$val, $lineDaysSum, $lineTitle), $lineTitle);
+                dal_write_period_verify($DAL_UPLOAD_ROOT, $lineRid, $linePeriod, $lineDays[0], $lineDate, $updVerify);
+                $linePos = dal_find_period_file($DAL_UPLOAD_ROOT, $lineRid, $lineDate, 'pos', $linePeriod);
+                if ($linePos && !empty($linePos['path'])) {
+                    $lineNoExt = preg_replace('/\.[^.]+$/', '', $linePos['path']);
+                    $lineMeta = dal_read_meta($lineNoExt) ?: [];
+                    $lineMeta['period'] = $linePeriod;
+                    $lineMeta['period_from'] = $lineDays[0];
+                    $lineMeta['period_to'] = $lineDate;
+                    $lineMeta['period_total'] = $updVerify['period_total'];
+                    dal_write_meta($lineNoExt, $lineMeta);
+                }
+                $updMsg = $lineTitle . ' total $' . number_format($val, 2) . ' typed by hand for ' . $lineDate . '. POS file kept.';
+                if ($lineDaysSum > 0.004) {
+                    $updMsg .= ' ' . $updVerify['text'];
+                }
+            }
+            echo json_encode([
+                'success' => true,
+                'message' => $updMsg,
+                'field' => $field,
+                'value' => $val,
+                'report_id' => $rep_id,
+                'period' => $linePeriod,
+                'verify_status' => is_array($updVerify) ? $updVerify['status'] : null,
+            ]);
             exit;
         }
 
@@ -1500,7 +1577,9 @@ function dal_file_link($found, $rid, $reportDate, $kind, $period, $caption) {
     $title = htmlspecialchars(($found['orig'] ?? 'file') . ' (' . $label . ')');
     $ext = htmlspecialchars((string)($fmt['ext'] ?? ''));
     $html = '<a class="file-view" href="daily_report_view.php?' . htmlspecialchars($q) . '" data-kind="' . htmlspecialchars($kind) . '" data-rid="' . (int)$rid . '" data-date="' . htmlspecialchars((string)$reportDate) . '" data-period="' . htmlspecialchars($period) . '" data-ext="' . $ext . '" onclick="if(window.dalOpenFilePreview){window.dalOpenFilePreview(this);return false;}" title="' . $title . ' — click to preview beside the list"><i class="fa ' . $icon . '"></i> View ' . htmlspecialchars($caption) . '</a>';
-    if (!empty($found['unclear'])) {
+    if (!empty($found['sales_typed'])) {
+        $html .= dal_typed_tag_html($found);
+    } elseif (!empty($found['unclear'])) {
         $why = htmlspecialchars($found['unclear_reason'] !== '' ? $found['unclear_reason'] : 'Photo is not clear');
         $html .= ' <span class="dal-recheck-amt" title="' . $why . '">Recheck</span>';
     }
@@ -1719,6 +1798,7 @@ if (!headers_sent()) {
         .amt-ro { font-weight: 800; color: #0f172a; }
         input.dal-manual-amt { width: 92px; max-width: 100%; padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 4px; font-weight: 800; font-size: 12px; color: #0f172a; }
         input.dal-manual-amt:focus { outline: 2px solid #2563eb; border-color: #2563eb; }
+        .dal-typed-tag, .dal-typed-hint { display: inline-block; margin-top: 2px; padding: 0 5px; border-radius: 4px; background: #e0e7ff; color: #3730a3; font-size: 10px; font-weight: 800; }
         .dal-recheck input.dal-manual-amt,
         input.dal-manual-amt.dal-recheck-amt { border: 2px solid #dc2626; background: #fef2f2; color: #b91c1c; }
         .dal-recheck-hint { font-size: 10px; font-weight: 800; color: #dc2626; margin-top: 3px; }
@@ -2041,6 +2121,10 @@ if (!headers_sent()) {
                 <label class="dal-filepick"><input type="file" id="new_paidout_file" class="sheet-input tool-file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,image/*"><span class="dal-filepick-btn">Choose file</span><span class="dal-filepick-name">empty</span></label>
             </div>
             <div class="tool-field">
+                <label id="dalSalesLbl">Sales $ (if POS unread)</label>
+                <input type="number" step="0.01" min="0" id="new_sales" class="sheet-input tool-paid" placeholder="0.00" title="Only when the POS does not read. Daily POS: that day's NET SALES. Weekly POS: the Weekly total. Monthly POS: the Monthly total (1st through Day). No daily sales needed for Weekly or Monthly.">
+            </div>
+            <div class="tool-field">
                 <label>Paid Out $</label>
                 <input type="number" step="0.01" min="0" id="new_paid" class="sheet-input tool-paid" placeholder="0.00" title="Type Paid Out when the image does not read">
             </div>
@@ -2052,7 +2136,7 @@ if (!headers_sent()) {
                     <option value="monthly">Monthly — 1st through Day</option>
                 </select>
             </div>
-            <div class="tool-field" id="dalNeedHint"><!-- dal-sales-after-20261013 -->Attach Daily / Weekly / Monthly POS — no need to pick Report. If Sales $ does not read, type it in red on the row.</div>
+            <div class="tool-field" id="dalNeedHint"><!-- dal-sales-after-20261013 -->Attach Daily / Weekly / Monthly POS — each saves as its own line. If Sales $ does not read, type that line's own total (Weekly total / Monthly total) in red on the row.</div>
             <button type="button" onclick="saveDayReports()" class="btn-save-day" id="dalSaveBtn" title="Attach Daily / Weekly / Monthly POS. Sales $ is typed on the row if unread.">Save</button>
             <button type="button" class="btn-cancel-edit" id="dalCancelEdit" onclick="cancelDalEdit()">Cancel</button>
         </div>
@@ -2189,6 +2273,11 @@ if (!headers_sent()) {
                 if (preg_match('/week_split/i', $rmk)) { $periodLab = 'Weekly'; $periodKey = 'weekly'; }
                 elseif (preg_match('/mtd_split/i', $rmk)) { $periodLab = 'Monthly'; $periodKey = 'monthly'; }
                 $needsRecheck = ($pos < 0.005) || ($repId <= 0);
+                $rowPosFile = ($repId > 0) ? dal_line_pos_file($DAL_UPLOAD_ROOT, $rid, $rDate, $periodKey) : null;
+                // A Monthly line is the MTD total itself; Daily/Weekly lines show the daily-lines MTD.
+                $mtd = dal_line_mtd_display($periodKey, $pos, $mtd);
+                $food_pct = ($mtd > 0) ? ($food / $mtd) * 100 : 0;
+                $lab_pct  = ($mtd > 0) ? ($lab_mtd / $mtd) * 100 : 0;
                 $periodTotal = '';
                 if ($periodKey === 'weekly' || $periodKey === 'monthly') {
                     $pv = dal_read_period_verify($DAL_UPLOAD_ROOT, $rid, $periodKey, $rDate);
@@ -2203,7 +2292,7 @@ if (!headers_sent()) {
             <tr class="data-row<?= $needsRecheck ? ' dal-recheck' : '' ?><?= $periodKey === 'weekly' ? ' dal-row-weekly' : ($periodKey === 'monthly' ? ' dal-row-monthly' : '') ?>" data-id="<?= $repId ?>" data-rid="<?= $rid ?>" data-date="<?= htmlspecialchars($rDate) ?>" data-period="<?= htmlspecialchars($periodKey) ?>" data-period-total="<?= htmlspecialchars($periodTotal) ?>" data-sales="<?= htmlspecialchars(number_format($pos, 2, '.', '')) ?>" data-paid="<?= htmlspecialchars(number_format($paidOut, 2, '.', '')) ?>">
                 <td class="col-site" data-sort="<?= htmlspecialchars($r['nick_name']) ?>"><a href="#dalAddBar" class="site-edit" data-rid="<?= $rid ?>" data-date="<?= htmlspecialchars($rDate) ?>" data-id="<?= $repId ?>" data-name="<?= htmlspecialchars($r['nick_name']) ?>"><?= htmlspecialchars($r['nick_name']) ?></a></td>
                 <td class="col-date" data-sort="<?= htmlspecialchars($rDate) ?>"><div class="dal-date-stack"><span class="dal-date-text"><?= $date_label ?></span><?php if ($periodLab !== ''): ?><span class="dal-period-tag dal-period-<?= htmlspecialchars($periodKey) ?>"><?= htmlspecialchars($periodLab) ?></span><?php endif; ?></div></td>
-                <td data-sort="<?= htmlspecialchars((string)$pos) ?>"><input type="number" step="0.01" min="0" class="dal-manual-amt<?= $needsRecheck ? ' dal-recheck-amt' : '' ?>" data-id="<?= $repId ?>" data-rid="<?= $rid ?>" data-date="<?= htmlspecialchars($rDate) ?>" data-field="pos_sales" value="<?= htmlspecialchars(number_format($pos, 2, '.', '')) ?>" title="<?= $needsRecheck ? 'POS did not read Sales $. Type it here.' : 'Type NET SALES. Double-click to see the POS picture.' ?>"><?php if ($needsRecheck): ?><div class="dal-recheck-hint">Type Sales $ — POS unread</div><?php endif; ?></td>
+                <td data-sort="<?= htmlspecialchars((string)$pos) ?>"><input type="text" inputmode="decimal" autocomplete="off" class="dal-manual-amt<?= $needsRecheck ? ' dal-recheck-amt' : '' ?>" data-id="<?= $repId ?>" data-rid="<?= $rid ?>" data-date="<?= htmlspecialchars($rDate) ?>" data-field="pos_sales" value="<?= htmlspecialchars(number_format($pos, 2, '.', '')) ?>" title="<?= htmlspecialchars(dal_recheck_title($periodKey, $needsRecheck)) ?>"><?php if ($needsRecheck): ?><div class="dal-recheck-hint"><?= htmlspecialchars(dal_recheck_hint($periodKey)) ?></div><?php elseif ($rowPosFile && !empty($rowPosFile['sales_typed'])): ?><div class="dal-typed-hint" title="Sales $ entered by hand; POS file kept">Typed by hand</div><?php endif; ?></td>
                 <td data-sort="<?= htmlspecialchars((string)$mtd) ?>">$<?= number_format($mtd, 2) ?></td>
                 <td data-sort="<?= htmlspecialchars((string)$food) ?>"><?php if (abs($food) > 0.004): ?><a href="<?= htmlspecialchars($fcLink) ?>" style="font-weight:800;color:#0f766e;">$<?= number_format($food, 2) ?></a><?php else: ?>$<?= number_format($food, 2) ?><?php endif; ?></td>
                 <td data-sort="<?= htmlspecialchars((string)$food_pct) ?>"><span class="<?= ($food_pct > 35) ? 'val-bad' : '' ?>"><?= number_format($food_pct, 1) ?>%</span></td>
@@ -2262,7 +2351,7 @@ if (!headers_sent()) {
     <div class="dal-prev-body" id="dalPrevBody"></div>
     <div class="dal-prev-foot" id="dalPrevFoot">
         <label id="dalPrevAmtLabel" for="dalPrevAmt">Sales $</label>
-        <input type="number" step="0.01" min="0" id="dalPrevAmt" placeholder="0.00">
+        <input type="text" inputmode="decimal" autocomplete="off" id="dalPrevAmt" placeholder="0.00">
         <div class="dal-prev-actions">
             <button type="button" class="dal-prev-save" id="dalPrevSave">Save figure</button>
             <button type="button" class="dal-prev-x" id="dalPrevClose2" title="Close" style="width:auto;padding:0 10px;height:32px;">Close</button>
@@ -2338,6 +2427,7 @@ function startDalEdit(rid, date, reportId, name) {
     var rowPeriod = $row.attr('data-period') || 'daily';
     $('#dal_period').prop('disabled', false).val(rowPeriod);
     $('#new_paid').val($row.attr('data-paid') || '');
+    $('#new_sales').val('');
     if (typeof dalApplyDateRules === 'function') dalApplyDateRules({ keepPeriod: true });
     var chromeBtn = document.getElementById('dalChromeBtn');
     var toolBar = document.getElementById('dalToolBar');
@@ -2360,6 +2450,7 @@ function cancelDalEdit() {
     $('#new_pos_file, #new_weekly_pos_file, #new_monthly_pos_file, #new_prod_file, #new_paidout_file').val('');
     $('#dal_period').val('daily');
     $('#new_paid').val('');
+    $('#new_sales').val('');
     $('tr.data-row').removeClass('editing-row');
     if (typeof dalApplyDateRules === 'function') dalApplyDateRules();
 }
@@ -2428,7 +2519,18 @@ function dalApplyDateRules(opts) {
     if (m) m.hidden = false;
     if (wrap) wrap.hidden = !showReport;
     if (sel) sel.disabled = !showReport;
-    if (hint) hint.textContent = 'Attach Daily / Weekly / Monthly POS — no need to pick Report. If Sales $ does not read, type it in red on the row.';
+    if (hint) hint.textContent = 'Attach Daily / Weekly / Monthly POS — each saves as its own line. If Sales $ does not read, type that line\'s own total (Weekly total / Monthly total) in red on the row.';
+    var salesLbl = document.getElementById('dalSalesLbl');
+    if (salesLbl) {
+        var pick = 'daily';
+        var hasM = document.getElementById('new_monthly_pos_file'), hasW = document.getElementById('new_weekly_pos_file'), hasD = document.getElementById('new_pos_file');
+        var chosen = function (x) { return !!(x && x.files && x.files[0]); };
+        var nChosen = (chosen(hasD) ? 1 : 0) + (chosen(hasW) ? 1 : 0) + (chosen(hasM) ? 1 : 0);
+        if (chosen(hasM) && nChosen === 1) pick = 'monthly';
+        else if (chosen(hasW) && nChosen === 1) pick = 'weekly';
+        else if (!nChosen && sel && !sel.disabled) pick = sel.value || 'daily';
+        salesLbl.textContent = pick === 'monthly' ? 'Monthly total $ (if POS unread)' : (pick === 'weekly' ? 'Weekly total $ (if POS unread)' : 'Sales $ (if POS unread)');
+    }
 }
 document.addEventListener('DOMContentLoaded', function () {
     var day = document.getElementById('new_date');
@@ -2454,6 +2556,7 @@ function saveDayReports() {
     const prodFile = $('#new_prod_file')[0].files[0];
     const paidFile = $('#new_paidout_file')[0].files[0];
     const typedPaid = ($('#new_paid').val() || '').trim();
+    const typedSales = ($('#new_sales').val() || '').trim();
     var hasPosFile = !!(posFile || weeklyPos || monthlyPos);
     var period = hasPosFile ? '' : ($('#dal_period').val() || 'daily');
     if (mode === 'create' && !hasPosFile) {
@@ -2469,6 +2572,7 @@ function saveDayReports() {
     fd.append('period', period);
     fd.append('month_end', (!hasPosFile && period === 'monthly') ? '1' : '0');
     if (typedPaid !== '') fd.append('manual_paid_out', typedPaid);
+    if (typedSales !== '') fd.append('manual_sales', typedSales);
     if (posFile) fd.append('pos_file', posFile, posFile.name);
     if (weeklyPos) fd.append('weekly_pos_file', weeklyPos, weeklyPos.name);
     if (monthlyPos) fd.append('monthly_pos_file', monthlyPos, monthlyPos.name);
@@ -2597,7 +2701,12 @@ $(document).on('change', '.dal-manual-amt', function() {
     var field = el.getAttribute('data-field') || 'pos_sales';
     var rid = el.getAttribute('data-rid') || $(el).closest('tr.data-row').attr('data-rid') || '';
     var date = el.getAttribute('data-date') || $(el).closest('tr.data-row').attr('data-date') || '';
-    $.post(window.location.pathname, { action: 'update', report_id: id, field: field, value: el.value, restaurant_id: rid, report_date: date }, function(res) {
+    var typed = String(el.value || '').replace(/[,$\s]/g, '');
+    if (typed === '' || isNaN(Number(typed)) || Number(typed) < 0) {
+        alert('Type the amount as a number, for example 12410.21.');
+        return;
+    }
+    $.post(window.location.pathname, { action: 'update', report_id: id, field: field, value: typed, restaurant_id: rid, report_date: date }, function(res) {
         if (res && res.success) {
             if (res.report_id) el.setAttribute('data-id', String(res.report_id));
             try { sessionStorage.setItem('dalFlash', JSON.stringify({ text: res.message || 'Saved', color: '#16a34a' })); } catch (e) {}
@@ -2865,8 +2974,9 @@ $(document).on('change', '.dal-manual-amt', function() {
     });
     $('#dalPrevSave').on('click', function() {
         var id = state.reportId;
-        var val = (amtEl.value || '').trim();
+        var val = (amtEl.value || '').trim().replace(/[,$\s]/g, '');
         if (!id && !state.rid) { alert('Save this day first, then type the figure.'); return; }
+        if (val === '' || isNaN(Number(val)) || Number(val) < 0) { alert('Type the amount as a number, for example 12410.21.'); return; }
         $.post(window.location.pathname, { action: 'update', report_id: id, field: state.field, value: val, restaurant_id: state.rid, report_date: state.date }, function(res) {
             if (res && res.success) {
                 if (res.report_id) {
