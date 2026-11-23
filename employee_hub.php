@@ -473,7 +473,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $role_to_save,
                     true
                 );
-                if ($role_sync !== 'ok' && $role_sync !== 'unlinked') {
+                if ($role_sync === 'role_denied' && $user_level <= 10) {
+                    // Platform superadmin logins (e.g. admin, grockbot) often have no ERP person in this
+                    // company, so the ERP check cannot find an actor and says role_denied. The payroll
+                    // superadmin may set any role: save it in payroll and skip the ERP membership sync.
+                    $role_sync = 'skip';
+                }
+                if ($role_sync !== 'ok' && $role_sync !== 'unlinked' && $role_sync !== 'skip') {
                     eh_hub_redirect('err', $role_sync, $target_org);
                 }
             }
