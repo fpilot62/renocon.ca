@@ -46,6 +46,11 @@ $gen = (string)file_get_contents($root . '/payroll_gen.php');
 check('period finalize creates pending rows', strpos($gen, 'sh_generate_period_candidates') !== false);
 $bulk = (string)file_get_contents($root . '/bulk_finalize_handler.php');
 check('batch finalize creates pending rows for the period', strpos($bulk, 'sh_generate_period_candidates') !== false);
+$save = (string)file_get_contents($root . '/payroll_save_payment.php');
+check('save payment does not hard-require the audit library', !preg_match('/^\s*require(?:_once)?\s+.+attendance_audit_lib\.php/m', $save));
+check('save payment still logs when the audit library is present', strpos($save, "function_exists('aa_log_ids')") !== false);
+check('bulk finalize does not hard-require the audit library', !preg_match('/^\s*require(?:_once)?\s+.+attendance_audit_lib\.php/m', $bulk));
+check('bulk finalize still logs when the audit library is present', strpos($bulk, "function_exists('aa_log')") !== false);
 
 $bucket = ['reg_h' => 16.0, 'reg_pay' => 320.0, 'bonus' => 0.0, 'gross' => 410.0, 'ph_pay' => 160.0, 'stat_worked' => 90.0];
 paydocs_peel_special($bucket, 'Statutory Holiday', 'Canada Day — Statutory Holiday Pay', 160.0, 0.0, 160.0, false, 8.0);

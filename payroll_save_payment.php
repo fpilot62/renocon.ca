@@ -8,7 +8,10 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 require_once 'db.php';
-require_once __DIR__ . '/engine/attendance_audit_lib.php';
+$aaLib = __DIR__ . '/engine/attendance_audit_lib.php';
+if (is_file($aaLib)) {
+    require_once $aaLib;
+}
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'])) {
@@ -60,11 +63,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
         $bQuery = $pdo->prepare("UPDATE payroll_balance SET status = ? WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ?");
         $bQuery->execute([$target_status_flag, $uid, $sid, $batch_start, $batch_end]);
 
-        $aaIds = aa_ids_where($pdo, 'user_id = ? AND site_id = ? AND DATE(clock_in) BETWEEN ? AND ?', [$uid, $sid, $batch_start, $batch_end]);
-        $aaBefore = aa_befores($pdo, $aaIds);
         $att = $pdo->prepare("UPDATE attendance SET status = 1, payout_status = 1 WHERE user_id = ? AND site_id = ? AND DATE(clock_in) BETWEEN ? AND ?");
         $att->execute([$uid, $sid, $batch_start, $batch_end]);
-        aa_log_ids($pdo, 'finalize', $aaIds, $aaBefore, 'Save payment');
+        if (function_exists('aa_ids_where') && function_exists('aa_befores') && function_exists('aa_log_ids')) {
+            $aaIds = aa_ids_where($pdo, 'user_id = ? AND site_id = ? AND DATE(clock_in) BETWEEN ? AND ?', [$uid, $sid, $batch_start, $batch_end]);
+            $aaBefore = aa_befores($pdo, $aaIds);
+            aa_log_ids($pdo, 'finalize', $aaIds, $aaBefore, 'Save payment');
+        }
 
         $pdo->commit();
         header("Location: payroll_master_ledger.php?from_date={$batch_start}&to_date={$batch_end}&view_scope=cleared&msg=success");
