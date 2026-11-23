@@ -1115,6 +1115,7 @@ if (!function_exists('sh_approve_stat_line')) {
         if (function_exists('aa_log')) {
             sh_review_audit($pdo, (int)$row['user_id'], 'approved', (string)$row['work_date'] . ' ' . $reason);
         }
+        sh_refresh_employee_period($pdo, (int)$row['user_id'], (int)$row['site_id'], (string)$row['work_date']);
         return true;
     }
 }
@@ -1215,6 +1216,26 @@ if (!function_exists('sh_drop_unapproved_stat')) {
         try {
             $pdo->prepare('DELETE FROM statutory_pay_items WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=?')
                 ->execute([$orgId, $userId, $siteId, $holidayDate]);
+        } catch (Throwable $e) {
+        }
+        sh_refresh_employee_period($pdo, $userId, $siteId, $holidayDate);
+    }
+}
+
+if (!function_exists('sh_refresh_employee_period')) {
+    /** Recalculate CPP/EI/tax for the period after approval, an amount edit, or an exclusion. Does not pay. */
+    function sh_refresh_employee_period(PDO $pdo, int $userId, int $siteId, string $workDate): void {
+        if (!function_exists('pe_refresh_period_stat') && !function_exists('pe_line') && !function_exists('pe_rates')) {
+            $engine = __DIR__ . '/payroll_engine.php';
+            if (is_file($engine)) {
+                require_once $engine;
+            }
+        }
+        if (!function_exists('pe_refresh_period_stat') || $userId <= 0 || $siteId <= 0) {
+            return;
+        }
+        try {
+            pe_refresh_period_stat($pdo, $userId, $siteId, substr($workDate, 0, 10));
         } catch (Throwable $e) {
         }
     }
@@ -1367,5 +1388,112 @@ if (!function_exists('sh_after_finalize')) {
             }
         }
         return $posted;
+    }
+}
+
+if (!function_exists('sh_generate_period_candidates')) {
+    /**
+     * Pending statutory lines for every eligible active employee at each BC, ON, and SK site
+     * in the pay period. Safe to call again. Does not approve and does not mark anything paid.
+     * $period is "YYYY-MM-DD|YYYY-MM-DD" or ['start' =>, 'end' =>].
+     *
+     * @return array{posted:int,already:int,excluded:int,employees:int}
+     */
+    function sh_generate_period_candidates(PDO $pdo, int $orgId, $period, int $byUser = 0): array {
+        $empty = ['posted' => 0, 'already' => 0, 'excluded' => 0, 'employees' => 0];
+        if ($orgId <= 0) {
+            return $empty;
+        }
+        if (is_array($period)) {
+            $start = substr((string)($period['start'] ?? $period[0] ?? ''), 0, 10);
+            $end = substr((string)($period['end'] ?? $period[1] ?? ''), 0, 10);
+        } else {
+            $parts = explode('|', (string)$period, 2);
+            $start = substr($parts[0] ?? '', 0, 10);
+            $end = substr($parts[1] ?? '', 0, 10);
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $start) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $end) || $start > $end) {
+            return $empty;
+        }
+        $sites = [];
+        try {
+            $st = $pdo->prepare('SELECT SId, province FROM sites WHERE org_id=?');
+            $st->execute([$orgId]);
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $site) {
+                $prov = sh_normalize_province((string)($site['province'] ?? ''));
+                if (!in_array($prov, ['BC', 'ON', 'SK'], true)) {
+                    continue;
+                }
+                $sites[(int)$site['SId']] = $prov;
+            }
+        } catch (Throwable $e) {
+            return $empty;
+        }
+        if (!$sites) {
+            return $empty;
+        }
+        $userCols = sh_table_cols($pdo, 'users');
+        $activeSql = isset($userCols['active']) ? ' AND COALESCE(u.active,1)=1' : '';
+        $pairs = [];
+        $svc = sh_table_cols($pdo, 'employee_company_service');
+        if ($svc) {
+            try {
+                $st = $pdo->prepare(
+                    "SELECT DISTINCT u.id AS user_id, ecs.site_id
+                       FROM users u
+                       INNER JOIN employee_company_service ecs ON ecs.user_id=u.id
+                       INNER JOIN sites s ON s.SId=ecs.site_id AND s.org_id=u.org_id
+                      WHERE u.org_id=? $activeSql"
+                );
+                $st->execute([$orgId]);
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $pairs[(int)$row['user_id'] . '|' . (int)$row['site_id']] = [(int)$row['user_id'], (int)$row['site_id']];
+                }
+            } catch (Throwable $e) {
+            }
+        }
+        try {
+            $st = $pdo->prepare(
+                "SELECT DISTINCT f.user_id, f.site_id
+                   FROM payroll_finalized f
+                   INNER JOIN users u ON u.id=f.user_id AND u.org_id=?
+                  WHERE f.org_id=? $activeSql"
+            );
+            $st->execute([$orgId, $orgId]);
+            foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $pairs[(int)$row['user_id'] . '|' . (int)$row['site_id']] = [(int)$row['user_id'], (int)$row['site_id']];
+            }
+        } catch (Throwable $e) {
+        }
+        $holidays = [];
+        foreach (['BC', 'ON', 'SK'] as $prov) {
+            $holidays[$prov] = sh_calendar_holidays($prov, $start, $end);
+        }
+        $posted = 0;
+        $already = 0;
+        $excluded = 0;
+        $seen = [];
+        foreach ($pairs as [$userId, $siteId]) {
+            if (!isset($sites[$siteId])) {
+                continue;
+            }
+            $prov = $sites[$siteId];
+            $seen[$userId . '|' . $siteId] = true;
+            foreach ($holidays[$prov] as $holiday) {
+                if (sh_stat_excluded($pdo, $orgId, $userId, $siteId, $holiday['holiday_date'])) {
+                    $excluded++;
+                    continue;
+                }
+                if (sh_stat_line_exists($pdo, $userId, $siteId, $holiday['holiday_date'])) {
+                    $already++;
+                    sh_post_stat_line($pdo, $orgId, $userId, $siteId, $holiday['holiday_date'], $holiday['holiday_name'], $prov, $byUser, null, '', $end);
+                    continue;
+                }
+                if (sh_post_stat_line($pdo, $orgId, $userId, $siteId, $holiday['holiday_date'], $holiday['holiday_name'], $prov, $byUser, null, '', $end)) {
+                    $posted++;
+                }
+            }
+        }
+        return ['posted' => $posted, 'already' => $already, 'excluded' => $excluded, 'employees' => count($seen)];
     }
 }

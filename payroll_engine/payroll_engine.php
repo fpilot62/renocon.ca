@@ -517,10 +517,51 @@ function pe_cpp_period_exempt(PDO $pdo, int $site_id = 0, int $org_id = 0): floa
     return round(3500.0 / $periods, 2);
 }
 
+/** True when payroll_finalized (or another table) has this column. Works on MySQL and SQLite. */
+function pe_has_column(PDO $pdo, string $table, string $column): bool {
+    static $cache = [];
+    $key = spl_object_id($pdo) . '|' . $table . '|' . $column;
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $column)) {
+        return $cache[$key] = false;
+    }
+    try {
+        if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            $ok = false;
+            $q = $pdo->query('PRAGMA table_info(' . $table . ')');
+            if ($q) {
+                foreach ($q as $col) {
+                    if (strcasecmp((string)$col['name'], $column) === 0) {
+                        $ok = true;
+                        break;
+                    }
+                }
+            }
+            return $cache[$key] = $ok;
+        }
+    } catch (Throwable $e) {
+        return $cache[$key] = false;
+    }
+    return $cache[$key] = pe_t4127_col($pdo, $table, $column);
+}
+
+/** SQL fragment that drops stat lines still waiting for approval. Empty when the column is absent. */
+function pe_not_pending_sql(PDO $pdo, string $alias = ''): string {
+    if (!pe_has_column($pdo, 'payroll_finalized', 'stat_approval_status')) {
+        return '';
+    }
+    $alias = preg_replace('/[^A-Za-z0-9_]/', '', $alias) ?? '';
+    $col = $alias !== '' ? $alias . '.stat_approval_status' : 'stat_approval_status';
+    return " AND COALESCE($col,'') <> 'pending'";
+}
+
 /**
  * Calculate CPP once for this employee + site + pay period, store it, and
  * clear per-shift cpp so dates do not each carry their own exemption.
  * Ledger / pay / stubs READ this row — they do not recalculate.
+ * Pending statutory lines are not part of this gross. Approval does not pay them.
  */
 function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $work_date): ?array {
     if ($user_id <= 0 || $site_id <= 0 || $work_date === '') { return null; }
@@ -538,11 +579,12 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
     // and whose cheque is the next unpaid period. In-window lines are unchanged.
     $spanSql = 'user_id=? AND site_id=? AND (work_date BETWEEN ? AND ? OR pay_period_end=?)';
     $spanArgs = [$user_id, $site_id, $start, $end, $end];
+    $approvedSql = pe_not_pending_sql($pdo, '');
     $sum = $pdo->prepare(
         "SELECT COALESCE(SUM(total_gross),0) AS gross, COALESCE(SUM(vac),0) AS vac,
                 COALESCE(SUM(ei),0) AS ei, COALESCE(SUM(income_tax),0) AS tax
          FROM payroll_finalized
-         WHERE $spanSql"
+         WHERE $spanSql $approvedSql"
     );
     $sum->execute($spanArgs);
     $s = $sum->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -597,15 +639,26 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
     }
     $net = pe_employee_net($pdo, $gross, $cpp, $ei, $tax, $vac, $site_id, $org_id, $cpp2);
 
-    $pdo->prepare(
-        "INSERT INTO payroll_period_stat
-            (org_id, site_id, user_id, period_start, period_end, pensionable, cpp_exempt, cpp, cpp_er, ei, income_tax, vac, gross, net)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON DUPLICATE KEY UPDATE
-            org_id=VALUES(org_id), pensionable=VALUES(pensionable), cpp_exempt=VALUES(cpp_exempt),
-            cpp=VALUES(cpp), cpp_er=VALUES(cpp_er), ei=VALUES(ei), income_tax=VALUES(income_tax),
-            vac=VALUES(vac), gross=VALUES(gross), net=VALUES(net)"
-    )->execute([$org_id, $site_id, $user_id, $start, $end, $pensionable, $exempt, $cpp, $cpp, $ei, $tax, $vac, $gross, $net]);
+    $statParams = [$org_id, $site_id, $user_id, $start, $end, $pensionable, $exempt, $cpp, $cpp, $ei, $tax, $vac, $gross, $net];
+    if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+        $pdo->prepare('DELETE FROM payroll_period_stat WHERE user_id=? AND site_id=? AND period_start=? AND period_end=?')
+            ->execute([$user_id, $site_id, $start, $end]);
+        $pdo->prepare(
+            "INSERT INTO payroll_period_stat
+                (org_id, site_id, user_id, period_start, period_end, pensionable, cpp_exempt, cpp, cpp_er, ei, income_tax, vac, gross, net)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )->execute($statParams);
+    } else {
+        $pdo->prepare(
+            "INSERT INTO payroll_period_stat
+                (org_id, site_id, user_id, period_start, period_end, pensionable, cpp_exempt, cpp, cpp_er, ei, income_tax, vac, gross, net)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE
+                org_id=VALUES(org_id), pensionable=VALUES(pensionable), cpp_exempt=VALUES(cpp_exempt),
+                cpp=VALUES(cpp), cpp_er=VALUES(cpp_er), ei=VALUES(ei), income_tax=VALUES(income_tax),
+                vac=VALUES(vac), gross=VALUES(gross), net=VALUES(net)"
+        )->execute($statParams);
+    }
     if ($edition !== '' && pe_t4127_col($pdo, 'payroll_period_stat', 'deduction_edition')) {
         $pdo->prepare('UPDATE payroll_period_stat SET deduction_edition=? WHERE user_id=? AND site_id=? AND period_start=? AND period_end=?')
             ->execute([$edition, $user_id, $site_id, $start, $end]);
@@ -616,8 +669,9 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
     }
 
     // CPP for the period lives on payroll_period_stat (ledgers add it back).
-    // EI, tax, WCB, and CPP2 are spread across the lines so a sum of the lines matches.
-    $lineRows = $pdo->prepare("SELECT id, total_gross, COALESCE(paid_amount,0) AS paid_amount FROM payroll_finalized WHERE $spanSql ORDER BY id");
+    // EI, tax, WCB, and CPP2 are spread across approved lines so a sum of those lines matches.
+    // Pending stat is left out of the gross and does not keep its own CPP/EI/tax.
+    $lineRows = $pdo->prepare("SELECT id, total_gross, COALESCE(paid_amount,0) AS paid_amount FROM payroll_finalized WHERE $spanSql $approvedSql ORDER BY id");
     $lineRows->execute($spanArgs);
     $ids = [];
     $weights = [];
@@ -628,6 +682,13 @@ function pe_refresh_period_stat(PDO $pdo, int $user_id, int $site_id, string $wo
         }
         $ids[] = (int)$ln['id'];
         $weights[] = (float)$ln['total_gross'];
+    }
+    if ($approvedSql !== '' && !$locked) {
+        $pdo->prepare(
+            "UPDATE payroll_finalized
+                SET cpp=0, cpp_er=0, ei=0, ei_er=0, income_tax=0, wcb=0
+              WHERE $spanSql AND COALESCE(stat_approval_status,'')='pending' AND COALESCE(paid_amount,0) <= 0.02"
+        )->execute($spanArgs);
     }
     if (!$locked && $ids) {
         $eiShares = pe_t4127_allocate($ei, $weights);

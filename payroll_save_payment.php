@@ -32,7 +32,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
         $uQuery->execute([$uid]);
         $uName = $uQuery->fetchColumn() ?: "Staff #{$uid}";
 
-        $stored = $pdo->prepare("SELECT COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei, COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(cpp_er),0) cpp_er, COALESCE(SUM(ei_er),0) ei_er, COALESCE(SUM(wcb),0) wcb FROM payroll_finalized WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?");
+        $notPending = function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : '';
+        $stored = $pdo->prepare("SELECT COALESCE(SUM(total_gross),0) g, COALESCE(SUM(cpp),0) cpp, COALESCE(SUM(ei),0) ei, COALESCE(SUM(income_tax),0) tax, COALESCE(SUM(cpp_er),0) cpp_er, COALESCE(SUM(ei_er),0) ei_er, COALESCE(SUM(wcb),0) wcb FROM payroll_finalized WHERE user_id=? AND site_id=? AND work_date BETWEEN ? AND ?" . $notPending);
         $stored->execute([$uid, $sid, $batch_start, $batch_end]);
         $got = $stored->fetch(PDO::FETCH_ASSOC) ?: [];
         $cra_tax_due = (float)$got['cpp'] + (float)$got['ei'] + (float)$got['tax'];
@@ -53,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_payout_batch'
         $stmtPay->execute([$master_id, $pay_now, "{$uName} ({$pay_method})", $ref_code]);
 
         // Allocate disbursed funds across outstanding employee rows
-        $rQuery = $pdo->prepare("UPDATE payroll_finalized SET status = ?, payment_status = 'Paid' WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ?");
+        $rQuery = $pdo->prepare("UPDATE payroll_finalized SET status = ?, payment_status = 'Paid' WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ?" . $notPending);
         $rQuery->execute([$target_status_flag, $uid, $sid, $batch_start, $batch_end]);
 
         $bQuery = $pdo->prepare("UPDATE payroll_balance SET status = ? WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ?");

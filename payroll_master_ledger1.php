@@ -450,7 +450,8 @@ $sql = "SELECT
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate, f.total_gross,
             f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
             f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
-            f.work_date, f.display_label, f.comments, f.category
+            f.work_date, f.display_label, f.comments, f.category,
+            " . (ledger1_has_stat_approval($pdo) ? "COALESCE(f.stat_approval_status,'') AS stat_approval_status" : "'' AS stat_approval_status") . "
         FROM payroll_finalized f
         INNER JOIN users u ON f.user_id = u.id
         LEFT  JOIN sites s ON f.site_id = s.Sid
@@ -463,7 +464,7 @@ $raw = $stmt->fetchAll(PDO::FETCH_ASSOC);
 // Pay Period is the top-level date filter (from/to + period_mode already narrow $raw).
 // Build a nested tree:  Site  ->  Employee  ->  Shifts
 // with rolled-up totals at the period (grand), site, and employee levels.
-$period_tot = ['gross'=>0,'net'=>0,'paid'=>0,'rem'=>0,'travel_h'=>0];
+$period_tot = ['gross'=>0,'net'=>0,'paid'=>0,'rem'=>0,'travel_h'=>0,'await'=>0];
 $sites_tree = []; // [site_name] => ['name','site_id','t_*','emps'=>[user_id=>['name','user_id','t_*','lines'=>[]]]]
 
 foreach ($raw as $r) {
@@ -473,38 +474,47 @@ foreach ($raw as $r) {
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
+    $needsApproval = strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') === 0;
+    $r['_needs_approval'] = $needsApproval;
     $r['_ee']        = ee_deduct($r);
     $r['_er']        = (float)$r['er_cpp'] + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
     $r['_net']       = $net;
     $r['_paid']      = $paid;
-    $r['_remaining'] = $remaining;
-    $trav_h          = (float)$r['travel_hours'];
+    $r['_remaining'] = $needsApproval ? 0.0 : $remaining;
+    $trav_h          = $needsApproval ? 0.0 : (float)$r['travel_hours'];
+    $lineGross = $needsApproval ? 0.0 : (float)$r['total_gross'];
+    $lineNet = $needsApproval ? 0.0 : $net;
+    $linePaid = $needsApproval ? 0.0 : $paid;
+    $lineRem = $needsApproval ? 0.0 : $remaining;
+    $lineAwait = $needsApproval ? (float)$r['total_gross'] : 0.0;
 
     $sname = $r['site_name'] ?? 'Unassigned';
     $uid   = $r['user_id'];
 
     if (!isset($sites_tree[$sname])) {
         $sites_tree[$sname] = ['name'=>$sname, 'site_id'=>$r['site_id'],
-                               't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_travel_h'=>0, 'emps'=>[]];
+                               't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_travel_h'=>0,'t_await'=>0, 'emps'=>[]];
     }
     if (!isset($sites_tree[$sname]['emps'][$uid])) {
         $sites_tree[$sname]['emps'][$uid] = ['name'=>$r['employee_name'], 'user_id'=>$uid,
-                                             't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_travel_h'=>0, 'lines'=>[]];
+                                             't_gross'=>0,'t_net'=>0,'t_paid'=>0,'t_rem'=>0,'t_travel_h'=>0,'t_await'=>0, 'lines'=>[]];
     }
 
     $sites_tree[$sname]['emps'][$uid]['lines'][] = $r;
     foreach ([[&$sites_tree[$sname]], [&$sites_tree[$sname]['emps'][$uid]]] as $ref) {
-        $ref[0]['t_gross']    += (float)$r['total_gross'];
-        $ref[0]['t_net']      += $net;
-        $ref[0]['t_paid']     += $paid;
-        $ref[0]['t_rem']      += $remaining;
+        $ref[0]['t_gross']    += $lineGross;
+        $ref[0]['t_net']      += $lineNet;
+        $ref[0]['t_paid']     += $linePaid;
+        $ref[0]['t_rem']      += $lineRem;
         $ref[0]['t_travel_h'] += $trav_h;
+        $ref[0]['t_await']    += $lineAwait;
     }
-    $period_tot['gross']    += (float)$r['total_gross'];
-    $period_tot['net']      += $net;
+    $period_tot['gross']    += $lineGross;
+    $period_tot['net']      += $lineNet;
     $period_tot['travel_h'] += $trav_h;
-    $period_tot['paid']  += $paid;
-    $period_tot['rem']   += $remaining;
+    $period_tot['paid']  += $linePaid;
+    $period_tot['rem']   += $lineRem;
+    $period_tot['await'] += $lineAwait;
 }
 // sort sites by name, employees within each by name
 uksort($sites_tree, fn($a,$b) => strcmp($a,$b));
@@ -696,7 +706,7 @@ unset($st);
                         <td colspan="2" class="text-left sub">Period net payable: $<?=number_format($period_tot['net'],2)?></td>
                         <td class="text-info">$<?=number_format($period_tot['paid'],2)?></td>
                         <td style="color:<?=$period_tot['rem']>0.01?'#fca5a5':'#86efac'?>;">$<?=number_format($period_tot['rem'],2)?></td>
-                        <td colspan="2" class="sub small">All sites combined<?php if ($period_tot['travel_h'] > 0): ?> · <span style="color:#fcd34d;"><i class="fa fa-car"></i> <?=number_format($period_tot['travel_h'],2)?>h travel</span><?php endif; ?></td>
+                        <td colspan="2" class="sub small">All sites combined<?php if ($period_tot['travel_h'] > 0): ?> · <span style="color:#fcd34d;"><i class="fa fa-car"></i> <?=number_format($period_tot['travel_h'],2)?>h travel</span><?php endif; ?><?php if (($period_tot['await'] ?? 0) > 0.009): ?> · awaiting approval $<?=number_format($period_tot['await'],2)?><?php endif; ?></td>
                     </tr>
 
                     <?php $idx = 0; $sx = 0; foreach ($sites_tree as $site): $sx++; $sid = 'site'.$sx; ?>

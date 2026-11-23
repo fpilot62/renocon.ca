@@ -94,7 +94,7 @@ function ledger_strip_non_stat(array $sites, array $period): array {
     $keys = [
         'gross' => 't_gross', 'net' => 't_net', 'paid' => 't_paid', 'rem' => 't_rem',
         'reg_h' => 't_reg_h', 'ot_h' => 't_ot_h', 'travel_h' => 't_travel_h',
-        'stat_h' => 't_stat_h', 'stat_cost' => 't_stat_cost',
+        'stat_h' => 't_stat_h', 'stat_cost' => 't_stat_cost', 'await' => 't_await',
         'ee' => 't_ee', 'ee_tax' => 't_ee_tax', 'ee_cpp' => 't_ee_cpp', 'ee_ei' => 't_ee_ei',
         'er' => 't_er', 'er_cpp' => 't_er_cpp', 'er_ei' => 't_er_ei', 'er_wcb' => 't_er_wcb', 'er_vac' => 't_er_vac',
     ];

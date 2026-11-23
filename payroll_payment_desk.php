@@ -9,6 +9,9 @@ error_reporting(E_ALL);
 
 require_once 'db.php';
 require_once 'engine/menu_generator.php';
+if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+}
 
 $uid = (int)($_GET['user_id'] ?? 0);
 $sid = (int)($_GET['site_id'] ?? 0);
@@ -26,7 +29,7 @@ $user = $uQuery->fetch(PDO::FETCH_ASSOC);
 if (!$user) { die("Target employee profile record not found."); }
 
 // 2. Calculate remaining regular wages due (Gross less any historical partial payments where status = 'pending')
-$rQuery = $pdo->prepare("SELECT SUM(reg_pay - COALESCE(paid_amount, 0)) as due FROM payroll_finalized WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ? AND status = 'pending'");
+$rQuery = $pdo->prepare("SELECT SUM(reg_pay - COALESCE(paid_amount, 0)) as due FROM payroll_finalized WHERE user_id = ? AND site_id = ? AND work_date BETWEEN ? AND ? AND status = 'pending'" . (function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : ''));
 $rQuery->execute([$uid, $sid, $from_date, $to_date]);
 $reg_due = (float)($rQuery->fetchColumn() ?: 0);
 

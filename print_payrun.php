@@ -3,6 +3,9 @@
 // Hide warnings for a clean print
 ini_set('display_errors', 0); 
 require_once 'db.php';
+if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
+    require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+}
 
 $from   = $_GET['from_date'] ?? '';
 $to     = $_GET['to_date'] ?? '';
@@ -24,7 +27,7 @@ try {
     $sql = "SELECT u.Name as emp_name, u.id as user_id, c.display_label, c.hrs, c.gross, c.cpp_val, c.ei_val
             FROM (
                 SELECT user_id, display_label, reg_hours as hrs, reg_pay as gross, cpp as cpp_val, ei as ei_val 
-                FROM payroll_finalized WHERE work_date BETWEEN ? AND ?
+                FROM payroll_finalized WHERE work_date BETWEEN ? AND ?" . (function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : '') . "
                 UNION ALL
                 SELECT user_id, 'Balance Adjustment' as display_label, reg_hours as hrs, reg_pay as gross, cpp_paid as cpp_val, ei_paid as ei_val 
                 FROM payroll_balance WHERE work_date BETWEEN ? AND ?

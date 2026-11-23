@@ -130,7 +130,7 @@ check('preview posted rows are yellow', strpos($page, '#fff3b0') !== false && st
 $ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
 check('ledger paints Statutory Holiday rows yellow', strpos($ledger, 'stat-holiday') !== false && strpos($ledger, '#fff3b0') !== false && strpos($ledger, 'stat-pay-mark') !== false);
 $docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
-check('pay stub highlights public holiday yellow', strpos($docs, '255, 243, 176') !== false && strpos($docs, "'Public Holiday'") !== false);
+check('pay stub highlights stat holiday pay yellow', strpos($docs, '255, 243, 176') !== false && strpos($docs, "'Stat Holiday Pay'") !== false && strpos($docs, "'Stat Day Worked'") !== false);
 
 if ($fail > 0) {
     echo $fail . " failed\n";
