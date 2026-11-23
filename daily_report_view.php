@@ -8,6 +8,7 @@ require_once 'engine/page_rollback_lib.php';
 require_once 'engine/dal_period_lines.php';
 
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
+require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 30, 'fence' => ['report_id' => 'daily_report', 'restaurant_id' => 'site', 'rid' => 'site', 'site_id' => 'site']]); // org-scope audit Nov 2026
 
 $current_org_id = (int)($_SESSION['org_id'] ?? 0);
 $user_lvl       = (int)($_SESSION['user_level'] ?? 99);
