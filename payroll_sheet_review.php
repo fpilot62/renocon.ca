@@ -23,6 +23,7 @@ require_once 'payroll_scope.php';
 require_once __DIR__ . '/engine/payroll_sheet_review_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
 require_once __DIR__ . '/engine/sheet_hide_lib.php';
+require_once __DIR__ . '/engine/sheet_summary_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -46,6 +47,17 @@ function psr_sort_heading(array $query, string $column, string $label, string $c
     $query['page'] = 1;
     $arrow = $current === $column ? ($dir === 'asc' ? ' ▲' : ' ▼') : '';
     return '<a class="text-white" href="?' . psr_h(http_build_query($query)) . '">' . psr_h($label . $arrow) . '</a>';
+}
+function psr_summary_figure($amount, int $unknown): string
+{
+    if ($amount === null) {
+        return $unknown > 0 ? 'unknown (' . $unknown . ')' : '0.00';
+    }
+    $text = number_format((float)$amount, 2);
+    if ($unknown > 0) {
+        $text .= ' (' . $unknown . ' unknown)';
+    }
+    return $text;
 }
 function psr_group_figure(array $part): string
 {
@@ -507,7 +519,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_accept_links'
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['preview_grid_save'])) {
     $openApprovals = true;
     $byKey = [];
-    foreach ($visibleRows as $grow) {
+    $savePool = isset($_POST['summary_pay']) ? $gridFiltered : $visibleRows;
+    foreach ($savePool as $grow) {
         $byKey[$grow['key']] = $grow;
     }
     $gridDiff = psr_grid_save_changes($_POST['g'] ?? [], $byKey);
@@ -656,6 +669,8 @@ if ($gridDiff || $planPreview || $previewPlans || $suggestionPreview) {
 $approvalPanel = psr_approvals_panel(count($selectedIds), count($pageSheetIds), count($filteredSheetIds));
 $payRunSummary = psr_pay_run_summary($suggestionPreview['suggestion'] ?? null, count($selectedIds));
 $csrf = ps_csrf_token();
+$summaryView = (string)($_GET['view'] ?? '') !== 'detail';
+$paySummary = $summaryView ? psr_pay_summary($gridFiltered, psr_load_paid_dates($pdo, $orgId, $gridFiltered)) : ['lines' => [], 'totals' => []];
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
     $byUser[(int)$emp['user_id']] = $emp;
@@ -697,6 +712,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .filter-toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; font-weight: 700; color: #0f172a; text-align: left; }
         .filter-toggle-word { font-weight: 600; color: #334155; white-space: nowrap; }
         .filter-body { margin-top: 12px; }
+        table.paysummary td.num, table.paysummary th.num { text-align: right; white-space: nowrap; }
+        table.paysummary tfoot td { background: #0f172a; color: #fff; font-weight: 800; }
         tr.group-summary td, tr.group-summary td.ident { background: #e0f2fe; font-weight: 700; }
         tr.group-detail[hidden] { display: none; }
         tr.grand-total td { background: #0f172a; color: #fff; font-weight: 800; }
@@ -798,6 +815,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-2 mb-2"><label>Group by employee</label><input type="hidden" name="group" value="0"><label class="d-block mt-1"><input type="checkbox" name="group" value="1" <?= $groupOn ? 'checked' : '' ?> onchange="this.form.submit()"> On</label></div>
             <div class="col-md-3 mb-2"><label>Hidden admin/test users</label><label class="d-block mt-1"><input type="checkbox" name="show_hidden" value="1" <?= $showHiddenAdmins ? 'checked' : '' ?> onchange="this.form.submit()"> Show hidden admin/test users</label></div>
             <?php if ($sortColumn !== ''): ?><input type="hidden" name="sort" value="<?= psr_h($sortColumn) ?>"><input type="hidden" name="dir" value="<?= psr_h($sortDir) ?>"><?php endif; ?>
+            <?php if (!$summaryView): ?><input type="hidden" name="view" value="detail"><?php endif; ?>
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>
         <p class="mb-0 text-muted">Filters change this spreadsheet only. They do not certify a live unpaid balance. The company all-period total stays available under the details below.</p>
@@ -830,12 +848,26 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
             <div>
-                <h5 class="mb-1">Pay spreadsheet</h5>
-                <p class="mb-0"><?= $groupOn ? 'Grouped by employee. The total at the bottom covers every filtered row.' : 'One row per period.' ?> Select rows, then open Approvals. Nothing here marks anyone paid.</p>
+                <h5 class="mb-1"><?= $summaryView ? 'Pay summary' : 'Pay spreadsheet' ?></h5>
+                <p class="mb-0"><?php if ($summaryView): ?>One line per employee. Paid now is a proposal for the latest unpaid period. It does not mark anyone paid.<?php else: ?><?= $groupOn ? 'Grouped by employee. The total at the bottom covers every filtered row.' : 'One row per period.' ?> Select rows, then open Approvals. Nothing here marks anyone paid.<?php endif; ?></p>
             </div>
             <div class="text-right">
+                <?php
+                $viewQuery = $_GET;
+                $viewQuery['org_id'] = $orgId;
+                if ($summaryView) {
+                    $viewQuery['view'] = 'detail';
+                    $viewLabel = 'Detailed view';
+                } else {
+                    unset($viewQuery['view']);
+                    $viewLabel = 'Simple summary';
+                }
+                ?>
+                <a class="btn btn-sm btn-outline-dark font-weight-bold" href="?<?= psr_h(http_build_query($viewQuery)) ?>"><?= psr_h($viewLabel) ?></a>
+                <?php if (!$summaryView): ?>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="selectFiltered">Select all filtered rows</button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" id="clearSelection">Clear selection</button>
+                <?php endif; ?>
                 <button type="button" class="btn btn-primary font-weight-bold" id="openApprovals">Approvals (<span id="selectedCount">0</span> selected)</button>
             </div>
         </div>
@@ -946,6 +978,64 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 </div>
             </div>
         </div>
+        <?php if ($summaryView): ?>
+        <input type="hidden" name="summary_pay" value="1">
+        <table class="table table-sm table-bordered paysummary mb-2">
+            <thead><tr>
+                <th>Employee</th>
+                <th class="num">Total paid</th>
+                <th>Last paid on</th>
+                <th class="num">Current pay due</th>
+                <th class="num">Total due</th>
+                <th class="num">Paid now</th>
+            </tr></thead>
+            <tbody>
+            <?php if (!$paySummary['lines']): ?>
+                <tr><td colspan="6" class="text-muted">No employees in this filter.</td></tr>
+            <?php endif; ?>
+            <?php foreach ($paySummary['lines'] as $sumLine):
+                $target = $sumLine['target'];
+                $fields = $target ? psr_summary_post_fields($target, $sumLine['pay_now']) : [];
+            ?>
+                <tr>
+                    <td>
+                        <?= psr_h($sumLine['employee_name'] !== '' ? $sumLine['employee_name'] : 'Name not set') ?>
+                        <div class="text-muted"><?= (int)$sumLine['user_id'] > 0 ? '#' . (int)$sumLine['user_id'] : 'not linked' ?></div>
+                        <div class="text-muted"><?= psr_h($sumLine['stores'] ? implode(', ', $sumLine['stores']) : 'Store not set') ?></div>
+                    </td>
+                    <td class="num"><?= psr_h(psr_summary_figure($sumLine['total_paid'], (int)$sumLine['paid_unknown'])) ?></td>
+                    <td><?= $sumLine['last_paid_on'] !== '' ? psr_h($sumLine['last_paid_on']) : '—' ?></td>
+                    <td class="num">
+                        <?= $sumLine['current_due_state'] === 'amount' ? psr_h(number_format((float)$sumLine['current_due'], 2)) : 'unknown' ?>
+                        <?php if ($sumLine['current_period_end'] !== '' || $sumLine['current_period_start'] !== ''): ?>
+                            <div class="text-muted"><?= psr_h($sumLine['current_period_start']) ?> to <?= psr_h($sumLine['current_period_end']) ?></div>
+                        <?php endif; ?>
+                    </td>
+                    <td class="num"><?= psr_h(psr_summary_figure($sumLine['total_due'], (int)$sumLine['due_unknown'])) ?></td>
+                    <td class="num">
+                        <?php if ($target): ?>
+                            <?php foreach ($fields as $field => $fieldValue): if ($field === 'today_pay') { continue; } ?>
+                                <input type="hidden" name="g[<?= psr_h($target['key']) ?>][<?= psr_h($field) ?>]" value="<?= psr_h($fieldValue === null ? '' : $fieldValue) ?>">
+                            <?php endforeach; ?>
+                            <input class="form-control form-control-sm text-right" name="g[<?= psr_h($target['key']) ?>][today_pay]" value="<?= $sumLine['pay_now'] !== null ? psr_h($sumLine['pay_now']) : '' ?>" placeholder="Proposal" inputmode="decimal" title="Proposal only. This does not mark anyone paid.">
+                        <?php else: ?>—<?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+            <?php if ($paySummary['lines']): $sumTotals = $paySummary['totals']; ?>
+            <tfoot><tr>
+                <td>Total</td>
+                <td class="num"><?= psr_h(psr_summary_figure($sumTotals['total_paid'], (int)$sumTotals['paid_unknown'])) ?></td>
+                <td></td>
+                <td class="num"><?= psr_h(psr_summary_figure($sumTotals['current_due'], (int)$sumTotals['current_unknown'])) ?></td>
+                <td class="num"><?= psr_h(psr_summary_figure($sumTotals['total_due'], (int)$sumTotals['due_unknown'])) ?></td>
+                <td class="num"><?= $sumTotals['pay_now'] === null ? '' : psr_h(number_format((float)$sumTotals['pay_now'], 2)) ?></td>
+            </tr></tfoot>
+            <?php endif; ?>
+        </table>
+        <button class="btn btn-outline-primary" name="preview_grid_save" value="1">Review paid now</button>
+        <?php else: ?>
         <?php if ($groupOn): ?>
         <div class="mb-2">
             <button type="button" class="btn btn-sm btn-outline-secondary" id="expandAllPeriods">Expand all periods</button>
@@ -1132,6 +1222,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <button type="button" class="btn btn-primary" id="openApprovalsBottom">Approvals</button>
             </div>
         </div>
+        <?php endif; ?>
     </form>
     <div class="sheet">
         <h6>Unallocated cash evidence</h6>
