@@ -5,8 +5,9 @@ ob_start();
  * What the organization still owes, one row per employee.
  * Pending rows of admin_outstanding_wages only. That ledger is not edited here.
  * Immediate demand is a separate list the same owners and admins can add,
- * edit, and remove. A platform superadmin sees nothing unless a
- * support-access grant names the org.
+ * edit, and remove. A platform superadmin may open an org on
+ * SUPERADMIN_PAYROLL_ORG_ALLOWLIST (2 and 4 by default) or an org named
+ * by a support-access grant. Every other org still needs a grant.
  * Menu: with the other payroll admin links, Min. Role Admin (UserRole 20).
  */
 if (session_status() === PHP_SESSION_NONE) {
@@ -21,6 +22,9 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
 require_once 'payroll_scope.php';
+if (is_file(__DIR__ . '/engine/privacy_lib.php')) {
+    require_once __DIR__ . '/engine/privacy_lib.php';
+}
 require_once __DIR__ . '/engine/outstanding_report_lib.php';
 require_once __DIR__ . '/engine/outstanding_report_view.php';
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
@@ -50,6 +54,25 @@ if (!$decision['ok']) {
     }
     http_response_code((int)$decision['http']);
     exit($decision['error']);
+}
+if (
+    orpt_is_platform_superadmin((int)($user['user_role'] ?? 99))
+    && (int)$decision['org_id'] > 0
+    && function_exists('privacy_log_event')
+) {
+    $kind = (string)($decision['kind'] ?? '');
+    $note = ($kind === 'allowlist') ? 'superadmin_org_allowlist' : null;
+    privacy_log_event(
+        $pdo,
+        'view',
+        'outstanding_report.php',
+        (int)$decision['org_id'],
+        null,
+        $note
+    );
+    if ($kind === 'allowlist' && function_exists('privacy_remember_access')) {
+        privacy_remember_access(false, null, '', false, true);
+    }
 }
 if (!in_array($_SERVER['REQUEST_METHOD'], ['GET', 'HEAD', 'POST'], true)) {
     http_response_code(405);
@@ -136,6 +159,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 try {
     $rows = orpt_fetch_pending($pdo, $orgId);
     $orgName = orpt_org_label($pdo, $orgId);
+    if (
+        (string)($decision['kind'] ?? '') === 'allowlist'
+        && function_exists('privacy_remember_access')
+    ) {
+        privacy_remember_access(false, null, (string)$orgName, false, true);
+    }
 } catch (Throwable $e) {
     http_response_code(500);
     exit('Outstanding wages could not be read. The ledger table has to be in place already. This page does not create or change it.');
