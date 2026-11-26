@@ -22,6 +22,7 @@ require_once 'db.php';
 require_once 'payroll_scope.php';
 require_once __DIR__ . '/engine/payroll_sheet_review_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
+require_once __DIR__ . '/engine/sheet_hide_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -276,7 +277,8 @@ $filter = [
     'period_end' => psr_valid_date($_GET['period_end'] ?? ''),
     'org_id' => $orgId,
 ];
-$systemLines = psr_fetch_system_lines($pdo, $orgId);
+$showHiddenAdmins = sheet_show_hidden_requested();
+$systemLines = sheet_filter_hidden_rows(psr_fetch_system_lines($pdo, $orgId), $showHiddenAdmins);
 $effects = psr_active_effects($pdo, $orgId);
 $wageRows = [];
 foreach ($effects as $ef) {
@@ -296,6 +298,7 @@ foreach ($effects as $ef) {
 $rows = $pdo->prepare('SELECT * FROM payroll_sheet_rows WHERE org_id = ? AND deleted_at IS NULL ORDER BY source_sheet, source_row, id');
 $rows->execute([$orgId]);
 $sheetRows = $rows->fetchAll(PDO::FETCH_ASSOC);
+$sheetRows = sheet_filter_hidden_rows($sheetRows, $showHiddenAdmins);
 $approved = [];
 $drafts = [];
 foreach ($sheetRows as $row) {
@@ -336,6 +339,9 @@ if ($isSuper) {
         if (isset($seen[$key])) {
             continue;
         }
+        if (!$showHiddenAdmins && sheet_person_is_hidden((int)$link['other_user_id'], '')) {
+            continue;
+        }
         $seen[$key] = true;
         $name = 'Company ' . (int)$link['other_org_id'];
         foreach ($orgs as $org) {
@@ -372,11 +378,11 @@ $approvals->execute([$orgId]);
 $approvalRows = $approvals->fetchAll(PDO::FETCH_ASSOC);
 $staff = $pdo->prepare('SELECT id, Name FROM users WHERE org_id = ? ORDER BY Name ASC');
 $staff->execute([$orgId]);
-$staffRows = $staff->fetchAll(PDO::FETCH_ASSOC);
+$staffRows = sheet_filter_hidden_rows($staff->fetchAll(PDO::FETCH_ASSOC), $showHiddenAdmins);
 $sites = $pdo->prepare('SELECT SId, nick_name FROM sites WHERE org_id = ? ORDER BY nick_name ASC');
 $sites->execute([$orgId]);
 $siteRows = $sites->fetchAll(PDO::FETCH_ASSOC);
-$staffDirectory = psr_fetch_staff_directory($pdo, $orgId);
+$staffDirectory = sheet_filter_hidden_rows(psr_fetch_staff_directory($pdo, $orgId), $showHiddenAdmins);
 $siteList = [];
 foreach ($siteRows as $siteRow) {
     $siteList[] = ['id' => (int)$siteRow['SId'], 'name' => (string)$siteRow['nick_name']];
@@ -703,7 +709,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <p class="mb-0">Drafts stay drafts until you preview and confirm an approval. Proposals are not actual payments. Totals below are every period already in this company, not only the uploaded sheet.</p>
         </div>
         <div>
-            <a class="btn btn-outline-primary font-weight-bold" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>">View sheet and edit rows</a>
+            <a class="btn btn-outline-primary font-weight-bold" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?><?= $showHiddenAdmins ? '&show_hidden=1' : '' ?>">View sheet and edit rows</a>
             <a class="btn btn-outline-dark font-weight-bold" href="payroll_master_ledger.php?org_id=<?= (int)$orgId ?>">Back to Payroll Center</a>
         </div>
     </div>
@@ -735,6 +741,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-2 mb-2"><label>Staff</label><select class="form-control form-control-sm" name="active"><?php foreach (['all','active'] as $opt): ?><option <?= $gridFilter['active']===$opt?'selected':'' ?>><?= psr_h($opt) ?></option><?php endforeach; ?></select></div>
             <div class="col-md-2 mb-2"><label>Unresolved</label><select class="form-control form-control-sm" name="unresolved"><option value="">All</option><option value="1" <?= !empty($gridFilter['unresolved'])?'selected':'' ?>>Needs review</option></select></div>
             <div class="col-md-2 mb-2"><label>Group by employee</label><input type="hidden" name="group" value="0"><label class="d-block mt-1"><input type="checkbox" name="group" value="1" <?= $groupOn ? 'checked' : '' ?> onchange="this.form.submit()"> On</label></div>
+            <div class="col-md-3 mb-2"><label>Hidden admin/test users</label><label class="d-block mt-1"><input type="checkbox" name="show_hidden" value="1" <?= $showHiddenAdmins ? 'checked' : '' ?> onchange="this.form.submit()"> Show hidden admin/test users</label></div>
             <?php if ($sortColumn !== ''): ?><input type="hidden" name="sort" value="<?= psr_h($sortColumn) ?>"><input type="hidden" name="dir" value="<?= psr_h($sortDir) ?>"><?php endif; ?>
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>

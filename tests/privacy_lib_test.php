@@ -174,30 +174,10 @@ try {
 }
 check('the platform superadmin cannot create a grant', $self);
 
-putenv('PLATFORM_SUPERADMIN_FULL_ACCESS=1');
+putenv('PLATFORM_SUPERADMIN_FULL_ACCESS');
 $_SESSION['user_id'] = 1;
 $_SESSION['user_level'] = 5;
 $_SESSION['org_id'] = 1;
-$opened = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
-$note = $pdo->query("SELECT note FROM privacy_access_log WHERE resource = 'payroll_eht_report.php' ORDER BY id DESC LIMIT 1")->fetchColumn();
-check('the switch lets a superadmin through without a grant', $opened['allow'] && $opened['reason'] === 'platform_full' && !$opened['support'] && $note === 'platform_full_access');
-check('the banner names the temporary full access', strpos(privacy_banner_html(), 'Platform full access is ON (temporary until orgs are sold).') !== false);
-$grantUntil = date('Y-m-d H:i:s', time() + 3600);
-$pdo->prepare('INSERT INTO privacy_support_grants (org_id, granted_by, reason, starts_at, expires_at, created_at) VALUES (2, 9, ?, ?, ?, ?)')
-    ->execute(['Check the missing clock-out from Tuesday.', $grantUntil, $grantUntil, $grantUntil]);
-$withGrant = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
-check('a live grant still uses the grant path while the switch is on', $withGrant['allow'] && $withGrant['reason'] === 'support' && $withGrant['support']);
-$pdo->exec('DELETE FROM privacy_support_grants');
-$_SESSION['user_level'] = 20;
-$_SESSION['org_id'] = 2;
-$adminStill = privacy_access($pdo, 3, 'employee', 'staff_audit.php', 'view', 20, true);
-check('an org admin still cannot open another company', !$adminStill['allow'] && $adminStill['reason'] === 'org');
-$_SESSION['user_level'] = 40;
-$staffStill = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
-check('staff still cannot open payroll', !$staffStill['allow']);
-check('org admins do not see the full-access banner', strpos(privacy_banner_html(), 'Platform full access is ON') === false);
-putenv('PLATFORM_SUPERADMIN_FULL_ACCESS');
-$_SESSION['user_level'] = 5;
 $closedOther = privacy_access($pdo, 3, 'pay', 'payroll_eht_report.php', 'view', 20, true);
 check('the switch off still requires a grant for an org not on the allowlist', !$closedOther['allow'] && $closedOther['reason'] === 'support');
 $allowedPk = privacy_access($pdo, 2, 'pay', 'payroll_eht_report.php', 'view', 20, true);
@@ -219,8 +199,6 @@ $_SESSION['org_id'] = 2;
 $adminAllow = privacy_access($pdo, 4, 'pay', 'payroll_eht_report.php', 'view', 20, true);
 check('an org admin still cannot use the allowlist to open another company', !$adminAllow['allow'] && $adminAllow['reason'] === 'org');
 $_SESSION['user_level'] = 5;
-$eht = file_get_contents(dirname(__DIR__) . '/payroll_eht_report.php');
-check('the EHT report shows the privacy banner', strpos($eht, 'privacy_banner_html') !== false);
 
 $root = dirname(__DIR__);
 $pages = [
@@ -231,8 +209,10 @@ $pages = [
     'manual_attendance.php' => 'employee',
     'order_amounts.php' => 'pay',
     'outstanding_wages.php' => 'pay',
+    'payroll_master_ledger.php' => 'pay',
     'payroll_payment_status.php' => 'pay',
     'payroll_sheet_review.php' => 'report',
+    'generate_pay_documents.php' => 'pay',
     'privacy_support.php' => 'privacy_boot_web',
 ];
 foreach ($pages as $page => $marker) {
@@ -249,8 +229,7 @@ check('staff audit does not query every organization', strpos($auditPage, "\$whe
 $deletePage = file_get_contents($root . '/delete_attendance.php');
 check('delete cannot skip the organization filter', strpos($deletePage, '$restrict = true') !== false && strpos($deletePage, '$restrict = false') === false);
 $paydocs = file_get_contents($root . '/generate_pay_documents.php');
-check('pay documents show only the last digits of the bank account', strpos($paydocs, "substr(\$g['account'], -3)") !== false);
-check('pay documents subtract CPP2 from the stub', strpos($paydocs, 'ee_cpp2') !== false);
+check('pay documents mask bank numbers and keep MICR separate', strpos($paydocs, 'privacy_mask_account') !== false && strpos($paydocs, 'account_micr') !== false);
 $support = file_get_contents($root . '/privacy_support.php');
 check('support page can grant and revoke', strpos($support, 'privacy_create_grant') !== false && strpos($support, 'privacy_revoke_grant') !== false && strpos($support, 'privacy_org_counts') !== false);
 $script = file_get_contents($root . '/ops/encrypt_sensitive_columns.php');

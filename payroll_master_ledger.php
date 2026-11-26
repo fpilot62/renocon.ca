@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/engine/privacy_lib.php';
+privacy_boot_web();
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 // GATE 1: SECURITY CLEARANCE
@@ -59,6 +61,17 @@ require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 require_once __DIR__ . '/quickbooks/qb_export_lib.php';
 ps_require_payroll_admin();
 $user_org_id = ps_selected_org($pdo);
+if ($user_org_id > 0 && function_exists('privacy_require_business')) {
+    privacy_require_business(
+        $pdo,
+        (int)$user_org_id,
+        'pay',
+        'payroll_master_ledger.php',
+        false,
+        20,
+        (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') ? 'update' : 'view'
+    );
+}
 $ledgerCpp2 = (function_exists('pe_t4127_col') && pe_t4127_col($pdo, 'payroll_finalized', 'cpp2'))
     ? 'IFNULL(f.cpp2,0) AS ee_cpp2'
     : '0 AS ee_cpp2';

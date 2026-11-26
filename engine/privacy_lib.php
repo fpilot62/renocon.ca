@@ -9,16 +9,13 @@
  * SUPERADMIN_PAYROLL_ORG_ALLOWLIST (PK BC Food, id 2, and AA Group, id 4,
  * unless that list is overridden in the private payroll env file).
  * PLATFORM_SUPERADMIN_FULL_ACCESS=1 in the private payroll env file
- * lets those superadmins through for every organization until it is set
- * back to 0. Any other value, or a missing key, leaves the grant and
- * the allowlist in place. The grant flow stays.
- * Inside an organization, a higher role number sees less.
+ * lets those superadmins through until it is set back to 0. The grant
+ * flow stays. The allowlist stays. Inside an organization, a higher role number sees less.
  *
  * This file does not calculate payroll and does not mark anyone paid.
  */
 
 require_once __DIR__ . '/payroll_db_config.php';
-require_once __DIR__ . '/staging.php';
 
 const PRIVACY_ENC_PREFIX = 'enc:v1:';
 const PRIVACY_IDLE_SECONDS = 1800;
@@ -406,6 +403,24 @@ function privacy_active_grant(PDO $pdo, int $orgId, int $now = 0): ?array
     return $row ?: null;
 }
 
+function privacy_log_file(string $action, string $resource, int $orgId, int $actorId): void
+{
+    $line = date('c') . ' action=' . $action . ' resource=' . $resource
+        . ' org=' . $orgId . ' actor=' . $actorId . "\n";
+    try {
+        $dir = dirname(payroll_resolve_env_file(payroll_app_root()));
+    } catch (Throwable $e) {
+        error_log('privacy log unavailable');
+        return;
+    }
+    if (!is_dir($dir)) {
+        error_log('privacy log directory missing');
+        return;
+    }
+    $path = $dir . DIRECTORY_SEPARATOR . 'privacy.log';
+    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
+}
+
 function privacy_platform_full_access(): bool
 {
     return privacy_flag_enabled('PLATFORM_SUPERADMIN_FULL_ACCESS');
@@ -465,26 +480,6 @@ function privacy_superadmin_org_allowed(int $orgId): bool
     return $orgId > 0 && in_array($orgId, privacy_superadmin_payroll_allowlist(), true);
 }
 
-function privacy_log_file(string $action, string $resource, int $orgId, int $actorId, ?string $note = null): void
-{
-    $line = date('c') . ' action=' . $action . ' resource=' . $resource
-        . ' org=' . $orgId . ' actor=' . $actorId
-        . ($note !== null && $note !== '' ? ' note=' . $note : '')
-        . "\n";
-    try {
-        $dir = dirname(payroll_resolve_env_file(payroll_app_root()));
-    } catch (Throwable $e) {
-        error_log('privacy log unavailable');
-        return;
-    }
-    if (!is_dir($dir)) {
-        error_log('privacy log directory missing');
-        return;
-    }
-    $path = $dir . DIRECTORY_SEPARATOR . 'privacy.log';
-    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
-}
-
 function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgId, ?int $grantId, ?string $note = null): void
 {
     $action = substr($action, 0, 32);
@@ -495,7 +490,7 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
     $ip = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
     try {
         if (!privacy_table_exists($pdo, 'privacy_access_log')) {
-            privacy_log_file($action, $resource, $orgId, $actor, $note);
+            privacy_log_file($action, $resource, $orgId, $actor);
             return;
         }
         $st = $pdo->prepare(
@@ -515,7 +510,7 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
             $note,
         ]);
     } catch (Throwable $e) {
-        privacy_log_file($action, $resource, $orgId, $actor, $note);
+        privacy_log_file($action, $resource, $orgId, $actor);
     }
 }
 
@@ -790,9 +785,6 @@ function privacy_owner_emails(PDO $pdo, int $orgId): array
  */
 function privacy_notify_owners(PDO $pdo, int $orgId, array $message, ?callable $sender = null): array
 {
-    if (payroll_staging_outbound_blocked('mail')) {
-        return ['sent' => 0, 'note' => 'staging does not send mail'];
-    }
     $emails = privacy_owner_emails($pdo, $orgId);
     if (!$emails) {
         return ['sent' => 0, 'note' => 'no owner email on file'];
