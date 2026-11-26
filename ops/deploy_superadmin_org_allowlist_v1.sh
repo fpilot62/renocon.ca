@@ -36,7 +36,7 @@ RAW=${ALLOWLIST_RAW:-https://raw.githubusercontent.com/fpilot62/renocon.ca}
 # main at the point this change was based on.
 BASE=${ALLOWLIST_BASE:-d4264134e5c220657f1c7e7051d81d3490893786}
 # Feature commit that holds these files. Override with ALLOWLIST_PIN if needed.
-PIN=${ALLOWLIST_PIN:-b102669ddf092363c06de2ed3aebd587fae9d970}
+PIN=${ALLOWLIST_PIN:-3e5c949c42fd0cbf7aacca17e1ec11b86f384431}
 
 FILES='engine/privacy_lib.php
 engine/outstanding_report_lib.php
