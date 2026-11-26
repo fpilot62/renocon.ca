@@ -4,29 +4,20 @@
  *
  * Platform superadmins (role level 10 and below) do not receive an
  * organization's pay, bank, SIN, employee, report, or attachment data
- * unless an organization admin has an unexpired support grant,
- * PLATFORM_SUPERADMIN_FULL_ACCESS=1 is set, or the organization is on
- * SUPERADMIN_PAYROLL_ORG_ALLOWLIST (PK BC Food, id 2, and AA Group, id 4,
- * unless that list is overridden in the private payroll env file).
+ * unless an organization admin has an unexpired support grant.
  * PLATFORM_SUPERADMIN_FULL_ACCESS=1 in the private payroll env file
- * lets those superadmins through for every organization until it is set
- * back to 0. Any other value, or a missing key, leaves the grant and
- * the allowlist in place. The grant flow stays.
- * Inside an organization, a higher role number sees less.
+ * lets those superadmins through until it is set back to 0. The grant
+ * flow stays. Inside an organization, a higher role number sees less.
  *
  * This file does not calculate payroll and does not mark anyone paid.
  */
 
 require_once __DIR__ . '/payroll_db_config.php';
-require_once __DIR__ . '/staging.php';
 
 const PRIVACY_ENC_PREFIX = 'enc:v1:';
 const PRIVACY_IDLE_SECONDS = 1800;
 const PRIVACY_ABSOLUTE_SECONDS = 28800;
 const PRIVACY_GRANT_MAX_HOURS = 72;
-
-/** @var list<int> PK BC Food INC (2) and AA Group (4). */
-const SUPERADMIN_PAYROLL_ORG_ALLOWLIST = [2, 4];
 
 function privacy_h(string $value): string
 {
@@ -406,71 +397,10 @@ function privacy_active_grant(PDO $pdo, int $orgId, int $now = 0): ?array
     return $row ?: null;
 }
 
-function privacy_platform_full_access(): bool
-{
-    return privacy_flag_enabled('PLATFORM_SUPERADMIN_FULL_ACCESS');
-}
-
-/**
- * Org ids a platform superadmin may open without a support grant.
- * The constant is the default (2 and 4). A non-empty
- * SUPERADMIN_PAYROLL_ORG_ALLOWLIST value in the process environment
- * or the private payroll env file, as a comma-separated list of
- * positive integers, replaces that default.
- *
- * @return list<int>
- */
-function privacy_superadmin_payroll_allowlist(): array
-{
-    $raw = null;
-    $fromEnv = getenv('SUPERADMIN_PAYROLL_ORG_ALLOWLIST');
-    if (is_string($fromEnv) && trim($fromEnv) !== '') {
-        $raw = $fromEnv;
-    } else {
-        try {
-            $path = payroll_resolve_env_file(payroll_app_root());
-            if (is_file($path) && is_readable($path)) {
-                $cfg = payroll_parse_env((string)file_get_contents($path));
-                $fromFile = trim((string)($cfg['SUPERADMIN_PAYROLL_ORG_ALLOWLIST'] ?? ''));
-                if ($fromFile !== '') {
-                    $raw = $fromFile;
-                }
-            }
-        } catch (Throwable $e) {
-            $raw = null;
-        }
-    }
-    $ids = SUPERADMIN_PAYROLL_ORG_ALLOWLIST;
-    if (is_string($raw)) {
-        $ids = [];
-        foreach (preg_split('/[,\s]+/', $raw) ?: [] as $part) {
-            if ($part === '' || !preg_match('/^\d+$/', $part)) {
-                continue;
-            }
-            $ids[] = (int)$part;
-        }
-    }
-    $out = [];
-    foreach ($ids as $id) {
-        $id = (int)$id;
-        if ($id > 0) {
-            $out[$id] = $id;
-        }
-    }
-    return array_values($out);
-}
-
-function privacy_superadmin_org_allowed(int $orgId): bool
-{
-    return $orgId > 0 && in_array($orgId, privacy_superadmin_payroll_allowlist(), true);
-}
-
-function privacy_log_file(string $action, string $resource, int $orgId, int $actorId, ?string $note = null): void
+function privacy_log_file(string $action, string $resource, int $orgId, int $actorId): void
 {
     $line = date('c') . ' action=' . $action . ' resource=' . $resource
-        . ' org=' . $orgId . ' actor=' . $actorId
-        . ($note !== null && $note !== '' ? ' note=' . $note : '')
-        . "\n";
+        . ' org=' . $orgId . ' actor=' . $actorId . "\n";
     try {
         $dir = dirname(payroll_resolve_env_file(payroll_app_root()));
     } catch (Throwable $e) {
@@ -485,6 +415,11 @@ function privacy_log_file(string $action, string $resource, int $orgId, int $act
     @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
 }
 
+function privacy_platform_full_access(): bool
+{
+    return privacy_flag_enabled('PLATFORM_SUPERADMIN_FULL_ACCESS');
+}
+
 function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgId, ?int $grantId, ?string $note = null): void
 {
     $action = substr($action, 0, 32);
@@ -495,7 +430,7 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
     $ip = substr((string)($_SERVER['REMOTE_ADDR'] ?? ''), 0, 64);
     try {
         if (!privacy_table_exists($pdo, 'privacy_access_log')) {
-            privacy_log_file($action, $resource, $orgId, $actor, $note);
+            privacy_log_file($action, $resource, $orgId, $actor);
             return;
         }
         $st = $pdo->prepare(
@@ -515,18 +450,17 @@ function privacy_log_event(PDO $pdo, string $action, string $resource, int $orgI
             $note,
         ]);
     } catch (Throwable $e) {
-        privacy_log_file($action, $resource, $orgId, $actor, $note);
+        privacy_log_file($action, $resource, $orgId, $actor);
     }
 }
 
-function privacy_remember_access(bool $support, ?array $grant, string $orgName, bool $fullAccess = false, bool $allowlist = false): void
+function privacy_remember_access(bool $support, ?array $grant, string $orgName, bool $fullAccess = false): void
 {
     $GLOBALS['privacy_access_state'] = [
         'support' => $support,
         'grant' => $grant,
         'org_name' => $orgName,
         'full_access' => $fullAccess,
-        'allowlist' => $allowlist,
     ];
 }
 
@@ -536,16 +470,6 @@ function privacy_banner_html(): string
     if (is_array($state) && !empty($state['full_access'])) {
         return '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">'
             . 'Platform full access is ON (temporary until orgs are sold).'
-            . '</div>';
-    }
-    if (is_array($state) && !empty($state['allowlist'])) {
-        $org = trim((string)($state['org_name'] ?? ''));
-        if ($org === '') {
-            $org = 'this organization';
-        }
-        return '<div role="status" class="privacy-support-banner" style="background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:0 0 14px;font-weight:700;">'
-            . 'Platform payroll access for ' . privacy_h($org)
-            . ' is allowed by the owner allowlist. This visit is logged.'
             . '</div>';
     }
     if (!is_array($state) || empty($state['support']) || !is_array($state['grant'] ?? null)) {
@@ -647,7 +571,6 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
     $decision = privacy_business_decision($level, privacy_session_org(), $orgId, $grant, $dataClass, time(), $maxLevel);
     $decision['grant'] = $decision['support'] ? $grant : null;
     $fullAccess = false;
-    $allowlistAccess = false;
     if (
         !$decision['allow']
         && ($decision['reason'] ?? '') === 'support'
@@ -659,23 +582,6 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
         $decision['reason'] = 'platform_full';
         $fullAccess = true;
     }
-    if (
-        !$decision['allow']
-        && ($decision['reason'] ?? '') === 'support'
-        && $level <= 10
-        && privacy_superadmin_org_allowed($orgId)
-    ) {
-        $decision['allow'] = true;
-        $decision['support'] = false;
-        $decision['reason'] = 'org_allowlist';
-        $allowlistAccess = true;
-    }
-    $logNote = null;
-    if ($fullAccess) {
-        $logNote = 'platform_full_access';
-    } elseif ($allowlistAccess) {
-        $logNote = 'superadmin_org_allowlist';
-    }
     if ($log && $decision['reason'] !== 'choose_org') {
         privacy_log_event(
             $pdo,
@@ -683,10 +589,10 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
             $resource,
             $orgId,
             $decision['support'] ? (int)($grant['id'] ?? 0) : null,
-            $logNote
+            $fullAccess ? 'platform_full_access' : null
         );
     }
-    if ($decision['allow'] && ($decision['support'] || $fullAccess || $allowlistAccess)) {
+    if ($decision['allow'] && ($decision['support'] || $fullAccess)) {
         $orgName = '';
         try {
             $st = $pdo->prepare('SELECT org_name FROM organizations WHERE id = ?');
@@ -695,7 +601,7 @@ function privacy_access(PDO $pdo, int $orgId, string $dataClass, string $resourc
         } catch (Throwable $e) {
             $orgName = '';
         }
-        privacy_remember_access($decision['support'], $decision['support'] ? $grant : null, $orgName, $fullAccess, $allowlistAccess);
+        privacy_remember_access($decision['support'], $decision['support'] ? $grant : null, $orgName, $fullAccess);
     }
     return $decision;
 }
@@ -790,9 +696,6 @@ function privacy_owner_emails(PDO $pdo, int $orgId): array
  */
 function privacy_notify_owners(PDO $pdo, int $orgId, array $message, ?callable $sender = null): array
 {
-    if (payroll_staging_outbound_blocked('mail')) {
-        return ['sent' => 0, 'note' => 'staging does not send mail'];
-    }
     $emails = privacy_owner_emails($pdo, $orgId);
     if (!$emails) {
         return ['sent' => 0, 'note' => 'no owner email on file'];
