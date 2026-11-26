@@ -276,6 +276,9 @@ $header = pse_known_headers($sheetFilter);
         table.src td.ev { background:#fdba74; font-weight:700; }
         table.src td.num { text-align:right; }
         table.src td.rn { background:#e2e8f0; color:#475569; text-align:right; }
+        .filter-toggle { display:flex; justify-content:space-between; align-items:center; gap:12px; width:100%; background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:8px 12px; font-weight:700; color:#0f172a; text-align:left; }
+        .filter-toggle-word { font-weight:600; color:#334155; white-space:nowrap; }
+        .filter-body { margin-top:12px; }
     </style>
 </head>
 <body>
@@ -292,8 +295,31 @@ $header = pse_known_headers($sheetFilter);
     <?php if ($flash !== ''): ?><div class="alert alert-info"><?= pe_h($flash) ?></div><?php endif; ?>
     <?php if ($warnings): ?><div class="alert alert-warning"><?php foreach ($warnings as $w): ?><div><?= pe_h($w) ?></div><?php endforeach; ?></div><?php endif; ?>
 
-    <form method="GET" class="box">
+    <?php
+    $sheetFilterBits = [];
+    $defaultSheet = count($sheetNames) > 0 ? (string)array_key_first($sheetNames) : '';
+    if ($sheetFilter !== '' && $sheetFilter !== $defaultSheet) {
+        $sheetFilterBits[] = 'Sheet ' . $sheetFilter;
+    }
+    if ($nameFilter !== '') {
+        $sheetFilterBits[] = 'Sheet name ' . $nameFilter;
+    }
+    if ($textFilter !== '') {
+        $sheetFilterBits[] = 'Search ' . $textFilter;
+    }
+    if ($showHiddenAdmins) {
+        $sheetFilterBits[] = 'Hidden admin/test users';
+    }
+    $sheetFilterSummary = $sheetFilterBits ? implode(', ', $sheetFilterBits) : 'none';
+    $sheetFiltersOpen = $sheetFilterBits !== [];
+    ?>
+    <form method="GET" class="box" id="sheetViewFilters">
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+        <button type="button" class="filter-toggle" id="sheetViewFilterToggle" aria-expanded="<?= $sheetFiltersOpen ? 'true' : 'false' ?>" aria-controls="sheetViewFilterBody">
+            <span>Filters (<?= pe_h($sheetFilterSummary) ?>)</span>
+            <span class="filter-toggle-word"><?= $sheetFiltersOpen ? '▾ Hide filters' : '▸ Show filters' ?></span>
+        </button>
+        <div id="sheetViewFilterBody" class="filter-body"<?= $sheetFiltersOpen ? '' : ' hidden' ?>>
         <div class="form-row align-items-end">
             <div class="col-md-3"><label class="mb-0">Sheet</label>
                 <select name="sheet" class="form-control form-control-sm">
@@ -315,7 +341,29 @@ $header = pse_known_headers($sheetFilter);
             <div class="col-md-3"><button class="btn btn-sm btn-dark">Show rows</button>
                 <a class="btn btn-sm btn-outline-secondary" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>">Clear</a></div>
         </div>
+        </div>
     </form>
+    <script>
+    (function () {
+        var key = 'payrollSheetSheetFiltersOpen';
+        var body = document.getElementById('sheetViewFilterBody');
+        var btn = document.getElementById('sheetViewFilterToggle');
+        var word = btn.querySelector('.filter-toggle-word');
+        function apply(open) {
+            body.hidden = !open;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            word.textContent = open ? '▾ Hide filters' : '▸ Show filters';
+        }
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        if (saved === '1' || saved === '0') apply(saved === '1');
+        btn.addEventListener('click', function () {
+            var open = body.hidden;
+            apply(open);
+            try { localStorage.setItem(key, open ? '1' : '0'); } catch (e) {}
+        });
+    })();
+    </script>
 
     <div class="row">
         <div class="<?= $selected ? 'col-xl-7' : 'col-12' ?>">
