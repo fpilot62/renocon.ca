@@ -24,9 +24,30 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 $is_cli = (PHP_SAPI === 'cli');
+if (is_file(__DIR__ . '/engine/privacy_lib.php')) {
+    require_once __DIR__ . '/engine/privacy_lib.php';
+    if (!$is_cli && function_exists('privacy_boot_web')) {
+        privacy_boot_web();
+    }
+}
 if (!$is_cli && session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+if (!$is_cli && function_exists('privacy_require_business')) {
+    $paydocsOrg = 0;
+    if (is_file(__DIR__ . '/payroll_scope.php')) {
+        require_once __DIR__ . '/payroll_scope.php';
+        if (function_exists('ps_selected_org')) {
+            $paydocsOrg = (int)ps_selected_org($pdo);
+        }
+    }
+    if ($paydocsOrg <= 0) {
+        $paydocsOrg = (int)($_SESSION['org_id'] ?? 0);
+    }
+    if ($paydocsOrg > 0) {
+        privacy_require_business($pdo, $paydocsOrg, 'pay', 'generate_pay_documents.php', false, 29, 'view');
+    }
+}
 
 if (!$is_cli && !isset($_SESSION['user_id'])) { die("Access denied."); }
 
@@ -250,6 +271,7 @@ foreach ($rows as $r) {
             'transit'    => $r['bank_transit'] ?: '',
             'institution'=> $r['bank_institution'] ?: '',
             'account'    => $r['bank_account'] ?: '',
+            'account_micr' => preg_replace('/\D/', '', (string)($r['bank_account'] ?? '')) ?: '',
             'site_name'  => $r['site_name'] ?: 'Employer',
             'corp_legal' => trim((string)($r['corp_legal_name'] ?? '')),
             'site_street'=> trim((string)($r['site_addr'] ?? '')),
@@ -865,7 +887,8 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     $pdf->Cell(90, 5, $g['emp_name'], 0, 2, 'L');
     if ($g['emp_addr']) $pdf->Cell(90, 5, substr($g['emp_addr'],0,55), 0, 2, 'L');
     if ($g['emp_email']) $pdf->Cell(90, 5, $g['emp_email'], 0, 2, 'L');
-    $acct_tail = $g['account'] !== '' ? substr($g['account'], -3) : '---';
+    $shownAccount = function_exists('privacy_mask_account') ? privacy_mask_account((string)$g['account']) : (string)$g['account'];
+    $acct_tail = $shownAccount !== '' ? substr($shownAccount, -3) : '---';
     $pdf->Cell(90, 5, 'Deposit acct ****' . $acct_tail, 0, 2, 'L');
 
     $pdf->SetXY(115, 38);
@@ -1100,7 +1123,7 @@ foreach ($groups as $g) {
             $micr = "C" . str_pad($chq_no,6,'0',STR_PAD_LEFT) . "C   "
                   . "A" . preg_replace('/\D/','',$g['transit'] ?: '00000') . "A "
                   . (preg_replace('/\D/','',$g['institution'] ?: '000')) . " "
-                  . (preg_replace('/\D/','',$g['account'] ?: '0000000'));
+                  . (preg_replace('/\D/','', ($g['account_micr'] ?? '') !== '' ? $g['account_micr'] : ($g['account'] ?: '0000000')));
             $pdf->Cell($W-20, 6, $micr, 0, 0, 'L');
 
             $pdf->SetTextColor(0,0,0);
