@@ -702,7 +702,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <h4 class="font-weight-bold mb-1">Sheet review</h4>
             <p class="mb-0">Drafts stay drafts until you preview and confirm an approval. Proposals are not actual payments. Totals below are every period already in this company, not only the uploaded sheet.</p>
         </div>
-        <a class="btn btn-outline-dark font-weight-bold" href="payroll_master_ledger.php?org_id=<?= (int)$orgId ?>">Back to Payroll Center</a>
+        <div>
+            <a class="btn btn-outline-primary font-weight-bold" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>">View sheet and edit rows</a>
+            <a class="btn btn-outline-dark font-weight-bold" href="payroll_master_ledger.php?org_id=<?= (int)$orgId ?>">Back to Payroll Center</a>
+        </div>
     </div>
     <?php if ($flash !== ''): ?><div class="alert alert-info"><?= psr_h($flash) ?></div><?php endif; ?>
     <?php if ($warnings): ?><div class="alert alert-warning"><?php foreach ($warnings as $w): ?><div><?= nl2br(psr_h($w)) ?></div><?php endforeach; ?></div><?php endif; ?>
@@ -859,6 +862,12 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 </div>
             </div>
         </div>
+        <?php if ($groupOn): ?>
+        <div class="mb-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="expandAllPeriods">Expand all periods</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="collapseAllPeriods">Collapse all periods</button>
+        </div>
+        <?php endif; ?>
         <div class="grid-wrap">
         <table class="table table-sm table-bordered paygrid mb-0">
             <?php
@@ -898,6 +907,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                             <label class="small mb-0"><input type="checkbox" class="group-check" data-group="<?= psr_h($employeeGroup['key']) ?>"> Select</label>
                         <?php endif; ?>
                         <button type="button" class="btn btn-sm btn-link p-0 group-toggle" data-group="<?= psr_h($employeeGroup['key']) ?>" aria-expanded="false">Show periods</button>
+                        <a class="small d-block" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>&amp;name=<?= urlencode((string)$employeeGroup['employee_name']) ?>">Show sheet rows</a>
                     </td>
                     <td class="ident"><?= psr_h($employeeGroup['employee_name']) ?><div class="text-muted"><?= psr_h($employeeGroup['store_name'] !== '' ? $employeeGroup['store_name'] : 'Store not set') ?></div><?php if (!empty($employeeGroup['not_linked'])): ?><div class="pending">not linked</div><?php endif; ?></td>
                     <td><?= (int)$gt['rows'] ?> period<?= (int)$gt['rows'] === 1 ? '' : 's' ?></td>
@@ -1063,6 +1073,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <?php endif; ?>
             </tbody>
         </table>
+        <div class="mb-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary drill-all" data-open="1">Expand all drilldowns</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary drill-all" data-open="0">Collapse all drilldowns</button>
+        </div>
         <table class="table table-sm table-bordered grid">
             <thead><tr><th>Employee</th><th>All-period gross</th><th>All-period known net</th><th>All-period paid</th><th>All-period remaining</th><th>Unknown net / paid without net</th><th>Draft preview (not actual)</th><th>Drilldown</th></tr></thead>
             <tbody>
@@ -1076,6 +1090,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <td><?= (int)$emp['all_period']['net_unknown'] ?> unknown<?php if ($emp['all_period']['paid_without_known_net']): ?>, <?= (int)$emp['all_period']['paid_without_known_net'] ?> paid without a known net<?php endif; ?></td>
                     <td class="preview">Rows <?= (int)$emp['draft_preview']['rows'] ?>, proposed <?= number_format((float)$emp['draft_preview']['proposed_known'], 2) ?>, draft net unknown <?= (int)$emp['draft_preview']['net_unknown'] ?></td>
                     <td>
+                        <details class="drill">
+                        <summary><?= count($emp['drilldown']) ?> period line<?= count($emp['drilldown']) === 1 ? '' : 's' ?></summary>
                         <?php foreach ($emp['drilldown'] as $line): ?>
                             <div><?= psr_h($line['source']) ?> #<?= (int)$line['id'] ?> <?= psr_h($line['store']) ?> <?= psr_h($line['period_start']) ?>–<?= psr_h($line['period_end']) ?>
                                 gross <?= $line['gross'] === null ? 'Pending' : number_format((float)$line['gross'], 2) ?>,
@@ -1085,6 +1101,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                                 <?= empty($line['in_filter']) ? '(outside filter)' : '' ?></div>
                         <?php endforeach; ?>
                         <?php foreach ($emp['dedup_notes'] as $note): ?><div class="text-muted"><?= psr_h($note['text']) ?></div><?php endforeach; ?>
+                        </details>
                     </td>
                 </tr>
             <?php endforeach; ?>
@@ -1429,6 +1446,31 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     document.getElementById('closeApprovals').addEventListener('click', function () { modal.classList.remove('open'); });
     narrowLinks(form);
     paint();
+})();
+</script>
+<script>
+(function () {
+    function setPeriods(open) {
+        document.querySelectorAll('.group-toggle').forEach(function (toggle) {
+            var groupId = toggle.getAttribute('data-group');
+            document.querySelectorAll('tr.group-detail').forEach(function (row) {
+                if (row.getAttribute('data-group') === groupId) row.hidden = !open;
+            });
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            toggle.textContent = open ? 'Hide periods' : 'Show periods';
+        });
+    }
+    var expand = document.getElementById('expandAllPeriods');
+    var collapse = document.getElementById('collapseAllPeriods');
+    if (expand) expand.addEventListener('click', function () { setPeriods(true); });
+    if (collapse) collapse.addEventListener('click', function () { setPeriods(false); });
+    document.querySelectorAll('.drill-all').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var open = button.getAttribute('data-open') === '1';
+            var scope = button.closest('.mt-3') || document;
+            scope.querySelectorAll('details.drill').forEach(function (d) { d.open = open; });
+        });
+    });
 })();
 </script>
 </body>
