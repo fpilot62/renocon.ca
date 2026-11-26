@@ -72,6 +72,8 @@ $summary = psr_pay_summary([
 ], []);
 $line = $summary['lines'][0];
 check('one linked person is one line across stores', count($summary['lines']) === 1 && $line['user_id'] === 10004);
+check('the summary line keeps every sheet row id', $line['sheet_ids'] === [1, 2, 3]);
+check('a system line with no sheet id is not a sheet source', psr_sheet_source_ids([['sheet_row_id' => 0], ['sheet_row_id' => 9]]) === [9]);
 check('stores are listed on that line', $line['stores'] === ['Kelowna', 'Vernon']);
 check('total paid sums confirmed amounts and ignores none confirmed', abs($line['total_paid'] - 140) < 0.001 && $line['paid_unknown'] === 0);
 check('last paid on is the latest confirmed actual date', $line['last_paid_on'] === '2026-09-20');

@@ -120,6 +120,20 @@ function psr_summary_current_due(array $rows): array
     ];
 }
 
+function psr_sheet_source_ids(array $rows): array
+{
+    $ids = [];
+    foreach ($rows as $row) {
+        $id = (int)($row['sheet_row_id'] ?? 0);
+        if ($id > 0) {
+            $ids[$id] = true;
+        }
+    }
+    $out = array_map('intval', array_keys($ids));
+    sort($out);
+    return $out;
+}
+
 function psr_pay_summary_line(array $bucket, array $paidDates): array
 {
     $paid = 0.0;
@@ -164,6 +178,7 @@ function psr_pay_summary_line(array $bucket, array $paidDates): array
         'due_unknown' => $dueUnknown,
         'pay_now' => $target !== null && array_key_exists('today_pay', $target) ? $target['today_pay'] : null,
         'target' => $target,
+        'sheet_ids' => psr_sheet_source_ids($bucket['rows']),
     ];
 }
 

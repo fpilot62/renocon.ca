@@ -24,6 +24,7 @@ require_once __DIR__ . '/engine/payroll_sheet_review_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
 require_once __DIR__ . '/engine/sheet_hide_lib.php';
 require_once __DIR__ . '/engine/sheet_summary_lib.php';
+require_once __DIR__ . '/engine/payroll_sheet_edit_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -32,6 +33,18 @@ if (is_file(__DIR__ . '/engine/menu_generator.php')) {
 function psr_h($value): string
 {
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+}
+function psr_keep_query(array $extra = []): string
+{
+    $q = $_GET;
+    foreach ($extra as $key => $value) {
+        if ($value === null) {
+            unset($q[$key]);
+        } else {
+            $q[$key] = $value;
+        }
+    }
+    return 'payroll_sheet_review.php?' . http_build_query($q);
 }
 function psr_money($value, bool $known): string
 {
@@ -120,6 +133,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $flash = (string)($_SESSION['psr_flash'] ?? '');
 unset($_SESSION['psr_flash']);
 $warnings = [];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_sheet_source'])) {
+    try {
+        $rowId = (int)($_POST['row_id'] ?? 0);
+        $n = pse_apply_edit($pdo, $orgId, $rowId, $actorId, [
+            'row_version' => $_POST['row_version'] ?? '',
+            'user_id' => $_POST['user_id'] ?? '',
+            'site_id' => $_POST['site_id'] ?? '',
+            'net' => $_POST['net'] ?? '',
+            'net_unknown' => !empty($_POST['net_unknown']) ? '1' : '',
+            'draft_notes' => $_POST['draft_notes'] ?? '',
+        ]);
+        $_SESSION['psr_flash'] = $n > 0
+            ? 'Saved ' . $n . ' change(s) to the draft. Payroll was not changed and nobody was marked paid.'
+            : 'Nothing changed.';
+        $back = $_GET;
+        $back['org_id'] = $orgId;
+        $back['src'] = (string)($_POST['src'] ?? $rowId);
+        header('Location: payroll_sheet_review.php?' . http_build_query($back));
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['stage_workbook'])) {
     try {
@@ -330,6 +366,7 @@ foreach ($sheetRows as $row) {
         $drafts[] = $row;
     }
 }
+$draftPanelCount = count($approved) + count($drafts);
 $companies = [[
     'org_id' => $orgId,
     'org_name' => 'This company',
@@ -671,6 +708,52 @@ $payRunSummary = psr_pay_run_summary($suggestionPreview['suggestion'] ?? null, c
 $csrf = ps_csrf_token();
 $summaryView = (string)($_GET['view'] ?? '') !== 'detail';
 $paySummary = $summaryView ? psr_pay_summary($gridFiltered, psr_load_paid_dates($pdo, $orgId, $gridFiltered)) : ['lines' => [], 'totals' => []];
+$srcParam = trim((string)($_GET['src'] ?? ''));
+$srcRequested = array_key_exists('src', $_GET);
+$srcWanted = [];
+if ($srcParam !== '' && $srcParam !== '0') {
+    foreach (explode(',', $srcParam) as $srcPart) {
+        $srcId = (int)$srcPart;
+        if ($srcId > 0) {
+            $srcWanted[$srcId] = true;
+        }
+    }
+}
+$srcById = [];
+foreach ($sheetRows as $srcRow) {
+    if (isset($srcWanted[(int)$srcRow['id']])) {
+        $srcById[(int)$srcRow['id']] = $srcRow;
+    }
+}
+$srcWindows = [];
+foreach (array_keys($srcWanted) as $srcId) {
+    if (!isset($srcById[$srcId])) {
+        continue;
+    }
+    $srcWindows[] = [
+        'row' => $srcById[$srcId],
+        'window' => pse_source_window($pdo, $orgId, $srcById[$srcId], count($srcById) > 1 ? 2 : 6),
+        'locked' => pse_row_is_locked($pdo, $orgId, $srcId),
+    ];
+}
+$srcUsers = [];
+$srcSites = [];
+if ($srcWindows) {
+    $srcUsers = pse_org_users($pdo, $orgId);
+    if (!$showHiddenAdmins) {
+        foreach ($srcUsers as $hideId => $hideName) {
+            if (sheet_person_is_hidden((int)$hideId, (string)$hideName)) {
+                unset($srcUsers[$hideId]);
+            }
+        }
+    }
+    $srcSites = pse_org_sites($pdo, $orgId);
+}
+$companyPanelCount = 0;
+foreach ($report['companies'] as $companyPanel) {
+    $companyPanelCount += count($companyPanel['employees'] ?? []);
+}
+$deferredItems = psr_deferred_items();
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
     $byUser[(int)$emp['user_id']] = $emp;
@@ -712,6 +795,18 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .filter-toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; font-weight: 700; color: #0f172a; text-align: left; }
         .filter-toggle-word { font-weight: 600; color: #334155; white-space: nowrap; }
         .filter-body { margin-top: 12px; }
+        details.psr-panel > summary { font-weight: 800; cursor: pointer; }
+        details.psr-panel > summary::-webkit-details-marker { margin-right: 6px; }
+        tr[data-src] { cursor: pointer; }
+        .sheet-source { position: fixed; top: 78px; right: 12px; width: min(540px, 46vw); max-height: calc(100vh - 96px); overflow: auto; z-index: 40; background: #fff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 14px; box-shadow: 0 10px 28px rgba(15, 23, 42, .18); }
+        table.src { border-collapse: collapse; }
+        table.src td, table.src th { padding: 2px 6px; font-size: 12px; white-space: nowrap; }
+        table.src th { background: #e2e8f0; }
+        table.src tr.selrow td { border-top: 2px solid #b45309; border-bottom: 2px solid #b45309; }
+        table.src td.hl { background: #fde047; font-weight: 700; }
+        table.src td.ev { background: #fdba74; font-weight: 700; }
+        table.src td.num { text-align: right; }
+        table.src td.rn { background: #e2e8f0; color: #475569; text-align: right; }
         table.paysummary td.num, table.paysummary th.num { text-align: right; white-space: nowrap; }
         table.paysummary tfoot td { background: #0f172a; color: #fff; font-weight: 800; }
         tr.group-summary td, tr.group-summary td.ident { background: #e0f2fe; font-weight: 700; }
@@ -996,10 +1091,11 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <?php foreach ($paySummary['lines'] as $sumLine):
                 $target = $sumLine['target'];
                 $fields = $target ? psr_summary_post_fields($target, $sumLine['pay_now']) : [];
+                $sumSrc = !empty($sumLine['sheet_ids']) ? implode(',', $sumLine['sheet_ids']) : '0';
             ?>
-                <tr>
+                <tr data-src="<?= psr_h($sumSrc) ?>">
                     <td>
-                        <?= psr_h($sumLine['employee_name'] !== '' ? $sumLine['employee_name'] : 'Name not set') ?>
+                        <a href="<?= psr_h(psr_keep_query(['src' => $sumSrc])) ?>"><?= psr_h($sumLine['employee_name'] !== '' ? $sumLine['employee_name'] : 'Name not set') ?></a>
                         <div class="text-muted"><?= (int)$sumLine['user_id'] > 0 ? '#' . (int)$sumLine['user_id'] : 'not linked' ?></div>
                         <div class="text-muted"><?= psr_h($sumLine['stores'] ? implode(', ', $sumLine['stores']) : 'Store not set') ?></div>
                     </td>
@@ -1075,13 +1171,14 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 if ($groupOn):
                     $gt = $employeeGroup['totals'];
             ?>
-                <tr class="group-summary">
+                <tr class="group-summary" data-src="<?= psr_h(!empty($employeeGroup['sheet_ids']) ? implode(',', $employeeGroup['sheet_ids']) : '0') ?>">
                     <td class="ident">
                         <?php if ($employeeGroup['sheet_ids']): ?>
-                            <label class="small mb-0"><input type="checkbox" class="group-check" data-group="<?= psr_h($employeeGroup['key']) ?>"> Select</label>
+                            <label class="small mb-0"><input type="checkbox" class="group-check" data-group="<?= psr_h($employeeGroup['key']) ?>" data-src="<?= psr_h(implode(',', $employeeGroup['sheet_ids'])) ?>"> Select</label>
                         <?php endif; ?>
                         <button type="button" class="btn btn-sm btn-link p-0 group-toggle" data-group="<?= psr_h($employeeGroup['key']) ?>" aria-expanded="false">Show periods</button>
-                        <a class="small d-block" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>&amp;name=<?= urlencode((string)$employeeGroup['employee_name']) ?>">Show sheet rows</a>
+                        <?php $groupSrc = !empty($employeeGroup['sheet_ids']) ? implode(',', $employeeGroup['sheet_ids']) : '0'; ?>
+                        <a class="small d-block" href="<?= psr_h(psr_keep_query(['src' => $groupSrc, 'view' => 'detail'])) ?>">Sheet source</a>
                     </td>
                     <td class="ident"><?= psr_h($employeeGroup['employee_name']) ?><div class="text-muted"><?= psr_h($employeeGroup['store_name'] !== '' ? $employeeGroup['store_name'] : 'Store not set') ?></div><?php if (!empty($employeeGroup['not_linked'])): ?><div class="pending">not linked</div><?php endif; ?></td>
                     <td><?= (int)$gt['rows'] ?> period<?= (int)$gt['rows'] === 1 ? '' : 's' ?></td>
@@ -1106,10 +1203,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     $rowClass .= ' group-detail';
                 }
             ?>
-                <tr class="<?= psr_h($rowClass) ?>" <?php if ($groupOn): ?>data-group="<?= psr_h($employeeGroup['key']) ?>" hidden<?php endif; ?>>
+                <tr class="<?= psr_h($rowClass) ?>" data-src="<?= (int)$grow['sheet_row_id'] > 0 ? (int)$grow['sheet_row_id'] : '0' ?>" <?php if ($groupOn): ?>data-group="<?= psr_h($employeeGroup['key']) ?>" hidden<?php endif; ?>>
                     <td class="ident">
                         <?php if ($grow['sheet_row_id']): ?>
-                            <label class="small mb-0"><input type="checkbox" class="row-check" name="row_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>"> Select</label>
+                            <label class="small mb-0"><input type="checkbox" class="row-check" data-src="<?= (int)$grow['sheet_row_id'] ?>" name="row_ids[]" value="<?= (int)$grow['sheet_row_id'] ?>"> Select</label>
                             <label class="small remove-draft"><input type="checkbox" class="remove-draft-box" name="g[<?= psr_h($grow['key']) ?>][delete]" value="1"> Remove draft</label>
                         <?php else: ?><span class="text-muted">No draft to select</span><?php endif; ?>
                         <input type="hidden" name="g[<?= psr_h($grow['key']) ?>][row_version]" value="<?= (int)$grow['row_version'] ?>">
@@ -1224,17 +1321,17 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         </div>
         <?php endif; ?>
     </form>
-    <div class="sheet">
-        <h6>Unallocated cash evidence</h6>
-        <p class="mb-1">These are not applied to a person or period and are not certified payable.</p>
+    <details class="sheet psr-panel" data-panel="unallocated-evidence">
+        <summary>Unallocated cash evidence (<?= count($eventRows) ?>)</summary>
+        <p class="mb-1 mt-2">These are not applied to a person or period and are not certified payable.</p>
         <?php if (!$eventRows): ?><p class="text-muted mb-0">None on file.</p><?php endif; ?>
         <?php foreach ($eventRows as $ev): ?>
             <div><?= psr_h($ev['allocation_status']) ?> <?= $ev['signed_amount'] === null ? 'Pending' : number_format((float)$ev['signed_amount'], 2) ?> <?= psr_h((string)$ev['flags_json']) ?></div>
         <?php endforeach; ?>
-    </div>
+    </details>
 
-    <details class="sheet">
-        <summary>Company all-period totals (not the spreadsheet above)</summary>
+    <details class="sheet psr-panel" data-panel="company-totals">
+        <summary>Company all-period totals (<?= (int)$companyPanelCount ?>)</summary>
     <?php foreach ($report['companies'] as $company): ?>
     <div class="mt-3">
         <h5><?= psr_h($company['org_name']) ?> — All-period total</h5>
@@ -1287,10 +1384,11 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     </details>
 
     <?php if ($isSuper): ?>
-    <form method="POST" class="sheet">
+    <details class="sheet psr-panel" data-panel="other-company">
+        <summary>Show another company beside this total</summary>
+    <form method="POST" class="mt-2">
         <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-        <strong>Show another company beside this total</strong>
         <p class="text-muted mb-2">Pick an existing person in that company. The totals are not added together, and a name is never matched automatically.</p>
         <div class="form-row">
             <div class="col-md-2"><input class="form-control form-control-sm" name="user_id" placeholder="User id here" required></div>
@@ -1299,10 +1397,11 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-2"><button class="btn btn-sm btn-outline-secondary" name="link_identity" value="1">Link for side-by-side view</button></div>
         </div>
     </form>
+    </details>
     <?php endif; ?>
 
-    <div class="sheet">
-        <h5>Import a workbook or a proposal</h5>
+    <details class="sheet psr-panel" data-panel="import">
+        <summary>Import a workbook or a proposal (<?= $stage ? count($stageRows) . ' staged' : 'none staged' ?>)</summary>
         <p>Workbook CSV/JSON uses the normalized columns (gross, net, reported_status, flags, raw notes). A blank net stays unknown. Paid stays paid. Cash in the source does not create GST. Payments CSV stays unallocated. A proposal file is not payroll: columns employee, store, period_start, period_end, proposed_amount, amount_basis, route, note, plan_date, and GST columns only if the person is an explicit contractor.</p>
         <form method="POST" enctype="multipart/form-data" class="mb-3">
             <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
@@ -1346,12 +1445,13 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <button class="btn btn-warning font-weight-bold" name="commit_stage" value="1">Save staged rows as drafts</button>
             </form>
         <?php endif; ?>
-    </div>
+    </details>
 
-    <form method="POST" class="sheet" id="approve">
+    <details class="sheet psr-panel" data-panel="drafts">
+        <summary>Draft rows (<?= (int)$draftPanelCount ?>)</summary>
+    <form method="POST" id="approve" class="mt-2">
         <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-        <h5>Draft rows</h5>
         <p>This period’s planner is not the all-period employee total. Employer costs and GST never reduce the wage balance. Pending means the figure is unknown, not zero.</p>
         <div class="table-responsive"><table class="table table-sm table-bordered grid">
             <thead><tr>
@@ -1378,9 +1478,9 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 $principalKnown = $snap['remaining'] !== null && $snap['count'] > 0;
                 $balance = psr_balance_preview($row, $principalKnown, $snap['remaining']);
                 ?>
-                <tr>
-                    <td><?php if (!isset($wageRows[(int)$row['id']])): ?><input type="checkbox" name="row_ids[]" value="<?= (int)$row['id'] ?>"><?php else: ?>Approved<?php endif; ?></td>
-                    <td><?= psr_h($row['employee_name']) ?><br><span class="text-muted"><?= psr_h($row['store_name']) ?></span><br><a href="?org_id=<?= (int)$orgId ?>&edit=<?= (int)$row['id'] ?>">Edit draft</a></td>
+                <tr data-src="<?= (int)$row['id'] ?>">
+                    <td><?php if (!isset($wageRows[(int)$row['id']])): ?><input type="checkbox" class="row-check" data-src="<?= (int)$row['id'] ?>" name="row_ids[]" value="<?= (int)$row['id'] ?>"><?php else: ?>Approved<?php endif; ?></td>
+                    <td><?= psr_h($row['employee_name']) ?><br><span class="text-muted"><?= psr_h($row['store_name']) ?></span><br><a href="<?= psr_h(psr_keep_query(['src' => (int)$row['id']])) ?>">Sheet source</a> <a href="?org_id=<?= (int)$orgId ?>&edit=<?= (int)$row['id'] ?>">Edit draft</a></td>
                     <td><?= psr_h((string)$row['period_start']) ?><br><?= psr_h((string)$row['period_end']) ?><?php if (!$row['year_confirmed'] && $row['year_confidence'] !== 'explicit'): ?><div class="pending">Year uncertain</div><?php endif; ?></td>
                     <td><?= $row['gross'] === null ? 'Pending' : number_format((float)$row['gross'], 2) ?></td>
                     <td><?= $row['net'] === null ? 'Pending' : number_format((float)$row['net'], 2) ?></td>
@@ -1400,13 +1500,15 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         </table></div>
         <p class="mb-0 text-muted">Use Approvals at the top of the spreadsheet to save edits, approve amounts owed, or approve a pay run.</p>
     </form>
+    </details>
 
     <?php if ($edit): ?>
-    <form method="POST" class="sheet">
+    <details class="sheet psr-panel" data-panel="edit-draft" data-force-open="1" open>
+        <summary>Edit draft #<?= (int)$edit['id'] ?></summary>
+    <form method="POST" class="mt-2">
         <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
         <input type="hidden" name="row_id" value="<?= (int)$edit['id'] ?>">
-        <h5>Edit draft #<?= (int)$edit['id'] ?></h5>
         <p class="text-muted">Source notes stay on the row. This save does not change payroll. Leave an amount blank for unknown. Type 0 if the amount is actually zero.</p>
         <div class="form-row">
             <div class="col-md-3 mb-2"><label>Name</label><input class="form-control form-control-sm" name="employee_name" value="<?= psr_h($edit['employee_name']) ?>"></div>
@@ -1443,10 +1545,11 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <p class="mt-2 text-muted">Source status evidence and raw notes are unchanged: <?= psr_h((string)$edit['raw_notes']) ?></p>
         <?php if ($revisions): ?><h6>Revisions</h6><?php foreach ($revisions as $rev): ?><div><?= psr_h($rev['created_at']) ?> <?= psr_h($rev['action']) ?></div><?php endforeach; ?><?php endif; ?>
     </form>
+    </details>
     <?php endif; ?>
 
-    <div class="sheet" id="plans">
-        <h5>Dated proposal plans</h5>
+    <details class="sheet psr-panel" id="plans" data-panel="plans">
+        <summary>Dated proposal plans (<?= count($planRows) ?>)</summary>
         <p>Each saved suggestion is its own dated round. Amount available is the pool you type. Proposed lines are not actual payments, and a later round does not delete an earlier one.</p>
         <form method="POST" class="mb-3">
             <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
@@ -1487,19 +1590,19 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 </form>
             </div>
         <?php endforeach; ?>
-    </div>
+    </details>
 
-    <div class="sheet">
-        <h5>Unallocated cash and advances</h5>
+    <details class="sheet psr-panel" data-panel="advances">
+        <summary>Unallocated cash and advances (<?= count($eventRows) ?>)</summary>
         <p>These stay unallocated. They are not applied to a period or marked as wages.</p>
         <?php if (!$eventRows): ?><p class="text-muted mb-0">None imported.</p><?php endif; ?>
         <?php foreach ($eventRows as $ev): ?>
             <div><?= psr_h($ev['event_key']) ?> <?= psr_h($ev['employee_context']) ?> <?= psr_h($ev['store_context']) ?> <?= $ev['signed_amount'] === null ? 'Pending' : number_format((float)$ev['signed_amount'], 2) ?> <?= psr_h($ev['allocation_status']) ?> <?= psr_h((string)$ev['flags_json']) ?></div>
         <?php endforeach; ?>
-    </div>
+    </details>
 
-    <div class="sheet">
-        <h5>Approvals</h5>
+    <details class="sheet psr-panel" data-panel="approvals-log">
+        <summary>Approvals (<?= count($approvalRows) ?>)</summary>
         <?php foreach ($approvalRows as $ap): ?>
             <form method="POST" class="mb-1">
                 <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
@@ -1509,12 +1612,90 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <?php if (!$ap['undone_at']): ?><button class="btn btn-sm btn-outline-danger" name="undo_approval" value="1">Undo</button><?php endif; ?>
             </form>
         <?php endforeach; ?>
-    </div>
+    </details>
 
-    <div class="sheet">
-        <h5>Not calculated here</h5>
-        <ul><?php foreach (psr_deferred_items() as $item): ?><li><?= psr_h($item) ?></li><?php endforeach; ?></ul>
-    </div>
+    <details class="sheet psr-panel" data-panel="not-calculated">
+        <summary>Not calculated here (<?= count($deferredItems) ?>)</summary>
+        <ul class="mt-2"><?php foreach ($deferredItems as $item): ?><li><?= psr_h($item) ?></li><?php endforeach; ?></ul>
+    </details>
+    <?php if ($srcRequested): ?>
+    <aside class="sheet-source" id="sheetSourcePanel">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong>Sheet source</strong>
+            <a href="<?= psr_h(psr_keep_query(['src' => null])) ?>">Close</a>
+        </div>
+        <?php if (!$srcWindows): ?>
+            <p class="mb-0">This line has no sheet source.</p>
+        <?php endif; ?>
+        <?php foreach ($srcWindows as $srcItem):
+            $srow = $srcItem['row'];
+            $window = $srcItem['window'];
+            $srcHeader = $window['header'];
+            $canEdit = ($srow['row_kind'] ?? '') === 'employee_record' && empty($srcItem['locked']);
+        ?>
+            <h6 class="mt-3 mb-1">Row <?= (int)($srow['source_row'] ?? 0) ?> of <?= psr_h((string)($srow['source_sheet'] ?? '')) ?>: <?= psr_h((string)($srow['employee_name'] ?? '')) ?></h6>
+            <div class="text-muted mb-2"><?= psr_h((string)($srow['period_start'] ?? '')) ?> to <?= psr_h((string)($srow['period_end'] ?? '')) ?>. <?= psr_h($window['note']) ?> Yellow cells are the ones this draft was read from.</div>
+            <?php if (!empty($srcItem['locked'])): ?>
+                <div class="alert alert-secondary">This row has an active approval, so it cannot be edited here. Undo the approval first. Nobody is marked paid from this panel.</div>
+            <?php elseif (!$canEdit): ?>
+                <div class="alert alert-secondary">This is not an employee row. It is shown for reference only.</div>
+            <?php else: ?>
+            <form method="POST" action="<?= psr_h(psr_keep_query(['src' => $srcParam])) ?>" class="mb-2">
+                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                <input type="hidden" name="src" value="<?= psr_h($srcParam) ?>">
+                <input type="hidden" name="row_id" value="<?= (int)$srow['id'] ?>">
+                <input type="hidden" name="row_version" value="<?= (int)($srow['row_version'] ?? 1) ?>">
+                <div class="form-group mb-2"><label class="mb-0">Employee</label>
+                    <select name="user_id" class="form-control form-control-sm">
+                        <option value="">Not linked</option>
+                        <?php foreach ($srcUsers as $uid => $uname): ?>
+                            <option value="<?= (int)$uid ?>" <?= (int)$srow['user_id'] === (int)$uid ? 'selected' : '' ?>><?= psr_h($uname) ?> #<?= (int)$uid ?></option>
+                        <?php endforeach; ?>
+                    </select></div>
+                <div class="form-group mb-2"><label class="mb-0">Store</label>
+                    <select name="site_id" class="form-control form-control-sm">
+                        <option value="">Not set</option>
+                        <?php foreach ($srcSites as $sid => $sname): ?>
+                            <option value="<?= (int)$sid ?>" <?= (int)$srow['site_id'] === (int)$sid ? 'selected' : '' ?>><?= psr_h($sname) ?></option>
+                        <?php endforeach; ?>
+                    </select></div>
+                <div class="form-row">
+                    <div class="col-6"><label class="mb-0">Net</label>
+                        <input name="net" class="form-control form-control-sm" value="<?= $srow['net'] === null ? '' : psr_h(number_format((float)$srow['net'], 2, '.', '')) ?>" placeholder="blank = unknown"></div>
+                    <div class="col-6 pt-4"><label class="mb-0"><input type="checkbox" name="net_unknown" value="1" <?= $srow['net'] === null ? 'checked' : '' ?>> Net is unknown</label></div>
+                </div>
+                <div class="form-group mt-2 mb-2"><label class="mb-0">Note</label>
+                    <textarea name="draft_notes" rows="2" class="form-control form-control-sm"><?= psr_h((string)($srow['draft_notes'] ?? '')) ?></textarea></div>
+                <button class="btn btn-sm btn-primary" name="save_sheet_source" value="1">Save draft edit</button>
+                <span class="text-muted">Draft only. Not approved, not paid.</span>
+            </form>
+            <?php endif; ?>
+            <div style="overflow:auto; max-height:280px">
+            <table class="table-bordered src mb-0">
+                <thead><tr><th>#</th><?php foreach ($window['columns'] as $col): ?><th><?= psr_h($col) ?><?= isset($srcHeader[$col]) ? ' ' . psr_h($srcHeader[$col]) : '' ?></th><?php endforeach; ?></tr></thead>
+                <tbody>
+                <?php foreach ($window['rows'] as $wr): ?>
+                    <tr class="<?= !empty($wr['selected']) ? 'selrow' : '' ?>">
+                        <td class="rn"><?= (int)$wr['n'] ?></td>
+                        <?php foreach ($window['columns'] as $col):
+                            $cell = $wr['cells'][$col] ?? null;
+                            $cls = [];
+                            if ($cell && !empty($cell['num'])) { $cls[] = 'num'; }
+                            if (!empty($wr['selected']) && in_array($col, $wr['ev'], true)) { $cls[] = 'ev'; }
+                            elseif (!empty($wr['selected']) && in_array($col, $wr['hl'], true) && $cell) { $cls[] = 'hl'; }
+                        ?>
+                            <td class="<?= psr_h(implode(' ', $cls)) ?>" <?= $cell && $cell['f'] !== '' ? 'title="' . psr_h($cell['f']) . '"' : '' ?>><?= $cell ? psr_h($cell['v']) : '' ?></td>
+                        <?php endforeach; ?>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if (!$window['rows']): ?><tr><td colspan="<?= 1 + count($window['columns']) ?>">No cells stored for this row.</td></tr><?php endif; ?>
+                </tbody>
+            </table>
+            </div>
+        <?php endforeach; ?>
+    </aside>
+    <?php endif; ?>
 </div>
 <script>
 (function () {
@@ -1573,13 +1754,15 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         boxes().forEach(function (box) { box.checked = pageBox.checked; });
         paint();
     });
-    document.getElementById('selectFiltered').addEventListener('click', function () {
+    var selectFiltered = document.getElementById('selectFiltered');
+    if (selectFiltered) selectFiltered.addEventListener('click', function () {
         filteredMode.value = '1';
         boxes().forEach(function (box) { box.checked = true; });
         if (pageBox) pageBox.checked = true;
         paint();
     });
-    document.getElementById('clearSelection').addEventListener('click', function () {
+    var clearSelection = document.getElementById('clearSelection');
+    if (clearSelection) clearSelection.addEventListener('click', function () {
         filteredMode.value = '0';
         boxes().forEach(function (box) { box.checked = false; });
         if (pageBox) pageBox.checked = false;
@@ -1644,6 +1827,59 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             var open = button.getAttribute('data-open') === '1';
             var scope = button.closest('.mt-3') || document;
             scope.querySelectorAll('details.drill').forEach(function (d) { d.open = open; });
+        });
+    });
+})();
+</script>
+<script>
+(function () {
+    document.querySelectorAll('details.psr-panel').forEach(function (el) {
+        var key = 'psrPanel:' + (el.getAttribute('data-panel') || '');
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        if (el.getAttribute('data-force-open') === '1') {
+            el.open = true;
+        } else if (saved === '1') {
+            el.open = true;
+        } else if (saved === '0') {
+            el.open = false;
+        }
+        el.addEventListener('toggle', function () {
+            try { localStorage.setItem(key, el.open ? '1' : '0'); } catch (e) {}
+        });
+    });
+    function goSource(src) {
+        var ids = String(src || '').split(',').filter(function (id) { return id && id !== '0'; });
+        document.querySelectorAll('.row-check:checked').forEach(function (box) {
+            if (ids.indexOf(box.value) === -1) ids.push(box.value);
+        });
+        try { sessionStorage.setItem('psrSelectedRows', JSON.stringify(ids)); } catch (e) {}
+        var url = new URL(window.location.href);
+        url.searchParams.set('src', src || '0');
+        window.location.href = url.toString();
+    }
+    var restoring = true;
+    var savedIds = [];
+    try { savedIds = JSON.parse(sessionStorage.getItem('psrSelectedRows') || '[]'); } catch (e) { savedIds = []; }
+    document.querySelectorAll('.row-check').forEach(function (box) {
+        if (savedIds.indexOf(box.value) !== -1) box.checked = true;
+        box.addEventListener('change', function () {
+            var ids = [];
+            document.querySelectorAll('.row-check:checked').forEach(function (item) { ids.push(item.value); });
+            try { sessionStorage.setItem('psrSelectedRows', JSON.stringify(ids)); } catch (e) {}
+            if (!restoring && box.checked) goSource(box.getAttribute('data-src') || box.value || '0');
+        });
+    });
+    document.querySelectorAll('.group-check').forEach(function (box) {
+        box.addEventListener('change', function () {
+            if (box.checked) goSource(box.getAttribute('data-src') || '0');
+        });
+    });
+    restoring = false;
+    document.querySelectorAll('tr[data-src]').forEach(function (tr) {
+        tr.addEventListener('click', function (ev) {
+            if (ev.target.closest('input, button, select, textarea, a, label')) return;
+            goSource(tr.getAttribute('data-src') || '0');
         });
     });
 })();
