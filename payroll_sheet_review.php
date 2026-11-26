@@ -694,6 +694,9 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .approval-section.save { border-color: #0369a1; }
         .approval-section.owed { border-color: #15803d; }
         .approval-section.run { border-color: #b45309; }
+        .filter-toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; font-weight: 700; color: #0f172a; text-align: left; }
+        .filter-toggle-word { font-weight: 600; color: #334155; white-space: nowrap; }
+        .filter-body { margin-top: 12px; }
         tr.group-summary td, tr.group-summary td.ident { background: #e0f2fe; font-weight: 700; }
         tr.group-detail[hidden] { display: none; }
         tr.grand-total td { background: #0f172a; color: #fff; font-weight: 800; }
@@ -716,7 +719,59 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     <?php if ($flash !== ''): ?><div class="alert alert-info"><?= psr_h($flash) ?></div><?php endif; ?>
     <?php if ($warnings): ?><div class="alert alert-warning"><?php foreach ($warnings as $w): ?><div><?= nl2br(psr_h($w)) ?></div><?php endforeach; ?></div><?php endif; ?>
 
-    <form method="GET" class="sheet">
+    <?php
+    $filterBits = [];
+    if ((int)$filter['user_id'] > 0) {
+        $filterBits[] = 'Employee id ' . (int)$filter['user_id'];
+    }
+    if ($filterSiteId > 0) {
+        $filterBits[] = 'Store ' . ($filterSiteName !== '' ? $filterSiteName : ('#' . $filterSiteId));
+    }
+    if ((string)$filter['period_start'] !== '') {
+        $filterBits[] = 'From ' . (string)$filter['period_start'];
+    }
+    if ((string)$filter['period_end'] !== '') {
+        $filterBits[] = 'To ' . (string)$filter['period_end'];
+    }
+    if ($gridFilter['person'] !== '') {
+        $filterBits[] = 'Person ' . $gridFilter['person'];
+    }
+    if ($gridFilter['store'] !== '') {
+        $filterBits[] = 'Store text ' . $gridFilter['store'];
+    }
+    if ($gridFilter['year'] !== '') {
+        $filterBits[] = 'Year ' . $gridFilter['year'];
+    }
+    if ($gridFilter['source'] !== 'all') {
+        $filterBits[] = 'Source ' . $gridFilter['source'];
+    }
+    if ($gridFilter['pay_status'] !== 'all') {
+        $filterBits[] = 'Pay status ' . str_replace('_', ' ', $gridFilter['pay_status']);
+    }
+    if ($gridFilter['route'] !== 'all') {
+        $filterBits[] = 'Route ' . $gridFilter['route'];
+    }
+    if ($gridFilter['active'] !== 'all') {
+        $filterBits[] = 'Staff ' . $gridFilter['active'];
+    }
+    if (!empty($gridFilter['unresolved'])) {
+        $filterBits[] = 'Needs review';
+    }
+    if (!$groupOn) {
+        $filterBits[] = 'Not grouped by employee';
+    }
+    if ($showHiddenAdmins) {
+        $filterBits[] = 'Hidden admin/test users';
+    }
+    $filterSummary = $filterBits ? implode(', ', $filterBits) : 'none';
+    $filtersOpen = $filterBits !== [];
+    ?>
+    <form method="GET" class="sheet" id="sheetReviewFilters">
+        <button type="button" class="filter-toggle" id="sheetReviewFilterToggle" aria-expanded="<?= $filtersOpen ? 'true' : 'false' ?>" aria-controls="sheetReviewFilterBody">
+            <span id="sheetReviewFilterLabel">Filters (<?= psr_h($filterSummary) ?>)</span>
+            <span class="filter-toggle-word"><?= $filtersOpen ? '▾ Hide filters' : '▸ Show filters' ?></span>
+        </button>
+        <div id="sheetReviewFilterBody" class="filter-body"<?= $filtersOpen ? '' : ' hidden' ?>>
         <div class="form-row">
             <?php if ($isSuper): ?>
             <div class="col-md-3 mb-2">
@@ -746,7 +801,29 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <div class="col-md-1 mb-2"><label>&nbsp;</label><button class="btn btn-sm btn-primary btn-block">Filter</button></div>
         </div>
         <p class="mb-0 text-muted">Filters change this spreadsheet only. They do not certify a live unpaid balance. The company all-period total stays available under the details below.</p>
+        </div>
     </form>
+    <script>
+    (function () {
+        var key = 'payrollSheetReviewFiltersOpen';
+        var body = document.getElementById('sheetReviewFilterBody');
+        var btn = document.getElementById('sheetReviewFilterToggle');
+        var word = btn.querySelector('.filter-toggle-word');
+        function apply(open) {
+            body.hidden = !open;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            word.textContent = open ? '▾ Hide filters' : '▸ Show filters';
+        }
+        var saved = null;
+        try { saved = localStorage.getItem(key); } catch (e) {}
+        if (saved === '1' || saved === '0') apply(saved === '1');
+        btn.addEventListener('click', function () {
+            var open = body.hidden;
+            apply(open);
+            try { localStorage.setItem(key, open ? '1' : '0'); } catch (e) {}
+        });
+    })();
+    </script>
 
     <form method="POST" id="gridForm" class="sheet">
         <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">

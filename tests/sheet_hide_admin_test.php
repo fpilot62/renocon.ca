@@ -40,6 +40,8 @@ $sheet = (string)file_get_contents(__DIR__ . '/../payroll_sheet_sheet.php');
 check('both sheet pages load the hide helper', strpos($review, 'sheet_hide_lib.php') !== false && strpos($sheet, 'sheet_hide_lib.php') !== false);
 check('both pages offer the admin toggle', strpos($review, 'Show hidden admin/test users') !== false && strpos($sheet, 'Show hidden admin/test users') !== false);
 check('neither page deletes the hidden user', strpos($review, 'DELETE FROM users') === false && strpos($sheet, 'DELETE FROM users') === false);
+check('review filters collapse and remember the state', strpos($review, 'Filters (') !== false && strpos($review, 'Show filters') !== false && strpos($review, 'payrollSheetReviewFiltersOpen') !== false);
+check('sheet view filters collapse and remember the state', strpos($sheet, 'Filters (') !== false && strpos($sheet, 'Show filters') !== false && strpos($sheet, 'payrollSheetSheetFiltersOpen') !== false);
 
 if ($fail > 0) {
     echo $fail . " failed\n";
