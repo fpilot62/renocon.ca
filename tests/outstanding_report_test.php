@@ -36,15 +36,24 @@ $guest = orpt_access_decision(['id' => 0, 'org_id' => 2, 'user_role' => 20, 'act
 check('an inactive account and a guest are refused', !$inactive['ok'] && $inactive['http'] === 403 && !$guest['ok'] && $guest['login']);
 
 $super = ['id' => 1, 'org_id' => 2, 'user_role' => 10, 'active' => 1];
-$blocked = orpt_access_decision($super, 'Superadmin', 2, []);
-check('a platform superadmin sees no wages without a grant', !$blocked['ok'] && strpos($blocked['error'], 'support-access') !== false);
-$oneGrant = orpt_access_decision($super, 'Superadmin', 0, [2]);
+$pkbc = orpt_access_decision($super, 'Superadmin', 2, []);
+$aa = orpt_access_decision($super, 'Superadmin', 4, []);
+$blocked = orpt_access_decision($super, 'Superadmin', 1, []);
+$outside = orpt_access_decision($super, 'Superadmin', 9, []);
+$chooseList = orpt_access_decision($super, 'Superadmin', 0, []);
+check('a platform superadmin can open PK BC Food without a grant', $pkbc['ok'] && $pkbc['kind'] === 'allowlist' && $pkbc['org_id'] === 2);
+check('a platform superadmin can open AA Group without a grant', $aa['ok'] && $aa['kind'] === 'allowlist' && $aa['org_id'] === 4);
+check('Renocon and any other org still need a support-access grant', !$blocked['ok'] && strpos($blocked['error'], 'support-access') === false && $blocked['http'] === 403 && !$outside['ok']);
+check('with no org picked the allowlist asks for a choice of 2 and 4', $chooseList['ok'] && $chooseList['kind'] === 'allowlist-choose' && $chooseList['org_id'] === 0 && $chooseList['choices'] === [2, 4]);
 $picked = orpt_access_decision($super, 'Superadmin', 2, [2, 4]);
 $wrong = orpt_access_decision($super, 'Superadmin', 9, [2, 4]);
 $choose = orpt_access_decision($super, 'Superadmin', 0, [4, 2]);
-check('one grant opens that org and no other', $oneGrant['ok'] && $oneGrant['kind'] === 'support' && $oneGrant['org_id'] === 2);
-check('a granted org can be chosen and another org cannot', $picked['ok'] && $picked['org_id'] === 2 && !$wrong['ok']);
-check('several grants ask for a choice and do not pick an org yet', $choose['ok'] && $choose['kind'] === 'support-choose' && $choose['org_id'] === 0 && $choose['choices'] === [2, 4]);
+$renoconGrant = orpt_access_decision($super, 'Superadmin', 1, [1]);
+$grantPlusAllow = orpt_access_decision($super, 'Superadmin', 0, [1]);
+check('a granted org can be chosen and another org cannot', $picked['ok'] && $picked['kind'] === 'support' && $picked['org_id'] === 2 && !$wrong['ok']);
+check('grants plus the allowlist still ask for a choice', $choose['ok'] && $choose['kind'] === 'support-choose' && $choose['org_id'] === 0 && $choose['choices'] === [2, 4]);
+check('a grant can open an org that is not on the allowlist', $renoconGrant['ok'] && $renoconGrant['kind'] === 'support' && $renoconGrant['org_id'] === 1);
+check('a grant for another org is added to the allowlist choice', $grantPlusAllow['ok'] && $grantPlusAllow['kind'] === 'support-choose' && $grantPlusAllow['choices'] === [1, 2, 4]);
 
 $rows = [
     [

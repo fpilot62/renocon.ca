@@ -104,6 +104,20 @@ function orpt_is_org_owner_or_admin(int $level, string $roleName): bool
 }
 
 /**
+ * Org ids a platform superadmin may open without a support grant.
+ * Uses SUPERADMIN_PAYROLL_ORG_ALLOWLIST when privacy_lib is loaded.
+ *
+ * @return list<int>
+ */
+function orpt_allowlisted_org_ids(): array
+{
+    if (function_exists('privacy_superadmin_payroll_allowlist')) {
+        return privacy_superadmin_payroll_allowlist();
+    }
+    return [2, 4];
+}
+
+/**
  * @param array<string,mixed> $user
  * @param array<int,int> $grantedOrgIds
  * @return array{ok:bool,http:int,error:string,kind:string,org_id:int,choices:array<int,int>,login:bool}
@@ -141,41 +155,62 @@ function orpt_access_decision(array $user, string $roleName, int $requestedOrg, 
     sort($granted);
 
     if (orpt_is_platform_superadmin($level)) {
-        if (!$granted) {
+        $allowlisted = orpt_allowlisted_org_ids();
+        $eligible = [];
+        foreach (array_merge($granted, $allowlisted) as $orgId) {
+            $orgId = (int)$orgId;
+            if ($orgId > 0) {
+                $eligible[$orgId] = $orgId;
+            }
+        }
+        $eligible = array_values($eligible);
+        sort($eligible);
+        if (!$eligible) {
             return $deny(403, 'Platform superadmin does not include organization payroll. A support-access grant is required.');
         }
-        if ($requestedOrg > 0 && !in_array($requestedOrg, $granted, true)) {
+        if ($requestedOrg > 0 && !in_array($requestedOrg, $eligible, true)) {
             return $deny(403, 'That organization is outside your access.');
         }
+        $kind_for = static function (int $orgId) use ($granted): string {
+            return in_array($orgId, $granted, true) ? 'support' : 'allowlist';
+        };
         if ($requestedOrg > 0) {
             return [
                 'ok' => true,
                 'http' => 200,
                 'error' => '',
-                'kind' => 'support',
+                'kind' => $kind_for($requestedOrg),
                 'org_id' => $requestedOrg,
                 'choices' => [],
                 'login' => false,
             ];
         }
-        if (count($granted) === 1) {
+        if (count($eligible) === 1) {
+            $only = $eligible[0];
             return [
                 'ok' => true,
                 'http' => 200,
                 'error' => '',
-                'kind' => 'support',
-                'org_id' => $granted[0],
+                'kind' => $kind_for($only),
+                'org_id' => $only,
                 'choices' => [],
                 'login' => false,
             ];
+        }
+        $anyGrant = false;
+        foreach ($eligible as $orgId) {
+            if (in_array($orgId, $granted, true)) {
+                $anyGrant = true;
+                break;
+            }
         }
         return [
             'ok' => true,
             'http' => 200,
             'error' => '',
-            'kind' => 'support-choose',
+            'kind' => $anyGrant ? 'support-choose' : 'allowlist-choose',
             'org_id' => 0,
-            'choices' => $granted,
+            'choices' => $eligible,
             'login' => false,
         ];
     }
@@ -273,6 +308,9 @@ function orpt_granted_org_ids(PDO $pdo, int $userId, int $requestedOrg): array
                 continue;
             }
         }
+    }
+    foreach (orpt_allowlisted_org_ids() as $orgId) {
+        $ids[] = (int)$orgId;
     }
     $out = [];
     foreach ($ids as $orgId) {
