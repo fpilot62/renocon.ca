@@ -32,6 +32,7 @@ require_once 'payroll_scope.php';
 require_once __DIR__ . '/engine/payroll_sheet_review_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_edit_lib.php';
+require_once __DIR__ . '/engine/sheet_hide_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -89,8 +90,11 @@ $perPage = 40;
 
 function pe_url(array $over, int $orgId): string
 {
-    global $sheetFilter, $nameFilter, $textFilter, $pageNo;
+    global $sheetFilter, $nameFilter, $textFilter, $pageNo, $showHiddenAdmins;
     $q = ['org_id' => $orgId];
+    if (!empty($showHiddenAdmins)) {
+        $q['show_hidden'] = '1';
+    }
     if ($sheetFilter !== '') {
         $q['sheet'] = $sheetFilter;
     }
@@ -147,7 +151,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['link_person'])) {
     }
 }
 
+$showHiddenAdmins = sheet_show_hidden_requested();
 $users = pse_org_users($pdo, $orgId);
+if (!$showHiddenAdmins) {
+    foreach ($users as $hideId => $hideName) {
+        if (sheet_person_is_hidden((int)$hideId, (string)$hideName)) {
+            unset($users[$hideId]);
+        }
+    }
+}
 $sites = pse_org_sites($pdo, $orgId);
 
 $locked = [];
@@ -166,7 +178,7 @@ $all = $pdo->prepare(
      ORDER BY r.source_sheet, r.source_row, r.id'
 );
 $all->execute([$orgId]);
-$allRows = $all->fetchAll(PDO::FETCH_ASSOC);
+$allRows = sheet_filter_hidden_rows($all->fetchAll(PDO::FETCH_ASSOC), $showHiddenAdmins);
 
 $sheetNames = [];
 $people = [];
@@ -275,7 +287,7 @@ $header = pse_known_headers($sheetFilter);
             <h4 class="font-weight-bold mb-1">Sheet view</h4>
             <p class="mb-0">The imported sheet, row by row. Edits here change the draft only. They do not approve payroll or mark anyone paid, and every change is logged.</p>
         </div>
-        <a class="btn btn-outline-dark font-weight-bold" href="payroll_sheet_review.php?org_id=<?= (int)$orgId ?>">Back to Sheet review</a>
+        <a class="btn btn-outline-dark font-weight-bold" href="payroll_sheet_review.php?org_id=<?= (int)$orgId ?><?= $showHiddenAdmins ? '&show_hidden=1' : '' ?>">Back to Sheet review</a>
     </div>
     <?php if ($flash !== ''): ?><div class="alert alert-info"><?= pe_h($flash) ?></div><?php endif; ?>
     <?php if ($warnings): ?><div class="alert alert-warning"><?php foreach ($warnings as $w): ?><div><?= pe_h($w) ?></div><?php endforeach; ?></div><?php endif; ?>
@@ -298,6 +310,8 @@ $header = pse_known_headers($sheetFilter);
                 </select></div>
             <div class="col-md-3"><label class="mb-0">Search</label>
                 <input name="q" class="form-control form-control-sm" value="<?= pe_h($textFilter) ?>" placeholder="name, store, any cell"></div>
+            <div class="col-md-3"><label class="mb-0 d-block">Hidden admin/test users</label>
+                <label class="mb-0"><input type="checkbox" name="show_hidden" value="1" <?= $showHiddenAdmins ? 'checked' : '' ?>> Show hidden admin/test users</label></div>
             <div class="col-md-3"><button class="btn btn-sm btn-dark">Show rows</button>
                 <a class="btn btn-sm btn-outline-secondary" href="payroll_sheet_sheet.php?org_id=<?= (int)$orgId ?>">Clear</a></div>
         </div>
