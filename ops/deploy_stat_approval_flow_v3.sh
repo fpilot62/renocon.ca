@@ -172,7 +172,8 @@ check_one() {
   return 1
 }
 restore_files() {
-  local ts=$1 src="$BK/pre-statflow-$ts"
+  local ts=$1
+  local src="$BK/pre-statflow-$ts"
   [[ -d $src ]] || { echo "No file backup at $src"; return 1; }
   local rel
   while read -r rel _ _; do
