@@ -138,11 +138,31 @@ $changed = psr_grid_save_changes(['sheet:2' => psr_summary_post_fields($target, 
 check('paid now becomes the existing proposal amount', $changed['ok'] && count($changed['changes']) === 1 && abs($changed['changes'][0]['today_pay'] - 30) < 0.001);
 check('paid now does not confirm an actual payment', (int)$changed['changes'][0]['actual_confirmed'] === 0 && $changed['writes_payroll'] === false);
 
+$gap = psr_clock_sheet_gap([
+    ['user_id' => 1, 'site_id' => 2, 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-01', 'period_end' => '2026-07-15', 'net_known' => true, 'net' => 100],
+    ['user_id' => 1, 'site_id' => 2, 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-16', 'period_end' => '2026-07-31', 'net_known' => false, 'net' => null],
+], [
+    ['source_sheet' => 'By Abdul', 'row_kind' => 'employee_record', 'user_id' => 1, 'site_id' => 2, 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-01', 'period_end' => '2026-07-15', 'net' => 80],
+    ['source_sheet' => 'By Abdul', 'row_kind' => 'employee_record', 'user_id' => 1, 'site_id' => 2, 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-16', 'period_end' => '2026-07-31', 'net' => null],
+    ['source_sheet' => 'Other', 'row_kind' => 'employee_record', 'user_id' => 1, 'site_id' => 2, 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-01', 'period_end' => '2026-07-15', 'net' => 999],
+], []);
+check('clock-in net sums known system lines and counts unknown', $gap['clock']['amount'] === 100.0 && $gap['clock']['unknown'] === 1);
+check('sheet total is only By Abdul nets and counts a blank net', $gap['sheet']['amount'] === 80.0 && $gap['sheet']['unknown'] === 1);
+check('a difference is incomplete while either side has an unknown net', $gap['difference'] === null && strpos(psr_gap_sentence($gap), 'Clock-in payroll total 100.00 (1 unknown) − Sheet total 80.00 (1 unknown) = Difference incomplete') === 0);
+$known = psr_clock_sheet_gap([
+    ['employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-01', 'period_end' => '2026-07-15', 'net_known' => true, 'net' => 100, 'user_id' => 1, 'site_id' => 2],
+    ['employee_name' => 'Sam', 'store_name' => 'South', 'period_start' => '2025-01-01', 'period_end' => '2025-01-15', 'net_known' => true, 'net' => 50, 'user_id' => 2, 'site_id' => 3, 'active' => 0],
+], [
+    ['source_sheet' => 'by abdul', 'employee_name' => 'Pat', 'store_name' => 'North', 'period_start' => '2026-07-01', 'period_end' => '2026-07-15', 'net' => 70, 'user_id' => 1, 'site_id' => 2],
+], ['person' => 'Pat', 'year' => '2026', 'active' => 'active']);
+check('filters apply to both sides and a full pair subtracts', abs($known['difference'] - 30) < 0.001 && $known['clock']['unknown'] === 0 && $known['sheet']['amount'] === 70.0);
+
 $lib = (string)file_get_contents(__DIR__ . '/../engine/sheet_summary_lib.php');
 $page = (string)file_get_contents(__DIR__ . '/../payroll_sheet_review.php');
 check('the summary library does not write payroll', stripos($lib, 'INSERT') === false && stripos($lib, 'UPDATE') === false && stripos($lib, 'DELETE') === false);
 check('the summary page is the default and can open the detailed view', strpos($page, "!== 'detail'") !== false && strpos($page, 'Detailed view') !== false && strpos($page, 'Paid now') !== false && strpos($page, 'Current pay due') !== false);
 check('paid now posts through the existing proposal save', strpos($page, 'summary_pay') !== false && strpos($page, 'preview_grid_save') !== false);
+check('the pay summary starts collapsed and the comparison line stays outside it', strpos($page, 'data-panel="pay-summary"') !== false && strpos($page, 'psr_gap_sentence') !== false && strpos($page, 'Clock-in payroll total') === false);
 
 if ($fail > 0) {
     echo $fail . " failed\n";

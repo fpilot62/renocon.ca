@@ -748,6 +748,9 @@ $payRunSummary = psr_pay_run_summary($suggestionPreview['suggestion'] ?? null, c
 $csrf = ps_csrf_token();
 $summaryView = (string)($_GET['view'] ?? '') !== 'detail';
 $paySummary = $summaryView ? psr_pay_summary($gridFiltered, psr_load_paid_dates($pdo, $orgId, $gridFiltered)) : ['lines' => [], 'totals' => []];
+$gapFilter = $gridFilter;
+$gapFilter['user_id'] = (int)$filter['user_id'];
+$clockSheetGap = psr_clock_sheet_gap($systemLines, $sheetRows, $gapFilter);
 $srcParam = trim((string)($_GET['src'] ?? ''));
 $srcRequested = array_key_exists('src', $_GET);
 $srcWanted = [];
@@ -851,6 +854,12 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .filter-toggle-word { font-weight: 600; color: #334155; white-space: nowrap; }
         .filter-body { margin-top: 12px; }
         details.psr-panel > summary { font-weight: 800; cursor: pointer; }
+        .pos-inline { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+        .pos-inline .form-control { width: auto; }
+        .pos-inline .pos-amt { width: 6.5rem; }
+        .pos-inline .pos-year { width: 5rem; }
+        .pos-inline .pos-note { width: 10rem; }
+        .pos-inline .pos-date { width: 9.5rem; }
         details.psr-panel > summary::-webkit-details-marker { margin-right: 6px; }
         tr[data-src] { cursor: pointer; }
         .sheet-source { position: fixed; top: 78px; right: 12px; width: min(540px, 46vw); max-height: calc(100vh - 96px); overflow: auto; z-index: 40; background: #fff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 14px; box-shadow: 0 10px 28px rgba(15, 23, 42, .18); }
@@ -999,6 +1008,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
             <div>
                 <h5 class="mb-1"><?= $summaryView ? 'Pay summary' : 'Pay spreadsheet' ?></h5>
+                <p class="mb-1 font-weight-bold"><?= psr_h(psr_gap_sentence($clockSheetGap)) ?></p>
                 <p class="mb-0"><?php if ($summaryView): ?>One line per employee. Paid now is a proposal for the latest unpaid period. It does not mark anyone paid.<?php else: ?><?= $groupOn ? 'Grouped by employee. The total at the bottom covers every filtered row.' : 'One row per period.' ?> Select rows, then open Approvals. Nothing here marks anyone paid.<?php endif; ?></p>
             </div>
             <div class="text-right">
@@ -1129,6 +1139,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             </div>
         </div>
         <?php if ($summaryView): ?>
+        <details class="psr-panel mt-2" data-panel="pay-summary">
+        <summary>Pay summary (<?= count($paySummary['lines']) ?>)</summary>
         <input type="hidden" name="summary_pay" value="1">
         <table class="table table-sm table-bordered paysummary mb-2">
             <thead><tr>
@@ -1186,6 +1198,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
             <?php endif; ?>
         </table>
         <button class="btn btn-outline-primary" name="preview_grid_save" value="1">Review paid now</button>
+        </details>
         <?php else: ?>
         <?php if ($groupOn): ?>
         <div class="mb-2">
@@ -1425,79 +1438,67 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <tr>
                     <td colspan="8">
                         <div class="row">
-                            <div class="col-lg-6">
-                                <strong>Period rows</strong>
-                                <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="mb-2">
-                                    <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                                    <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                                    <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
-                                    <button class="btn btn-sm btn-outline-dark" name="fill_outstanding_payroll" value="1">Fill from payroll</button>
-                                </form>
-                                <table class="table table-sm mb-2"><thead><tr><th>Period</th><th>Month</th><th>Amount</th><th></th></tr></thead><tbody>
+                            <div class="col-lg-6 mb-2">
+                                <div class="d-flex align-items-center justify-content-between mb-1">
+                                    <strong>Period rows</strong>
+                                    <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="mb-0">
+                                        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                                        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                                        <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                                        <button class="btn btn-sm btn-outline-dark py-0" name="fill_outstanding_payroll" value="1">Fill from payroll</button>
+                                    </form>
+                                </div>
                                 <?php foreach ($orow['period_rows'] as $prow): ?>
-                                    <tr>
-                                        <td><?= (int)$prow['period_no'] === 1 ? '1 (1st–15th)' : '2 (16th–end)' ?></td>
-                                        <td><?= psr_h($prow['month_label']) ?><?php if ($prow['source'] === 'manual'): ?> <span class="text-muted">manual</span><?php endif; ?></td>
-                                        <td>
-                                            <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="form-inline">
-                                                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                                                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                                                <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
-                                                <input type="hidden" name="period_row_id" value="<?= (int)$prow['id'] ?>">
-                                                <input type="hidden" name="row_version" value="<?= (int)$prow['row_version'] ?>">
-                                                <input name="amount" class="form-control form-control-sm" value="<?= $prow['amount'] === null ? '' : psr_h(number_format((float)$prow['amount'], 2, '.', '')) ?>" placeholder="unknown">
-                                                <button class="btn btn-sm btn-link" name="save_outstanding_period_row" value="1">Save</button>
-                                                <button class="btn btn-sm btn-link text-danger" name="delete_outstanding_period_row" value="1">Remove</button>
-                                            </form>
-                                        </td>
-                                        <td></td>
-                                    </tr>
+                                    <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="pos-inline mb-1">
+                                        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                                        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                                        <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                                        <input type="hidden" name="period_row_id" value="<?= (int)$prow['id'] ?>">
+                                        <input type="hidden" name="row_version" value="<?= (int)$prow['row_version'] ?>">
+                                        <span><?= (int)$prow['period_no'] === 1 ? '1' : '2' ?></span>
+                                        <span><?= psr_h($prow['month_label']) ?></span>
+                                        <input name="amount" class="form-control form-control-sm pos-amt" value="<?= $prow['amount'] === null ? '' : psr_h(number_format((float)$prow['amount'], 2, '.', '')) ?>" placeholder="unknown">
+                                        <?php if ($prow['source'] === 'manual'): ?><span class="text-muted">manual</span><?php endif; ?>
+                                        <button class="btn btn-sm btn-link py-0" name="save_outstanding_period_row" value="1">Save</button>
+                                        <button class="btn btn-sm btn-link text-danger py-0" name="delete_outstanding_period_row" value="1">Remove</button>
+                                    </form>
                                 <?php endforeach; ?>
-                                </tbody></table>
-                                <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="form-row">
+                                <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="pos-inline">
                                     <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
                                     <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
                                     <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
-                                    <div class="col-md-3"><select name="period_no" class="form-control form-control-sm"><option value="1">1 (1st–15th)</option><option value="2">2 (16th–end)</option></select></div>
-                                    <div class="col-md-3"><select name="period_month" class="form-control form-control-sm"><?php for ($m = 1; $m <= 12; $m++): ?><option value="<?= $m ?>"><?= psr_h(pos_month_name($m)) ?></option><?php endfor; ?></select></div>
-                                    <div class="col-md-2"><input name="period_year" class="form-control form-control-sm" value="<?= psr_h(date('Y')) ?>"></div>
-                                    <div class="col-md-2"><input name="amount" class="form-control form-control-sm" placeholder="Amount"></div>
-                                    <div class="col-md-2"><button class="btn btn-sm btn-outline-dark" name="add_outstanding_period_row" value="1">Add period row</button></div>
+                                    <select name="period_no" class="form-control form-control-sm"><option value="1">1 (1st–15th)</option><option value="2">2 (16th–end)</option></select>
+                                    <select name="period_month" class="form-control form-control-sm"><?php for ($m = 1; $m <= 12; $m++): ?><option value="<?= $m ?>"><?= psr_h(pos_month_name($m)) ?></option><?php endfor; ?></select>
+                                    <input name="period_year" class="form-control form-control-sm pos-year" value="<?= psr_h(date('Y')) ?>">
+                                    <input name="amount" class="form-control form-control-sm pos-amt" placeholder="Amount">
+                                    <button class="btn btn-sm btn-outline-dark py-0" name="add_outstanding_period_row" value="1">Add period row</button>
                                 </form>
                             </div>
-                            <div class="col-lg-6">
-                                <strong>Dated payments</strong>
-                                <table class="table table-sm mb-2"><thead><tr><th>Date</th><th>Amount</th><th>Note</th></tr></thead><tbody>
+                            <div class="col-lg-6 mb-2">
+                                <strong class="d-block mb-1">Dated payments</strong>
                                 <?php foreach ($orow['payments'] as $payment): ?>
-                                    <tr>
-                                        <td colspan="3">
-                                            <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="form-row">
-                                                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                                                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                                                <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
-                                                <input type="hidden" name="payment_id" value="<?= (int)$payment['id'] ?>">
-                                                <input type="hidden" name="row_version" value="<?= (int)$payment['row_version'] ?>">
-                                                <div class="col-md-3"><input type="date" name="paid_date" class="form-control form-control-sm" value="<?= psr_h((string)$payment['paid_date']) ?>"></div>
-                                                <div class="col-md-3"><input name="amount" class="form-control form-control-sm" value="<?= psr_h(number_format((float)$payment['amount'], 2, '.', '')) ?>"></div>
-                                                <div class="col-md-4"><input name="note" class="form-control form-control-sm" value="<?= psr_h((string)($payment['note'] ?? '')) ?>" placeholder="Note"></div>
-                                                <div class="col-md-2">
-                                                    <button class="btn btn-sm btn-link" name="save_outstanding_payment" value="1">Save</button>
-                                                    <button class="btn btn-sm btn-link text-danger" name="delete_outstanding_payment" value="1">Remove</button>
-                                                </div>
-                                            </form>
-                                        </td>
-                                    </tr>
+                                    <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="pos-inline mb-1">
+                                        <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                                        <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                                        <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                                        <input type="hidden" name="payment_id" value="<?= (int)$payment['id'] ?>">
+                                        <input type="hidden" name="row_version" value="<?= (int)$payment['row_version'] ?>">
+                                        <input type="date" name="paid_date" class="form-control form-control-sm pos-date" value="<?= psr_h((string)$payment['paid_date']) ?>">
+                                        <input name="amount" class="form-control form-control-sm pos-amt" value="<?= psr_h(number_format((float)$payment['amount'], 2, '.', '')) ?>">
+                                        <input name="note" class="form-control form-control-sm pos-note" value="<?= psr_h((string)($payment['note'] ?? '')) ?>" placeholder="Note">
+                                        <button class="btn btn-sm btn-link py-0" name="save_outstanding_payment" value="1">Save</button>
+                                        <button class="btn btn-sm btn-link text-danger py-0" name="delete_outstanding_payment" value="1">Remove</button>
+                                    </form>
                                 <?php endforeach; ?>
-                                </tbody></table>
-                                <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="form-row">
+                                <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="pos-inline">
                                     <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
                                     <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
                                     <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
                                     <input type="hidden" name="payment_id" value="0">
-                                    <div class="col-md-3"><input type="date" name="paid_date" class="form-control form-control-sm"></div>
-                                    <div class="col-md-3"><input name="amount" class="form-control form-control-sm" placeholder="Amount"></div>
-                                    <div class="col-md-4"><input name="note" class="form-control form-control-sm" placeholder="Note"></div>
-                                    <div class="col-md-2"><button class="btn btn-sm btn-outline-dark" name="save_outstanding_payment" value="1">Add payment</button></div>
+                                    <input type="date" name="paid_date" class="form-control form-control-sm pos-date">
+                                    <input name="amount" class="form-control form-control-sm pos-amt" placeholder="Amount">
+                                    <input name="note" class="form-control form-control-sm pos-note" placeholder="Note">
+                                    <button class="btn btn-sm btn-outline-dark py-0" name="save_outstanding_payment" value="1">Add payment</button>
                                 </form>
                             </div>
                         </div>
