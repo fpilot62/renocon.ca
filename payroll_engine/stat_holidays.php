@@ -278,6 +278,311 @@ if (!function_exists('sh_money')) {
     }
 }
 
+if (!function_exists('sh_site_timezone_name')) {
+    /** Site clock. Punches are stored as that clock's wall time. The server itself is UTC. */
+    function sh_site_timezone_name(?string $tz, string $province = ''): string {
+        $tz = trim((string)$tz);
+        if ($tz !== '' && in_array($tz, timezone_identifiers_list(), true)) {
+            return $tz;
+        }
+        $prov = sh_normalize_province($province);
+        if ($prov === 'BC') {
+            return 'America/Vancouver';
+        }
+        if ($prov === 'SK') {
+            return 'America/Regina';
+        }
+        return 'America/Toronto';
+    }
+}
+
+if (!function_exists('sh_site_timezone')) {
+    function sh_site_timezone(PDO $pdo, int $siteId, string $province = ''): string {
+        $tz = '';
+        try {
+            $st = $pdo->prepare('SELECT Timezone FROM sites WHERE SId=? LIMIT 1');
+            $st->execute([$siteId]);
+            $tz = (string)$st->fetchColumn();
+        } catch (Throwable $e) {
+            $tz = '';
+        }
+        return sh_site_timezone_name($tz, $province);
+    }
+}
+
+if (!function_exists('sh_wall_time')) {
+    function sh_wall_time(string $raw, DateTimeZone $zone): ?DateTimeImmutable {
+        $raw = trim($raw);
+        if ($raw === '' || strncmp($raw, '0000-00-00', 10) === 0) {
+            return null;
+        }
+        $raw = substr(str_replace('T', ' ', $raw), 0, 19);
+        $dt = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $raw, $zone);
+        if ($dt instanceof DateTimeImmutable) {
+            return $dt;
+        }
+        $dt = DateTimeImmutable::createFromFormat('Y-m-d H:i', substr($raw, 0, 16), $zone);
+        return $dt instanceof DateTimeImmutable ? $dt : null;
+    }
+}
+
+if (!function_exists('sh_overlap_seconds')) {
+    function sh_overlap_seconds(DateTimeImmutable $a0, DateTimeImmutable $a1, DateTimeImmutable $b0, DateTimeImmutable $b1): int {
+        $start = max($a0->getTimestamp(), $b0->getTimestamp());
+        $end = min($a1->getTimestamp(), $b1->getTimestamp());
+        return max(0, $end - $start);
+    }
+}
+
+if (!function_exists('sh_holiday_window')) {
+    /** @return array{0:DateTimeImmutable,1:DateTimeImmutable} local midnight to the next local midnight */
+    function sh_holiday_window(string $holidayDate, string $tz): array {
+        $zone = new DateTimeZone(sh_site_timezone_name($tz));
+        $start = new DateTimeImmutable(substr($holidayDate, 0, 10) . ' 00:00:00', $zone);
+        return [$start, $start->modify('+1 day')];
+    }
+}
+
+if (!function_exists('sh_shift_holiday_seconds')) {
+    /**
+     * Seconds of one shift that fall on the holiday's local date, after breaks
+     * that also fall on that date. Wall-clock strings are read in $tz.
+     *
+     * @param list<array{0:string,1:string}> $breaks
+     */
+    function sh_shift_holiday_seconds(string $clockIn, string $clockOut, array $breaks, string $holidayDate, string $tz): int {
+        $zone = new DateTimeZone(sh_site_timezone_name($tz));
+        $in = sh_wall_time($clockIn, $zone);
+        $out = sh_wall_time($clockOut, $zone);
+        if (!$in || !$out || $out <= $in) {
+            return 0;
+        }
+        [$day0, $day1] = sh_holiday_window($holidayDate, $tz);
+        $onHoliday = sh_overlap_seconds($in, $out, $day0, $day1);
+        if ($onHoliday <= 0) {
+            return 0;
+        }
+        $breakOnHoliday = 0;
+        foreach ($breaks as $break) {
+            $b0 = sh_wall_time((string)($break[0] ?? ''), $zone);
+            $b1 = sh_wall_time((string)($break[1] ?? ''), $zone);
+            if (!$b0 || !$b1 || $b1 <= $b0) {
+                continue;
+            }
+            $breakOnHoliday += sh_overlap_seconds($b0, $b1, $in < $day0 ? $day0 : $in, $out > $day1 ? $day1 : $out);
+        }
+        return max(0, $onHoliday - $breakOnHoliday);
+    }
+}
+
+if (!function_exists('sh_legacy_shift_seconds')) {
+    /** Whole shift minus every break, which is what the old DATE(clock_in) query counted. */
+    function sh_legacy_shift_seconds(string $clockIn, string $clockOut, array $breaks): int {
+        $zone = new DateTimeZone('UTC');
+        $in = sh_wall_time($clockIn, $zone);
+        $out = sh_wall_time($clockOut, $zone);
+        if (!$in || !$out || $out <= $in) {
+            return 0;
+        }
+        $span = $out->getTimestamp() - $in->getTimestamp();
+        $off = 0;
+        foreach ($breaks as $break) {
+            $b0 = sh_wall_time((string)($break[0] ?? ''), $zone);
+            $b1 = sh_wall_time((string)($break[1] ?? ''), $zone);
+            if ($b0 && $b1 && $b1 > $b0) {
+                $off += $b1->getTimestamp() - $b0->getTimestamp();
+            }
+        }
+        return max(0, $span - $off);
+    }
+}
+
+if (!function_exists('sh_hours_from_seconds')) {
+    function sh_hours_from_seconds(int $seconds): float {
+        return round($seconds / 3600, 2);
+    }
+}
+
+if (!function_exists('sh_holiday_hours_for_shifts')) {
+    /**
+     * @param list<array{clock_in:string,clock_out:string,breaks?:list<array{0:string,1:string}>}> $shifts
+     * @return array{hours:float,legacy_hours:float}
+     */
+    function sh_holiday_hours_for_shifts(array $shifts, string $holidayDate, string $tz): array {
+        $holiday = substr($holidayDate, 0, 10);
+        $now = 0;
+        $old = 0;
+        foreach ($shifts as $shift) {
+            $breaks = $shift['breaks'] ?? [];
+            $now += sh_shift_holiday_seconds((string)$shift['clock_in'], (string)$shift['clock_out'], $breaks, $holiday, $tz);
+            if (substr((string)$shift['clock_in'], 0, 10) === $holiday) {
+                $old += sh_legacy_shift_seconds((string)$shift['clock_in'], (string)$shift['clock_out'], $breaks);
+            }
+        }
+        return ['hours' => sh_hours_from_seconds($now), 'legacy_hours' => sh_hours_from_seconds($old)];
+    }
+}
+
+if (!function_exists('sh_premium_pay')) {
+    function sh_premium_pay(float $hours, float $rate): float {
+        if ($hours <= 0 || $rate <= 0) {
+            return 0.0;
+        }
+        return round($hours * $rate * 1.5, 2);
+    }
+}
+
+if (!function_exists('sh_worked_pay_label')) {
+    function sh_worked_pay_label(float $holidayPay, float $hours, float $premium): string {
+        $holidayPay = round($holidayPay, 2);
+        if ($hours <= 0) {
+            return 'Holiday pay $' . number_format($holidayPay, 2);
+        }
+        $total = round($holidayPay + $premium, 2);
+        return 'Holiday pay $' . number_format($holidayPay, 2)
+            . ' + Worked ' . number_format($hours, 2) . 'h × 1.5 = $' . number_format($premium, 2)
+            . ', total $' . number_format($total, 2);
+    }
+}
+
+if (!function_exists('sh_worked_change_flag')) {
+    function sh_worked_change_flag(float $oldHours, float $oldPay, float $newHours, float $newPay, bool $locked): string {
+        if (!$locked) {
+            return '';
+        }
+        if (abs($oldHours - $newHours) < 0.009 && abs($oldPay - $newPay) < 0.009) {
+            return '';
+        }
+        return 'Worked holiday hours would change from ' . number_format($oldHours, 2) . 'h ($' . number_format($oldPay, 2)
+            . ') to ' . number_format($newHours, 2) . 'h ($' . number_format($newPay, 2) . '). Approved pay was not changed.';
+    }
+}
+
+if (!function_exists('sh_load_holiday_shifts')) {
+    /**
+     * Shifts that touch the holiday's local calendar day, including a shift that
+     * started the day before and runs past local midnight.
+     *
+     * @return list<array{clock_in:string,clock_out:string,breaks:list<array{0:string,1:string}>}>
+     */
+    function sh_load_holiday_shifts(PDO $pdo, int $userId, int $siteId, string $holidayDate): array {
+        $holiday = substr($holidayDate, 0, 10);
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $holiday)) {
+            return [];
+        }
+        $bounds = new DateTimeImmutable($holiday . ' 00:00:00', new DateTimeZone('UTC'));
+        $start = $bounds->format('Y-m-d H:i:s');
+        $end = $bounds->modify('+1 day')->format('Y-m-d H:i:s');
+        $earliest = $bounds->modify('-36 hours')->format('Y-m-d H:i:s');
+        try {
+            $st = $pdo->prepare(
+                "SELECT id, clock_in, clock_out FROM attendance
+                  WHERE user_id=? AND site_id=?
+                    AND clock_in >= ? AND clock_in < ?
+                    AND clock_out IS NOT NULL AND clock_out <> '' AND clock_out <> '0000-00-00 00:00:00'
+                    AND clock_out > ?"
+            );
+            $st->execute([$userId, $siteId, $earliest, $end, $start]);
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return [];
+        }
+        $ids = [];
+        foreach ($rows as $row) {
+            $ids[] = (int)$row['id'];
+        }
+        $breaks = [];
+        if ($ids) {
+            try {
+                $in = implode(',', array_fill(0, count($ids), '?'));
+                $bst = $pdo->prepare("SELECT shift_id, break_start, break_end FROM breaks WHERE shift_id IN ($in)");
+                $bst->execute($ids);
+                foreach ($bst->fetchAll(PDO::FETCH_ASSOC) as $break) {
+                    $breaks[(int)$break['shift_id']][] = [(string)$break['break_start'], (string)$break['break_end']];
+                }
+            } catch (Throwable $e) {
+                $breaks = [];
+            }
+        }
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = [
+                'clock_in' => (string)$row['clock_in'],
+                'clock_out' => (string)$row['clock_out'],
+                'breaks' => $breaks[(int)$row['id']] ?? [],
+            ];
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('sh_holiday_worked')) {
+    /** @return array{hours:float,legacy_hours:float,premium:float,legacy_premium:float,timezone:string} */
+    function sh_holiday_worked(PDO $pdo, int $userId, int $siteId, string $holidayDate, string $province, float $rate): array {
+        $tz = sh_site_timezone($pdo, $siteId, $province);
+        $parts = sh_holiday_hours_for_shifts(sh_load_holiday_shifts($pdo, $userId, $siteId, $holidayDate), $holidayDate, $tz);
+        return $parts + [
+            'premium' => sh_premium_pay($parts['hours'], $rate),
+            'legacy_premium' => sh_premium_pay($parts['legacy_hours'], $rate),
+            'timezone' => $tz,
+        ];
+    }
+}
+
+if (!function_exists('sh_post_worked_premium')) {
+    /**
+     * Add the 1.5× line for hours on the holiday date. Does nothing if one
+     * already exists, so an approved line is not rewritten.
+     */
+    function sh_post_worked_premium(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, float $hours, float $rate, float $premium, int $byUser): bool {
+        if ($hours <= 0 || $premium <= 0) {
+            return false;
+        }
+        $have = $pdo->prepare(
+            "SELECT id FROM payroll_finalized
+              WHERE user_id=? AND site_id=? AND work_date=? AND category='Holiday Worked' LIMIT 1"
+        );
+        $have->execute([$userId, $siteId, substr($holidayDate, 0, 10)]);
+        if ($have->fetchColumn()) {
+            return false;
+        }
+        if (!function_exists('pe_line')) {
+            require_once __DIR__ . '/payroll_engine.php';
+        }
+        $rates = function_exists('pe_rates') ? pe_rates($pdo) : [];
+        $vacRate = function_exists('pe_vacation_rate') ? pe_vacation_rate($pdo, $userId, $siteId, $holidayDate) : 0.0;
+        $ded = pe_line($premium, $vacRate, $rates, [
+            'pdo' => $pdo, 'user_id' => $userId, 'site_id' => $siteId, 'org_id' => $orgId,
+            'work_date' => $holidayDate, 'pay_date' => $holidayDate,
+        ]);
+        $comment = 'Hours on the holiday date only, × 1.5 × rate. Public holiday pay is the separate Statutory Holiday line.';
+        $ins = $pdo->prepare(
+            "INSERT INTO payroll_finalized
+                (user_id, org_id, site_id, work_date, pay_period_end, category, display_label, pay_type,
+                 reg_hours, hourly_rate, reg_pay, total_gross, cpp, ei, income_tax, cpp_er, ei_er, wcb, vac,
+                 status, finalized_by, comments)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)"
+        );
+        $ins->execute([
+            $userId, $orgId, $siteId, substr($holidayDate, 0, 10), substr($holidayDate, 0, 10),
+            'Holiday Worked', $holidayName . ' — Hours worked @ 1.5x', 'Statutory',
+            round($hours, 2), $rate, $premium, $premium,
+            (float)($ded['cpp'] ?? 0), (float)($ded['ei'] ?? 0), (float)($ded['income_tax'] ?? 0),
+            (float)($ded['cpp_er'] ?? 0), (float)($ded['ei_er'] ?? 0), (float)($ded['wcb'] ?? 0), (float)($ded['vac'] ?? 0),
+            $byUser, $comment,
+        ]);
+        $id = (int)$pdo->lastInsertId();
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        if ($id > 0 && isset($cols['stat_approval_status'])) {
+            $pdo->prepare("UPDATE payroll_finalized SET stat_approval_status='approved' WHERE id=?")->execute([$id]);
+        }
+        if ($id > 0 && isset($cols['overtime_hours'])) {
+            $pdo->prepare('UPDATE payroll_finalized SET overtime_hours=? WHERE id=?')->execute([round($hours, 2), $id]);
+        }
+        return $id > 0;
+    }
+}
+
 if (!function_exists('sh_start_date')) {
     function sh_start_date(PDO $pdo, int $userId, int $siteId): ?string {
         try {
@@ -1274,6 +1579,20 @@ if (!function_exists('sh_decide_stat_line')) {
         $ok = sh_approve_stat_line($pdo, $orgId, (int)$row['id'], $actorId, $amount, $hours, $reason);
         if (!$ok && !$existed) {
             sh_drop_unapproved_stat($pdo, $orgId, $userId, $siteId, $holidayDate);
+        }
+        if ($ok) {
+            try {
+                $rate = function_exists('pe_profile_hourly_rate') ? pe_profile_hourly_rate($pdo, $userId, $holidayDate) : 0.0;
+                if ($rate <= 0) {
+                    $rst = $pdo->prepare('SELECT hourly_rate FROM users WHERE id=?');
+                    $rst->execute([$userId]);
+                    $rate = (float)$rst->fetchColumn();
+                }
+                $worked = sh_holiday_worked($pdo, $userId, $siteId, $holidayDate, $province, $rate);
+                sh_post_worked_premium($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $worked['hours'], $rate, $worked['premium'], $actorId);
+            } catch (Throwable $e) {
+                // The statutory line is already approved. Leave it. The premium can be posted later.
+            }
         }
         return $ok;
     }
