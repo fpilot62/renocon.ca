@@ -19,6 +19,7 @@ if (PHP_SAPI !== 'cli') {
 $app = getenv('PAYROLL_APP') ?: '/home/renocon/public_html/payroll';
 require $app . '/db.php';
 require $app . '/engine/outstanding_summary_lib.php';
+require $app . '/engine/sheet_name_link_lib.php';
 if (!isset($pdo) || !$pdo instanceof PDO) {
     fwrite(STDERR, "db.php did not provide a connection\n");
     exit(1);

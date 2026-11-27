@@ -122,12 +122,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_row'])) {
         $rowId = (int)($_POST['row_id'] ?? 0);
         $post = [
             'row_version' => $_POST['row_version'] ?? '',
-            'user_id' => $_POST['user_id'] ?? '',
-            'site_id' => $_POST['site_id'] ?? '',
             'net' => $_POST['net'] ?? '',
             'net_unknown' => !empty($_POST['net_unknown']) ? '1' : '',
             'draft_notes' => $_POST['draft_notes'] ?? '',
         ];
+        if (array_key_exists('user_id', $_POST)) {
+            $post['user_id'] = $_POST['user_id'];
+        }
+        if (array_key_exists('site_id', $_POST)) {
+            $post['site_id'] = $_POST['site_id'];
+        }
         $n = pse_apply_edit($pdo, $orgId, $rowId, $actorId, $post);
         $_SESSION['pse_flash'] = $n > 0
             ? 'Saved ' . $n . ' change(s) to the draft. Payroll was not changed and nobody was marked paid.'
@@ -138,29 +142,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_row'])) {
         $warnings[] = $e->getMessage();
     }
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['link_person'])) {
-    try {
-        $siteRaw = (int)($_POST['site_id'] ?? 0);
-        $res = pse_apply_person_link($pdo, $orgId, (string)($_POST['sheet_name'] ?? ''), (int)($_POST['user_id'] ?? 0), $siteRaw > 0 ? $siteRaw : null, $actorId);
-        $_SESSION['pse_flash'] = 'Linked ' . $res['linked'] . ' row(s). Already linked: ' . $res['unchanged']
-            . '. Skipped because they have an active approval: ' . $res['skipped_locked'] . '. Payroll was not changed and nobody was marked paid.';
-        header('Location: ' . pe_url(['row' => (int)($_POST['row_id'] ?? 0) ?: null], $orgId));
-        exit;
-    } catch (Throwable $e) {
-        $warnings[] = $e->getMessage();
-    }
-}
 
 $showHiddenAdmins = sheet_show_hidden_requested();
-$users = pse_org_users($pdo, $orgId);
-if (!$showHiddenAdmins) {
-    foreach ($users as $hideId => $hideName) {
-        if (sheet_person_is_hidden((int)$hideId, (string)$hideName)) {
-            unset($users[$hideId]);
-        }
-    }
-}
-$sites = pse_org_sites($pdo, $orgId);
 
 $locked = [];
 $lk = $pdo->prepare('SELECT DISTINCT row_id FROM payroll_sheet_approval_effects WHERE org_id = ? AND undone_at IS NULL');
@@ -244,11 +227,9 @@ usort($rawCols, static function ($a, $b) {
 });
 $window = null;
 $audit = [];
-$sameName = 0;
 if ($selected) {
     $window = pse_source_window($pdo, $orgId, $selected, 6);
     $audit = pse_audit_fetch($pdo, $orgId, (int)$selected['id'], 20);
-    $sameName = count(pse_rows_for_name($pdo, $orgId, (string)$selected['employee_name']));
 }
 $header = pse_known_headers($sheetFilter);
 ?>
@@ -422,20 +403,7 @@ $header = pse_known_headers($sheetFilter);
                     <input type="hidden" name="row_version" value="<?= (int)($selected['row_version'] ?? 1) ?>">
                     <input type="hidden" name="sheet" value="<?= pe_h($sheetFilter) ?>">
                     <input type="hidden" name="name" value="<?= pe_h($nameFilter) ?>">
-                    <div class="form-group mb-2"><label class="mb-0">Employee</label>
-                        <select name="user_id" class="form-control form-control-sm">
-                            <option value="">Not linked</option>
-                            <?php foreach ($users as $uid => $uname): ?>
-                                <option value="<?= (int)$uid ?>" <?= (int)$selected['user_id'] === $uid ? 'selected' : '' ?>><?= pe_h($uname) ?> #<?= (int)$uid ?></option>
-                            <?php endforeach; ?>
-                        </select></div>
-                    <div class="form-group mb-2"><label class="mb-0">Store</label>
-                        <select name="site_id" class="form-control form-control-sm">
-                            <option value="">Not set</option>
-                            <?php foreach ($sites as $sid => $sname): ?>
-                                <option value="<?= (int)$sid ?>" <?= (int)$selected['site_id'] === $sid ? 'selected' : '' ?>><?= pe_h($sname) ?></option>
-                            <?php endforeach; ?>
-                        </select></div>
+                    <div class="text-muted mb-2">Linked employee: <?= (int)$selected['user_id'] > 0 ? pe_h((string)($selected['linked_name'] ?? '')) . ' #' . (int)$selected['user_id'] : 'not linked' ?></div>
                     <div class="form-row">
                         <div class="col-6"><label class="mb-0">Net</label>
                             <input name="net" class="form-control form-control-sm" value="<?= $selected['net'] === null ? '' : pe_h(number_format((float)$selected['net'], 2, '.', '')) ?>" placeholder="blank = unknown"></div>
@@ -446,29 +414,6 @@ $header = pse_known_headers($sheetFilter);
                     <button class="btn btn-sm btn-primary" name="save_row" value="1">Save draft edit</button>
                     <span class="text-muted">Draft only. Not approved, not paid.</span>
                 </form>
-                <?php if ($sameName > 1 || (int)$selected['user_id'] === 0): ?>
-                <hr>
-                <form method="POST" onsubmit="return confirm('Link all <?= (int)$sameName ?> rows named <?= pe_h(addslashes((string)$selected['employee_name'])) ?> to the chosen employee?');">
-                    <input type="hidden" name="csrf_token" value="<?= pe_h($csrf) ?>">
-                    <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                    <input type="hidden" name="row_id" value="<?= (int)$selected['id'] ?>">
-                    <input type="hidden" name="sheet_name" value="<?= pe_h($selected['employee_name']) ?>">
-                    <input type="hidden" name="sheet" value="<?= pe_h($sheetFilter) ?>">
-                    <input type="hidden" name="name" value="<?= pe_h($nameFilter) ?>">
-                    <label class="mb-0">Link all <?= (int)$sameName ?> row(s) named "<?= pe_h($selected['employee_name']) ?>" to</label>
-                    <div class="form-row">
-                        <div class="col-7"><select name="user_id" class="form-control form-control-sm" required>
-                            <option value="">Choose an employee</option>
-                            <?php foreach ($users as $uid => $uname): ?><option value="<?= (int)$uid ?>"><?= pe_h($uname) ?> #<?= (int)$uid ?></option><?php endforeach; ?>
-                        </select></div>
-                        <div class="col-5"><select name="site_id" class="form-control form-control-sm">
-                            <option value="">Keep each row's store</option>
-                            <?php foreach ($sites as $sid => $sname): ?><option value="<?= (int)$sid ?>"><?= pe_h($sname) ?></option><?php endforeach; ?>
-                        </select></div>
-                    </div>
-                    <button class="btn btn-sm btn-outline-primary mt-1" name="link_person" value="1">Link all rows for this name</button>
-                </form>
-                <?php endif; ?>
                 <?php endif; ?>
             </div>
 
