@@ -927,6 +927,21 @@ if (!function_exists('sh_set_payroll_line_state')) {
                     AND category IN ('Statutory Holiday','Holiday Worked')"
             );
             $upd->execute([$state, (int)$line['user_id'], (int)$line['site_id'], $line['work_date']]);
+            try {
+                $cmt = $pdo->prepare(
+                    "SELECT id, COALESCE(comments,'') AS comments FROM payroll_finalized
+                      WHERE user_id=? AND site_id=? AND work_date=?
+                        AND category IN ('Statutory Holiday','Holiday Worked')"
+                );
+                $cmt->execute([(int)$line['user_id'], (int)$line['site_id'], $line['work_date']]);
+                $saveComment = $pdo->prepare('UPDATE payroll_finalized SET comments=? WHERE id=?');
+                foreach ($cmt->fetchAll(PDO::FETCH_ASSOC) as $held) {
+                    $text = (string)$held['comments'];
+                    $text = ($state === 'pending' || $state === 'ignored') ? sh_with_admin_hold($text) : sh_without_admin_hold($text);
+                    $saveComment->execute([$text, (int)$held['id']]);
+                }
+            } catch (Throwable $e) {
+            }
             $pair = $pdo->prepare(
                 "SELECT category, COALESCE(stat_approval_status,'') AS stat_approval_status, COALESCE(status,'') AS status
                    FROM payroll_finalized
@@ -1956,7 +1971,10 @@ if (!function_exists('sh_decide_stat_line')) {
             return false;
         }
         if ($row['approval'] === 'approved' || (float)$row['paid_amount'] > 0.02 || in_array($row['pay_status'], ['paid', 'remitted'], true)) {
-            return false;
+            if ($existed || (float)$row['paid_amount'] > 0.02 || in_array($row['pay_status'], ['paid', 'remitted'], true)) {
+                return false;
+            }
+            return true;
         }
         $ok = sh_approve_stat_line($pdo, $orgId, (int)$row['id'], $actorId, $amount, $hours, $reason);
         if (!$ok && !$existed) {
@@ -1993,6 +2011,7 @@ if (!function_exists('sh_post_stat_line')) {
         $flag = sh_stat_flag_text($pdo, $userId, $siteId, $holidayDate, $province, $asOf);
         if (sh_stat_line_exists($pdo, $userId, $siteId, $holidayDate)) {
             sh_refresh_pending_stat($pdo, $userId, $siteId, $holidayDate, (float)$calc['amount'], $flag);
+            sh_bring_stat_into_pay($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, $byUser);
             return false;
         }
         if (!function_exists('pe_line')) {
@@ -2044,7 +2063,141 @@ if (!function_exists('sh_post_stat_line')) {
             $byUser, $comment,
         ]);
         sh_store_stat_meta($pdo, (int)$pdo->lastInsertId(), (float)$calc['amount'], $flag);
+        sh_bring_stat_into_pay($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $province, $byUser);
         return true;
+    }
+}
+
+if (!function_exists('sh_admin_hold_marker')) {
+    function sh_admin_hold_marker(): string {
+        return '[[stat-admin-hold]]';
+    }
+}
+
+if (!function_exists('sh_comments_admin_held')) {
+    function sh_comments_admin_held(string $comments): bool {
+        return strpos($comments, sh_admin_hold_marker()) !== false;
+    }
+}
+
+if (!function_exists('sh_with_admin_hold')) {
+    function sh_with_admin_hold(string $comments): string {
+        if (sh_comments_admin_held($comments)) {
+            return $comments;
+        }
+        return trim($comments . ' ' . sh_admin_hold_marker());
+    }
+}
+
+if (!function_exists('sh_without_admin_hold')) {
+    function sh_without_admin_hold(string $comments): string {
+        return trim(str_replace(sh_admin_hold_marker(), '', $comments));
+    }
+}
+
+if (!function_exists('sh_bring_stat_into_pay')) {
+    /**
+     * A calculated stat line is in payroll immediately. It is not marked paid.
+     * An already approved line is left as posted. Pending or Ignore with the
+     * admin marker stays out.
+     */
+    function sh_bring_stat_into_pay(PDO $pdo, int $orgId, int $userId, int $siteId, string $holidayDate, string $holidayName, string $province, int $byUser): bool {
+        $holidayDate = substr($holidayDate, 0, 10);
+        try {
+            $st = $pdo->prepare(
+                "SELECT id, COALESCE(stat_approval_status,'') AS approval, COALESCE(comments,'') AS comments,
+                        COALESCE(paid_amount,0) AS paid, LOWER(COALESCE(status,'')) AS pay_status
+                   FROM payroll_finalized
+                  WHERE user_id=? AND site_id=? AND work_date=? AND category='Statutory Holiday'
+                  ORDER BY id DESC LIMIT 1"
+            );
+            $st->execute([$userId, $siteId, $holidayDate]);
+            $row = $st->fetch(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return false;
+        }
+        if (!$row) {
+            return false;
+        }
+        if ((float)$row['paid'] > 0.02 || in_array((string)$row['pay_status'], ['paid', 'remitted'], true)) {
+            return false;
+        }
+        if (sh_comments_admin_held((string)$row['comments'])) {
+            return false;
+        }
+        $approval = strtolower(trim((string)$row['approval']));
+        if ($approval !== 'pending') {
+            return false;
+        }
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        if (isset($cols['stat_approved_by'])) {
+            $pdo->prepare("UPDATE payroll_finalized SET stat_approval_status='approved', stat_approved_by=? WHERE id=?")->execute([$byUser > 0 ? $byUser : null, (int)$row['id']]);
+        } else {
+            $pdo->prepare("UPDATE payroll_finalized SET stat_approval_status='approved' WHERE id=?")->execute([(int)$row['id']]);
+        }
+        try {
+            $pdo->prepare(
+                "UPDATE payroll_finalized SET stat_approval_status='approved'
+                  WHERE user_id=? AND site_id=? AND work_date=? AND category='Holiday Worked'
+                    AND COALESCE(stat_approval_status,'')='pending'"
+            )->execute([$userId, $siteId, $holidayDate]);
+        } catch (Throwable $e) {
+        }
+        try {
+            $rate = function_exists('pe_profile_hourly_rate') ? pe_profile_hourly_rate($pdo, $userId, $holidayDate) : 0.0;
+            if ($rate <= 0) {
+                $rst = $pdo->prepare('SELECT hourly_rate FROM users WHERE id=?');
+                $rst->execute([$userId]);
+                $rate = (float)$rst->fetchColumn();
+            }
+            $worked = sh_holiday_worked($pdo, $userId, $siteId, $holidayDate, $province, $rate);
+            sh_post_worked_premium($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, (float)$worked['hours'], $rate, (float)$worked['premium'], $byUser);
+            sh_sync_regular_hold($pdo, $userId, $siteId, $holidayDate, (float)$worked['hours'], $rate, (float)$worked['hours'] > 0);
+        } catch (Throwable $e) {
+            return true;
+        }
+        return true;
+    }
+}
+
+if (!function_exists('sh_release_pending_stat')) {
+    /** Put calculated stat lines into pay. Skips rows an admin set to Pending or Ignore, and skips rows already approved. */
+    function sh_release_pending_stat(PDO $pdo, int $orgId, string $from, string $to): int {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
+            return 0;
+        }
+        $sql = "SELECT f.user_id, f.site_id, f.work_date, f.display_label, COALESCE(s.province,'ON') AS province
+                  FROM payroll_finalized f
+                  INNER JOIN users u ON u.id = f.user_id
+                  LEFT JOIN sites s ON s.SId = f.site_id
+                 WHERE f.category='Statutory Holiday'
+                   AND COALESCE(f.stat_approval_status,'')='pending'
+                   AND COALESCE(f.comments,'') NOT LIKE '%[[stat-admin-hold]]%'
+                   AND COALESCE(f.paid_amount,0) <= 0.02
+                   AND f.work_date BETWEEN ? AND ?";
+        $params = [$from, $to];
+        if ($orgId > 0) {
+            $sql .= ' AND u.org_id=?';
+            $params[] = $orgId;
+        }
+        try {
+            $st = $pdo->prepare($sql);
+            $st->execute($params);
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return 0;
+        }
+        $n = 0;
+        foreach ($rows as $row) {
+            $name = trim((string)($row['display_label'] ?? ''));
+            if ($name === '') {
+                $name = 'Public holiday';
+            }
+            if (sh_bring_stat_into_pay($pdo, $orgId, (int)$row['user_id'], (int)$row['site_id'], (string)$row['work_date'], $name, (string)$row['province'], 0)) {
+                $n++;
+            }
+        }
+        return $n;
     }
 }
 

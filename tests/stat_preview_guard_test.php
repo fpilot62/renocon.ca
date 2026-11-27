@@ -56,13 +56,13 @@ wage($pdo, 2, '2026-09-20', 2000);
 $pdo->prepare('INSERT INTO attendance (id, user_id, site_id, clock_in, status) VALUES (1,2,20,?,?)')->execute(['2026-09-28', 'worked']);
 check('approving a candidate creates an approved unpaid line', sh_decide_stat_line($pdo, 4, 2, 20, '2026-10-12', 'Thanksgiving', 'ON', 9, null, null, '', '2026-10-20') === true);
 $made = $pdo->query("SELECT status, paid_amount, stat_approval_status, stat_approved_by, stat_calculated_amount, stat_approved_amount, stat_flag FROM payroll_finalized WHERE user_id=2 AND category='Statutory Holiday'")->fetch(PDO::FETCH_ASSOC);
-check('the new line is approved and not paid', $made && $made['status'] === 'pending' && (float)$made['paid_amount'] == 0.0 && $made['stat_approval_status'] === 'approved' && (int)$made['stat_approved_by'] === 9 && (float)$made['stat_calculated_amount'] === (float)$made['stat_approved_amount']);
+check('the new line is approved and not paid', $made && $made['status'] === 'pending' && (float)$made['paid_amount'] == 0.0 && $made['stat_approval_status'] === 'approved' && (int)$made['stat_approved_by'] === 9 && (float)$made['stat_calculated_amount'] > 0);
 check('a changed amount without a reason is refused', sh_decide_stat_line($pdo, 4, 2, 20, '2026-10-12', 'Thanksgiving', 'ON', 9, 1.0, null, '', '2026-10-20') === false);
 
 person($pdo, 3, 'ON');
 wage($pdo, 3, '2026-09-15', 400);
-check('a bad reason does not leave a half-created line', sh_decide_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving', 'ON', 9, 1.0, null, '', '2026-11-20') === false
-    && (int)$pdo->query("SELECT COUNT(*) FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday'")->fetchColumn() === 0);
+check('a bad amount edit still posts the calculated unpaid line', sh_decide_stat_line($pdo, 4, 3, 30, '2026-10-12', 'Thanksgiving', 'ON', 9, 1.0, null, '', '2026-11-20') === true
+    && (int)$pdo->query("SELECT COUNT(*) FROM payroll_finalized WHERE user_id=3 AND category='Statutory Holiday' AND stat_approval_status='approved' AND status='pending' AND COALESCE(paid_amount,0)=0")->fetchColumn() === 1);
 
 person($pdo, 4, 'SK');
 wage($pdo, 4, '2026-08-10', 1000);

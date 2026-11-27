@@ -439,7 +439,9 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
 
     $holHrs = (float)($row['holiday_hours'] ?? 0);
     $workedPay = (float)($row['worked_pay'] ?? 0);
-    if ($holHrs > 0 && empty($row['orig_paid']) && empty($row['work_posted'])) {
+    if (function_exists('sh_bring_stat_into_pay')) {
+        sh_bring_stat_into_pay($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, (string)($row['province'] ?? 'ON'), $byUser);
+    } elseif ($holHrs > 0 && empty($row['orig_paid']) && empty($row['work_posted'])) {
         sh_sync_regular_hold($pdo, $userId, $siteId, $holidayDate, $holHrs, (float)$row['hourly_rate'], $holHrs > 0);
     }
     if (function_exists('pe_refresh_period_stat')) {
@@ -606,7 +608,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
 <div class="wrap">
 <?php if (file_exists(__DIR__.'/payroll_help.php')) { require_once __DIR__.'/payroll_help.php'; echo payroll_help_panel('generate_stat_shifts.php'); } ?>
 <h2>Statutory Holiday Pay</h2>
-<p class="small-note">One list for the pay period. Approving posts public holiday pay, and the worked shift shows holiday hours at 1.5× plus the leftover hours at the regular rate. Pending or Ignore puts that shift back to plain regular pay. An already approved line is left as posted and only flagged when the hours would change.</p>
+<p class="small-note">One list for the pay period. A calculated holiday goes into payroll on its own: public holiday pay, holiday-date hours at 1.5×, and those hours taken off the worked shift. Nothing is marked paid. Pending or Ignore on the payroll row takes the lines out and puts the hours back. An already approved line is left as posted.</p>
 <?php if($message):?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif;?>
 
 <form class="card card-body mb-3 period-card" method="get" id="statPeriodForm">
@@ -680,7 +682,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
   <input type="hidden" name="province" value="<?= htmlspecialchars($provinceFilter) ?>">
   <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
   <button class="btn btn-outline-primary" name="create_pending_rows" value="1" id="statCreatePendingBtn">Create pending rows</button>
-  <span class="small-note ml-2">Posts a pending line for each eligible person. Approval stays a separate admin action.</span>
+  <span class="small-note ml-2">Puts each calculated holiday into payroll. It is not marked paid. Pending or Ignore is optional.</span>
 </form>
 
 <?php if($periodFrom && $periodTo):?>
