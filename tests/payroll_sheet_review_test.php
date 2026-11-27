@@ -242,6 +242,16 @@ check('review page is admin gated and confirms approval', strpos($page, 'ps_requ
 check('review page shows all-period and filtered totals', strpos($page, 'All-period total') !== false && strpos($page, 'Filtered subset') !== false);
 check('review page has no mail send', stripos($page, 'mail(') === false);
 check('deferred calculations are listed', strpos($page, 'psr_deferred_items') !== false);
+$activeLine = psr_system_line([
+    'total_gross' => 100, 'cpp' => 5, 'cpp2' => 1, 'ei' => 2, 'income_tax' => 10,
+    'employee_active' => '0', 'user_id' => 4,
+], 2);
+check('clock-in net still subtracts CPP2', $activeLine['net_known'] && abs($activeLine['net'] - 82) < 0.001);
+check('employee active flag is kept for the staff filter', $activeLine['active'] === 0);
+$noFlag = psr_system_line(['total_gross' => 100, 'cpp' => 5, 'ei' => 2, 'income_tax' => 10], 2);
+check('a line without the active column stays unset and skips CPP2', $noFlag['active'] === null && abs($noFlag['net'] - 83) < 0.001);
+$gridSrc = file_get_contents(__DIR__ . '/../engine/payroll_sheet_grid_lib.php');
+check('the spreadsheet reads that active flag', strpos($gridSrc, "['active']") !== false);
 
 if ($fail > 0) {
     echo "$fail failed\n";
