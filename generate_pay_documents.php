@@ -199,6 +199,16 @@ if ($is_cli) {
 }
 $line_ids = array_values(array_unique(array_filter(array_map('intval', $line_ids))));
 if (empty($line_ids)) { die("No rows were selected. Go back to the ledger, tick some shifts, and click Generate."); }
+if (function_exists('sh_release_pending_stat') && $req_period_start && $req_period_end) {
+    $releaseOrg = 0;
+    if (!$is_cli && function_exists('ps_topbar_org')) {
+        $releaseOrg = (int)ps_topbar_org();
+    }
+    if ($releaseOrg <= 0 && !$is_cli) {
+        $releaseOrg = (int)($_SESSION['org_id'] ?? 0);
+    }
+    try { sh_release_pending_stat($pdo, $releaseOrg, $req_period_start, $req_period_end); } catch (Throwable $e) { /* the ledger retries */ }
+}
 
 $eft_suppress = [];
 if (!empty($_POST['eft_suppress']))    { $eft_suppress = (array)$_POST['eft_suppress']; }

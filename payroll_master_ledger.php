@@ -546,6 +546,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     exit;
 }
 
+// Calculated stat lines go into this payroll on their own. Pending and Ignore stay out.
+if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+    require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+}
+if (function_exists('sh_release_pending_stat') && $from_date && $to_date) {
+    try { sh_release_pending_stat($pdo, (int)$user_org_id, $from_date, $to_date); } catch (Throwable $e) { /* a later open retries */ }
+}
+
 // ---------------------------------------------------------------- DATA PULL (stored columns)
 $where  = ["(f.work_date BETWEEN ? AND ? OR ((COALESCE(f.category,'') = 'Statutory Holiday' OR COALESCE(f.pay_type,'') = 'Statutory') AND f.pay_period_end BETWEEN ? AND ?))", "u.org_id = ?", "s.org_id = u.org_id"];
 $params = [$from_date, $to_date, $from_date, $to_date, $user_org_id];
@@ -1164,7 +1172,7 @@ function ledgerOnOrgChange(sel){
                                     <td class="text-left text-dark" style="padding-left:48px;">
                                         <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>
-                                        <?php if (!empty($r['_needs_approval'])): ?><span class="badge badge-warning">Needs approval</span><?php endif; ?>
+                                        <?php if (!empty($r['_needs_approval']) && !$is_holiday_row): ?><span class="badge badge-warning">Needs approval</span><?php endif; ?>
                                         <?php if (preg_match('/FLAG:\s*([^.]+)/', (string)($r['comments'] ?? ''), $flagMatch)): ?><div class="small font-weight-bold" style="color:#92400e;"><?=htmlspecialchars(trim($flagMatch[1]))?></div><?php endif; ?>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
                                         <?php
@@ -1228,12 +1236,9 @@ function ledgerOnOrgChange(sel){
                                         <form method="POST" action="" class="mb-1">
                                             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
                                             <input type="hidden" name="line_id" value="<?=(int)$r['line_id']?>">
-                                            <?php if ($is_holiday_row && $sess_user_level < 30 && (!empty($r['_needs_approval']) || !empty($r['_ignored']))): ?>
-                                                <button type="submit" name="approve_stat_line" value="1" class="btn btn-sm btn-success py-0" style="font-size:10px;">Approve</button>
-                                            <?php endif; ?>
                                             <button type="submit" name="set_line_state" value="pending" class="btn btn-sm btn-outline-warning py-0" style="font-size:10px;">Pending</button>
                                             <button type="submit" name="set_line_state" value="ignored" class="btn btn-sm btn-outline-secondary py-0" style="font-size:10px;">Ignore</button>
-                                            <?php if (!$is_holiday_row && (!empty($r['_needs_approval']) || !empty($r['_ignored']))): ?>
+                                            <?php if (!empty($r['_needs_approval']) || !empty($r['_ignored'])): ?>
                                                 <button type="submit" name="set_line_state" value="approved" class="btn btn-sm btn-outline-success py-0" style="font-size:10px;">In pay</button>
                                             <?php endif; ?>
                                         </form>

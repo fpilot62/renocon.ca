@@ -17,6 +17,11 @@ $chq_no = (int)($_GET['chq_start'] ?? 1001);
 $micr   = $_GET['micr_data'] ?? '⑆0001⑆ ⑈123456789⑈ 000000000⑆';
 
 if (!$from || !$to) { die("Dates missing."); }
+if (function_exists('sh_release_pending_stat')) {
+    $releaseOrg = 0;
+    if (function_exists('ps_topbar_org')) { $releaseOrg = (int)ps_topbar_org(); }
+    try { sh_release_pending_stat($pdo, $releaseOrg, $from, $to); } catch (Throwable $e) { /* the ledger retries */ }
+}
 
 // --- WORD CONVERSION ---
 function convertNumberToWords($number) {
