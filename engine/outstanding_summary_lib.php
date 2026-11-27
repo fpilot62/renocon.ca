@@ -496,6 +496,9 @@ function pos_load(PDO $pdo, int $orgId, array $rows, int $actor, string $sourceF
     if ($dry) {
         return $report + ['inserted' => 0, 'updated' => 0, 'dry' => true];
     }
+    if (function_exists('psl_ensure')) {
+        psl_ensure($pdo);
+    }
     $sourceFile = substr(basename($sourceFile), 0, 255);
     $now = date('Y-m-d H:i:s');
     $inserted = 0;
@@ -518,6 +521,12 @@ function pos_load(PDO $pdo, int $orgId, array $rows, int $actor, string $sourceF
             $have = $find->fetch(PDO::FETCH_ASSOC);
             $userId = (int)$row['user_id'] > 0 ? (int)$row['user_id'] : null;
             if (!$have) {
+                if ($userId === null && function_exists('psl_mapped_user_id')) {
+                    $mapped = psl_mapped_user_id($pdo, $orgId, (string)$row['sheet_employee'], (string)$row['store']);
+                    if ($mapped) {
+                        $userId = $mapped;
+                    }
+                }
                 $ins->execute([
                     $orgId, $row['store'], $row['sheet_employee'], $userId,
                     $row['match_confidence'] !== '' ? $row['match_confidence'] : null,
@@ -529,6 +538,12 @@ function pos_load(PDO $pdo, int $orgId, array $rows, int $actor, string $sourceF
             }
             if ($userId === null && $have['user_id'] !== null && (int)$have['user_id'] > 0) {
                 $userId = (int)$have['user_id'];
+            }
+            if ($userId === null && function_exists('psl_mapped_user_id')) {
+                $mapped = psl_mapped_user_id($pdo, $orgId, (string)$row['sheet_employee'], (string)$row['store']);
+                if ($mapped) {
+                    $userId = $mapped;
+                }
             }
             $confidence = $row['match_confidence'] !== '' ? $row['match_confidence'] : null;
             $upd->execute([

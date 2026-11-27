@@ -26,6 +26,7 @@ require_once __DIR__ . '/engine/sheet_hide_lib.php';
 require_once __DIR__ . '/engine/sheet_summary_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_edit_lib.php';
 require_once __DIR__ . '/engine/outstanding_summary_lib.php';
+require_once __DIR__ . '/engine/sheet_name_link_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -84,6 +85,14 @@ function psr_group_figure(array $part): string
     }
     return $text;
 }
+function psr_linked_label(int $userId, array $names): string
+{
+    if ($userId <= 0) {
+        return 'not linked';
+    }
+    $name = trim((string)($names[$userId] ?? ''));
+    return ($name !== '' ? $name . ' ' : '') . '#' . $userId;
+}
 function psr_total_money(array $total, string $field): string
 {
     if ($field === 'remaining_known') {
@@ -137,14 +146,19 @@ $warnings = [];
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_sheet_source'])) {
     try {
         $rowId = (int)($_POST['row_id'] ?? 0);
-        $n = pse_apply_edit($pdo, $orgId, $rowId, $actorId, [
+        $sourceEdit = [
             'row_version' => $_POST['row_version'] ?? '',
-            'user_id' => $_POST['user_id'] ?? '',
-            'site_id' => $_POST['site_id'] ?? '',
             'net' => $_POST['net'] ?? '',
             'net_unknown' => !empty($_POST['net_unknown']) ? '1' : '',
             'draft_notes' => $_POST['draft_notes'] ?? '',
-        ]);
+        ];
+        if (array_key_exists('user_id', $_POST)) {
+            $sourceEdit['user_id'] = $_POST['user_id'];
+        }
+        if (array_key_exists('site_id', $_POST)) {
+            $sourceEdit['site_id'] = $_POST['site_id'];
+        }
+        $n = pse_apply_edit($pdo, $orgId, $rowId, $actorId, $sourceEdit);
         $_SESSION['psr_flash'] = $n > 0
             ? 'Saved ' . $n . ' change(s) to the draft. Payroll was not changed and nobody was marked paid.'
             : 'Nothing changed.';
@@ -157,7 +171,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_sheet_source']))
         $warnings[] = $e->getMessage();
     }
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_outstanding_period_row']) || isset($_POST['save_outstanding_period_row']) || isset($_POST['delete_outstanding_period_row']) || isset($_POST['fill_outstanding_payroll']) || isset($_POST['save_outstanding_link']) || isset($_POST['save_outstanding_payment']) || isset($_POST['delete_outstanding_payment']))) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_outstanding_period_row']) || isset($_POST['save_outstanding_period_row']) || isset($_POST['delete_outstanding_period_row']) || isset($_POST['fill_outstanding_payroll']) || isset($_POST['save_outstanding_payment']) || isset($_POST['delete_outstanding_payment']))) {
     try {
         $summaryForOpen = (int)($_POST['summary_id'] ?? 0);
         $back = psr_keep_query(['emp_open' => $summaryForOpen > 0 ? $summaryForOpen : null]);
@@ -175,9 +189,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_outstanding_peri
             $_SESSION['psr_flash'] = $n > 0
                 ? 'Filled ' . $n . ' period row(s) from payroll. Nobody was marked paid.'
                 : 'No new payroll half-months to add. Nobody was marked paid.';
-        } elseif (isset($_POST['save_outstanding_link'])) {
-            pos_link_employee($pdo, $orgId, $summaryForOpen, $actorId, (int)($_POST['user_id'] ?? 0), (int)($_POST['row_version'] ?? 0), sheet_show_hidden_requested());
-            $_SESSION['psr_flash'] = 'Employee link saved. Nobody was marked paid.';
         } elseif (isset($_POST['delete_outstanding_payment'])) {
             pos_delete_payment($pdo, $orgId, (int)($_POST['payment_id'] ?? 0), $actorId, (int)($_POST['row_version'] ?? 0));
             $_SESSION['psr_flash'] = 'Reconciliation payment removed. No payroll payment was created and nobody was marked paid.';
@@ -191,6 +202,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_outstanding_peri
             $_SESSION['psr_flash'] = 'Reconciliation payment saved. It is not a payroll payment and nobody was marked paid.';
         }
         header('Location: ' . $back . '#outstanding-pay');
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_name_link'])) {
+    try {
+        $res = psl_confirm(
+            $pdo,
+            $orgId,
+            (string)($_POST['sheet_name'] ?? ''),
+            null,
+            (int)($_POST['user_id'] ?? 0),
+            $actorId,
+            sheet_show_hidden_requested()
+        );
+        $_SESSION['psr_flash'] = 'Name linked. Sheet rows updated: ' . (int)$res['linked']
+            . '. Already linked: ' . (int)$res['unchanged']
+            . '. Skipped with an active approval: ' . (int)$res['skipped_locked']
+            . '. Outstanding rows updated: ' . (int)$res['outstanding_linked']
+            . '. Nobody was marked paid.';
+        header('Location: ' . psr_keep_query());
         exit;
     } catch (Throwable $e) {
         $warnings[] = $e->getMessage();
@@ -812,6 +845,18 @@ try {
     $warnings[] = 'Outstanding pay summary could not be loaded. ' . $e->getMessage();
     $outstanding = ['count' => 0, 'groups' => [], 'grand' => pos_empty_total()];
 }
+$linkNames = $outstandingUsers;
+if (!$linkNames) {
+    foreach ($staffRows as $person) {
+        $linkNames[(int)$person['id']] = (string)$person['Name'];
+    }
+}
+try {
+    $nameMatches = psl_unconfirmed_view($pdo, $orgId, $showHiddenAdmins);
+} catch (Throwable $e) {
+    $warnings[] = 'Name matches could not be loaded. ' . $e->getMessage();
+    $nameMatches = ['count' => 0, 'lines' => [], 'employees' => $linkNames];
+}
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
     $byUser[(int)$emp['user_id']] = $emp;
@@ -860,6 +905,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         .pos-inline .pos-year { width: 5rem; }
         .pos-inline .pos-note { width: 10rem; }
         .pos-inline .pos-date { width: 9.5rem; }
+        .nm-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 4px; }
+        .nm-line .nm-name { min-width: 8rem; font-weight: 700; }
+        .nm-line .nm-sug { min-width: 10rem; }
+        .nm-line select { width: auto; max-width: 16rem; }
         details.psr-panel > summary::-webkit-details-marker { margin-right: 6px; }
         tr[data-src] { cursor: pointer; }
         .sheet-source { position: fixed; top: 78px; right: 12px; width: min(540px, 46vw); max-height: calc(100vh - 96px); overflow: auto; z-index: 40; background: #fff; border: 1px solid #cbd5e1; border-radius: 12px; padding: 14px; box-shadow: 0 10px 28px rgba(15, 23, 42, .18); }
@@ -1002,6 +1051,30 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     })();
     </script>
 
+    <details class="sheet psr-panel" data-panel="name-matches">
+        <summary>Name matches (<?= (int)$nameMatches['count'] ?> unconfirmed)</summary>
+        <p class="mb-2 mt-2">Confirm a sheet name once. It applies everywhere that name is used. A row with an active approval is skipped.</p>
+        <?php if (!$nameMatches['lines']): ?>
+            <p class="mb-0 text-muted">Every sheet name is confirmed.</p>
+        <?php endif; ?>
+        <?php foreach ($nameMatches['lines'] as $matchLine): ?>
+            <form method="POST" action="<?= psr_h(psr_keep_query()) ?>" class="nm-line">
+                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                <input type="hidden" name="sheet_name" value="<?= psr_h($matchLine['sheet_name']) ?>">
+                <span class="nm-name"><?= psr_h($matchLine['sheet_name']) ?></span>
+                <span class="nm-sug"><?= psr_h($matchLine['suggestion_label']) ?></span>
+                <select name="user_id" class="form-control form-control-sm">
+                    <option value="0">Choose</option>
+                    <?php foreach ($nameMatches['employees'] as $uid => $uname): ?>
+                        <option value="<?= (int)$uid ?>" <?= (int)$matchLine['suggestion_id'] === (int)$uid ? 'selected' : '' ?>><?= psr_h($uname) ?> #<?= (int)$uid ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button class="btn btn-sm btn-outline-dark py-0" name="confirm_name_link" value="1">Confirm</button>
+            </form>
+        <?php endforeach; ?>
+    </details>
+
     <form method="POST" id="gridForm" class="sheet">
         <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
         <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
@@ -1043,20 +1116,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <h6>1. Save my edits</h6>
                     <p class="mb-1">Saves the amounts typed on this page as drafts. This is not an approval.</p>
                     <p class="mb-2">This page: <?= (int)$approvalPanel['page_rows'] ?> draft row(s). Payroll is not written.</p>
-                    <p class="mb-2">A suggested employee is already selected and marked suggested. It is not saved until you confirm. Accepting links does not approve pay.</p>
-                    <button class="btn btn-outline-primary" name="preview_accept_links" value="1">Accept all suggested links</button>
+                    <p class="mb-2">Link a sheet name once in Name matches. That covers every period. Saving here does not approve pay.</p>
                     <button class="btn btn-outline-primary" name="preview_grid_save" value="1">Review save</button>
-                    <?php if ($linkPreview): ?>
-                        <div class="alert alert-info mt-2">
-                            <?php if (!$linkPreview['changes']): ?>No unique suggested link to save. Ambiguous names were left blank.<?php else: ?>
-                                <?= count($linkPreview['changes']) ?> suggested link(s). Nobody is marked paid.
-                                <?php foreach (array_slice($linkPreview['changes'], 0, 12) as $linkChange): ?>
-                                    <div><?= psr_h($linkChange['employee_name']) ?> → employee <?= (int)$linkChange['user_id'] ?>, store <?= (int)$linkChange['site_id'] ?></div>
-                                <?php endforeach; ?>
-                                <button class="btn btn-primary mt-2" name="confirm_accept_links" value="1">Confirm suggested links</button>
-                            <?php endif; ?>
-                        </div>
-                    <?php endif; ?>
                     <?php if ($gridDiff && !empty($gridDiff['ok'])): ?>
                         <div class="alert alert-info mt-2"><?= count($gridDiff['changes']) ?> typed change(s) ready to save. Nobody is marked paid.</div>
                         <button class="btn btn-primary" name="confirm_grid_save" value="1">Confirm save</button>
@@ -1163,7 +1224,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <tr data-src="<?= psr_h($sumSrc) ?>">
                     <td>
                         <a href="<?= psr_h(psr_keep_query(['src' => $sumSrc])) ?>"><?= psr_h($sumLine['employee_name'] !== '' ? $sumLine['employee_name'] : 'Name not set') ?></a>
-                        <div class="text-muted"><?= (int)$sumLine['user_id'] > 0 ? '#' . (int)$sumLine['user_id'] : 'not linked' ?></div>
+                        <div class="text-muted"><?= psr_h(psr_linked_label((int)$sumLine['user_id'], $linkNames)) ?></div>
                         <div class="text-muted"><?= psr_h($sumLine['stores'] ? implode(', ', $sumLine['stores']) : 'Store not set') ?></div>
                     </td>
                     <td class="num"><?= psr_h(psr_summary_figure($sumLine['total_paid'], (int)$sumLine['paid_unknown'])) ?></td>
@@ -1248,7 +1309,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                         <?php $groupSrc = !empty($employeeGroup['sheet_ids']) ? implode(',', $employeeGroup['sheet_ids']) : '0'; ?>
                         <a class="small d-block" href="<?= psr_h(psr_keep_query(['src' => $groupSrc, 'view' => 'detail'])) ?>">Sheet source</a>
                     </td>
-                    <td class="ident"><?= psr_h($employeeGroup['employee_name']) ?><div class="text-muted"><?= psr_h($employeeGroup['store_name'] !== '' ? $employeeGroup['store_name'] : 'Store not set') ?></div><?php if (!empty($employeeGroup['not_linked'])): ?><div class="pending">not linked</div><?php endif; ?></td>
+                    <td class="ident"><?= psr_h($employeeGroup['employee_name']) ?><div class="text-muted"><?= psr_h($employeeGroup['store_name'] !== '' ? $employeeGroup['store_name'] : 'Store not set') ?></div><div class="text-muted"><?= psr_h(psr_linked_label((int)$employeeGroup['user_id'], $linkNames)) ?></div></td>
                     <td><?= (int)$gt['rows'] ?> period<?= (int)$gt['rows'] === 1 ? '' : 's' ?></td>
                     <td colspan="2"><?= !empty($employeeGroup['not_linked']) ? 'Same name only. Not linked to a person.' : 'Linked person and store.' ?></td>
                     <td><?= psr_h(psr_group_figure($gt['gross'])) ?></td>
@@ -1282,36 +1343,9 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                     <td class="ident">
                         <input class="form-control form-control-sm" name="g[<?= psr_h($grow['key']) ?>][employee_name]" value="<?= psr_h($grow['employee_name']) ?>">
                         <input class="form-control form-control-sm mt-1" name="g[<?= psr_h($grow['key']) ?>][store_name]" value="<?= psr_h($grow['store_name']) ?>">
-                        <?php
-                        $link = psr_suggest_link($grow, $staffDirectory, $siteList, $filterSiteId);
-                        $pickedUser = (int)$grow['user_id'] > 0 ? (int)$grow['user_id'] : (($link['status'] ?? '') === 'suggested' ? (int)$link['user_id'] : 0);
-                        $pickedSite = (int)$grow['site_id'] > 0 ? (int)$grow['site_id'] : (int)($link['site_id'] ?? 0);
-                        $linkIsNew = ($link['status'] ?? '') === 'suggested' && (int)$grow['user_id'] <= 0;
-                        ?>
-                        <select class="form-control form-control-sm mt-1 link-user" name="g[<?= psr_h($grow['key']) ?>][user_id]">
-                            <option value="0">Not linked</option>
-                            <?php foreach ($staffDirectory as $person):
-                                if ((int)$person['site_id'] <= 0) {
-                                    continue;
-                                }
-                                $suggestedOption = $linkIsNew && (int)$person['id'] === (int)$link['user_id'] && (int)$person['site_id'] === (int)$link['site_id'];
-                                $label = psr_employee_label($person, true);
-                                if ($suggestedOption) {
-                                    $label .= ' (suggested)';
-                                }
-                            ?>
-                                <option value="<?= (int)$person['id'] ?>" data-site="<?= (int)$person['site_id'] ?>" data-name="<?= psr_h($person['name']) ?>" data-store="<?= psr_h($person['site_name']) ?>" data-suggested="<?= $suggestedOption ? '1' : '0' ?>" <?= $pickedUser === (int)$person['id'] && $pickedSite === (int)$person['site_id'] ? 'selected' : '' ?>><?= psr_h($label) ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <select class="form-control form-control-sm mt-1 link-site" name="g[<?= psr_h($grow['key']) ?>][site_id]">
-                            <option value="0">Store not linked</option>
-                            <?php foreach ($siteRows as $siteChoice): ?>
-                                <option value="<?= (int)$siteChoice['SId'] ?>" <?= $pickedSite === (int)$siteChoice['SId'] ? 'selected' : '' ?>><?= psr_h($siteChoice['nick_name']) ?><?= $linkIsNew && $pickedSite === (int)$siteChoice['SId'] ? ' (suggested)' : '' ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <?php if ($linkIsNew): ?><div class="pending">suggested — not saved</div><?php endif; ?>
-                        <?php if (($link['status'] ?? '') === 'ambiguous'): ?><div class="pending">Not linked. <?php foreach ($link['candidates'] as $candidate): ?><?= psr_h(psr_employee_label($candidate, true)) ?>. <?php endforeach; ?></div><?php endif; ?>
-                        <?php if (!empty($grow['candidate']) && ($link['status'] ?? '') === 'none'): ?><div class="pending"><?= psr_h($grow['candidate']['reason']) ?></div><?php endif; ?>
+                        <input type="hidden" name="g[<?= psr_h($grow['key']) ?>][user_id]" value="<?= (int)$grow['user_id'] ?>">
+                        <input type="hidden" name="g[<?= psr_h($grow['key']) ?>][site_id]" value="<?= (int)$grow['site_id'] ?>">
+                        <div class="text-muted"><?= psr_h(psr_linked_label((int)$grow['user_id'], $linkNames)) ?></div>
                         <?php if ((int)($grow['active'] ?? 1) === 0): ?><div class="text-muted">Inactive</div><?php endif; ?>
                     </td>
                     <td>
@@ -1413,20 +1447,8 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <tr>
                     <td><?= psr_h($orow['store']) ?></td>
                     <td><a href="<?= psr_h(psr_keep_query(['emp_open' => $empOpen ? null : (int)$orow['id']])) ?>#outstanding-pay"><?= psr_h($orow['name']) ?></a>
-                        <div class="text-muted"><?= $orow['user_id'] > 0 ? '#' . (int)$orow['user_id'] : 'not linked' ?></div>
-                        <?php if ($orow['notes'] !== ''): ?><div class="text-muted"><?= psr_h($orow['notes']) ?></div><?php endif; ?>
-                        <form method="POST" action="<?= psr_h(psr_keep_query(['emp_open' => (int)$orow['id']])) ?>#outstanding-pay" class="form-row mt-1">
-                            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
-                            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
-                            <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
-                            <input type="hidden" name="row_version" value="<?= (int)$orow['row_version'] ?>">
-                            <div class="col-8"><select name="user_id" class="form-control form-control-sm"><option value="0">Not linked</option>
-                                <?php foreach ($outstandingUsers as $uid => $uname): ?>
-                                    <option value="<?= (int)$uid ?>" <?= (int)$orow['user_id'] === (int)$uid ? 'selected' : '' ?>><?= psr_h($uname) ?> #<?= (int)$uid ?></option>
-                                <?php endforeach; ?>
-                            </select></div>
-                            <div class="col-4"><button class="btn btn-sm btn-outline-secondary" name="save_outstanding_link" value="1">Link</button></div>
-                        </form></td>
+                        <div class="text-muted"><?= psr_h(psr_linked_label((int)$orow['user_id'], $linkNames)) ?></div>
+                        <?php if ($orow['notes'] !== ''): ?><div class="text-muted"><?= psr_h($orow['notes']) ?></div><?php endif; ?></td>
                     <td class="num"><?= psr_h(number_format((float)$orow['total'], 2)) ?></td>
                     <td class="num"><?= psr_h(pos_figure_text($orow['periods_total'])) ?></td>
                     <td class="num"><?= psr_h(pos_figure_text($orow['balance'])) ?></td>
@@ -1724,8 +1746,16 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         <div class="form-row">
             <div class="col-md-3 mb-2"><label>Name</label><input class="form-control form-control-sm" name="employee_name" value="<?= psr_h($edit['employee_name']) ?>"></div>
             <div class="col-md-3 mb-2"><label>Store name</label><input class="form-control form-control-sm" name="store_name" value="<?= psr_h($edit['store_name']) ?>"></div>
-            <div class="col-md-3 mb-2"><label>Existing employee</label><select class="form-control form-control-sm" name="user_id"><option value="0">Not linked</option><?php foreach ($staffRows as $p): ?><option value="<?= (int)$p['id'] ?>" <?= (int)$edit['user_id'] === (int)$p['id'] ? 'selected' : '' ?>><?= psr_h($p['Name']) ?></option><?php endforeach; ?></select></div>
-            <div class="col-md-3 mb-2"><label>Existing store</label><select class="form-control form-control-sm" name="site_id"><option value="0">Not linked</option><?php foreach ($siteRows as $s): ?><option value="<?= (int)$s['SId'] ?>" <?= (int)$edit['site_id'] === (int)$s['SId'] ? 'selected' : '' ?>><?= psr_h($s['nick_name']) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-3 mb-2"><label>Linked employee</label><div class="form-control-plaintext py-0"><?= psr_h(psr_linked_label((int)$edit['user_id'], $linkNames)) ?></div><input type="hidden" name="user_id" value="<?= (int)$edit['user_id'] ?>"></div>
+            <div class="col-md-3 mb-2"><label>Linked store</label><input type="hidden" name="site_id" value="<?= (int)$edit['site_id'] ?>"><div class="form-control-plaintext py-0"><?php
+                $editSiteName = '';
+                foreach ($siteRows as $editSite) {
+                    if ((int)$editSite['SId'] === (int)$edit['site_id']) {
+                        $editSiteName = (string)$editSite['nick_name'];
+                    }
+                }
+                echo $editSiteName !== '' ? psr_h($editSiteName) : 'not linked';
+            ?></div></div>
             <div class="col-md-2 mb-2"><label>Period start</label><input type="date" class="form-control form-control-sm" name="period_start" value="<?= psr_h((string)$edit['period_start']) ?>"></div>
             <div class="col-md-2 mb-2"><label>Period end</label><input type="date" class="form-control form-control-sm" name="period_end" value="<?= psr_h((string)$edit['period_end']) ?>"></div>
             <div class="col-md-2 mb-2"><label>Gross</label><input class="form-control form-control-sm" name="gross" value="<?= $edit['gross'] === null ? '' : psr_h($edit['gross']) ?>"></div>
@@ -1857,20 +1887,7 @@ foreach ($report['companies'][0]['employees'] as $emp) {
                 <input type="hidden" name="src" value="<?= psr_h($srcParam) ?>">
                 <input type="hidden" name="row_id" value="<?= (int)$srow['id'] ?>">
                 <input type="hidden" name="row_version" value="<?= (int)($srow['row_version'] ?? 1) ?>">
-                <div class="form-group mb-2"><label class="mb-0">Employee</label>
-                    <select name="user_id" class="form-control form-control-sm">
-                        <option value="">Not linked</option>
-                        <?php foreach ($srcUsers as $uid => $uname): ?>
-                            <option value="<?= (int)$uid ?>" <?= (int)$srow['user_id'] === (int)$uid ? 'selected' : '' ?>><?= psr_h($uname) ?> #<?= (int)$uid ?></option>
-                        <?php endforeach; ?>
-                    </select></div>
-                <div class="form-group mb-2"><label class="mb-0">Store</label>
-                    <select name="site_id" class="form-control form-control-sm">
-                        <option value="">Not set</option>
-                        <?php foreach ($srcSites as $sid => $sname): ?>
-                            <option value="<?= (int)$sid ?>" <?= (int)$srow['site_id'] === (int)$sid ? 'selected' : '' ?>><?= psr_h($sname) ?></option>
-                        <?php endforeach; ?>
-                    </select></div>
+                <div class="text-muted mb-2">Linked employee: <?= psr_h(psr_linked_label((int)$srow['user_id'], $linkNames)) ?></div>
                 <div class="form-row">
                     <div class="col-6"><label class="mb-0">Net</label>
                         <input name="net" class="form-control form-control-sm" value="<?= $srow['net'] === null ? '' : psr_h(number_format((float)$srow['net'], 2, '.', '')) ?>" placeholder="blank = unknown"></div>
@@ -1932,27 +1949,6 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         }
         return Object.keys(checked).length;
     }
-    function narrowLinks(scope) {
-        (scope || form).querySelectorAll('.link-user').forEach(function (user) {
-            var td = user.closest('td');
-            if (!td) return;
-            var site = td.querySelector('.link-site');
-            var siteId = site ? site.value : '0';
-            Array.prototype.forEach.call(user.options, function (opt) {
-                if (!opt.value || opt.value === '0') return;
-                var optSite = opt.getAttribute('data-site') || '0';
-                var show = siteId === '0' || optSite === siteId;
-                opt.hidden = !show;
-                opt.disabled = !show;
-                var name = opt.getAttribute('data-name') || '';
-                var store = opt.getAttribute('data-store') || '';
-                var suggested = opt.getAttribute('data-suggested') === '1' ? ' (suggested)' : '';
-                opt.textContent = (siteId === '0' && store ? name + ' - ' + store : name) + suggested;
-            });
-            var current = user.options[user.selectedIndex];
-            if (current && current.disabled) user.value = '0';
-        });
-    }
     function paint() {
         var n = count();
         var label = document.getElementById('selectedCount');
@@ -1980,14 +1976,6 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         paint();
     });
     form.addEventListener('change', function (event) {
-        if (event.target.classList.contains('link-user')) {
-            var chosen = event.target.options[event.target.selectedIndex];
-            var site = event.target.closest('td').querySelector('.link-site');
-            var siteId = chosen ? chosen.getAttribute('data-site') : '';
-            if (site && siteId && siteId !== '0') site.value = siteId;
-            narrowLinks(event.target.closest('td'));
-        }
-        if (event.target.classList.contains('link-site')) narrowLinks(event.target.closest('td'));
         if (event.target.classList.contains('row-check')) paint();
         if (event.target.classList.contains('group-check')) {
             var groupId = event.target.getAttribute('data-group');
@@ -2013,7 +2001,6 @@ foreach ($report['companies'][0]['employees'] as $emp) {
     var bottom = document.getElementById('openApprovalsBottom');
     if (bottom) bottom.addEventListener('click', openModal);
     document.getElementById('closeApprovals').addEventListener('click', function () { modal.classList.remove('open'); });
-    narrowLinks(form);
     paint();
 })();
 </script>

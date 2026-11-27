@@ -1140,6 +1140,9 @@ function psr_commit_workbook(PDO $pdo, int $orgId, int $actor, string $storedNam
     foreach ($dups as $dup) {
         $dupRows[(int)$dup['source_row']] = true;
     }
+    if (function_exists('psl_ensure')) {
+        psl_ensure($pdo);
+    }
     $pdo->beginTransaction();
     try {
         $pdo->prepare(
@@ -1152,20 +1155,23 @@ function psr_commit_workbook(PDO $pdo, int $orgId, int $actor, string $storedNam
                 (org_id, import_id, source_sheet, source_row, row_kind, source_json, employee_name, store_name,
                  period_start, period_end, period_month, period_half, period_year, year_confidence, period_confidence,
                  year_confirmed, gross, net, reported_status, status_evidence_json, raw_notes, draft_notes, flags_json,
-                 party_class, pay_route, amount_basis, proposed_amount, gst_verified, actual_confirmed, created_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())'
+                 party_class, pay_route, amount_basis, proposed_amount, gst_verified, actual_confirmed, user_id, created_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())'
         );
         $kept = 0;
         foreach ($rows as $row) {
             if ($skipDuplicates && !empty($dupRows[(int)$row['source_row']])) {
                 continue;
             }
+            $mappedUser = function_exists('psl_mapped_user_id')
+                ? psl_mapped_user_id($pdo, $orgId, (string)$row['employee_name'], (string)$row['store_name'])
+                : null;
             $ins->execute([
                 $orgId, $importId, $row['source_sheet'], $row['source_row'], $row['row_kind'], $row['source_json'],
                 $row['employee_name'], $row['store_name'], $row['period_start'], $row['period_end'], $row['period_month'],
                 $row['period_half'], $row['period_year'], $row['year_confidence'], $row['period_confidence'], 0,
                 $row['gross'], $row['net'], $row['reported_status'], $row['status_evidence_json'], $row['raw_notes'],
-                '', json_encode($row['flags']), 'unanswered', 'unset', 'unset', null, 0, 0,
+                '', json_encode($row['flags']), 'unanswered', 'unset', 'unset', null, 0, 0, $mappedUser,
             ]);
             $kept++;
             psr_insert_revision($pdo, $orgId, 'row', (int)$pdo->lastInsertId(), 'import', $actor, null, ['gross' => $row['gross'], 'net' => $row['net'], 'status' => $row['reported_status']]);
