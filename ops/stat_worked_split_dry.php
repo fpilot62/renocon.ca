@@ -11,8 +11,9 @@ if (PHP_SAPI !== 'cli') {
     exit(1);
 }
 $app = getenv('PAYROLL_APP') ?: '/home/renocon/public_html/payroll';
+$lib = getenv('STAT_SPLIT_LIB') ?: $app;
 require $app . '/db.php';
-require $app . '/payroll_engine/stat_holidays.php';
+require $lib . '/payroll_engine/stat_holidays.php';
 if (is_file($app . '/payroll_engine/payroll_engine.php')) {
     require_once $app . '/payroll_engine/payroll_engine.php';
 }
