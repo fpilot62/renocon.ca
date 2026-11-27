@@ -325,3 +325,126 @@ function psr_load_paid_dates(PDO $pdo, int $orgId, array $rows): array
     }
     return $out;
 }
+
+/**
+ * Clock-in payroll net versus the By Abdul sheet net for the same filters.
+ * X is the system line net: gross minus employee CPP, CPP2, EI, and income tax,
+ * already stored on each payroll_finalized line when every part is known.
+ * Y is payroll_sheet_rows.net on the By Abdul sheet. Unknown nets are counted,
+ * not treated as zero.
+ */
+function psr_gap_in_scope(array $row, array $filter): bool
+{
+    if ((int)($filter['user_id'] ?? 0) > 0 && (int)($row['user_id'] ?? 0) !== (int)$filter['user_id']) {
+        return false;
+    }
+    if ((int)($filter['site_id'] ?? 0) > 0 && (int)($row['site_id'] ?? 0) !== (int)$filter['site_id']) {
+        return false;
+    }
+    if (!empty($filter['person'])) {
+        $person = (string)$filter['person'];
+        $name = (string)($row['employee_name'] ?? '');
+        if (stripos($name, $person) === false && (string)($row['user_id'] ?? '') !== $person) {
+            return false;
+        }
+    }
+    if (!empty($filter['store'])) {
+        $want = psr_norm_name((string)$filter['store']);
+        $got = psr_norm_name((string)($row['store_name'] ?? ''));
+        if ($want === '' || $got === '' || (strpos($got, $want) === false && strpos($want, $got) === false)) {
+            return false;
+        }
+    }
+    if (!empty($filter['year']) && substr((string)($row['period_start'] ?? ''), 0, 4) !== (string)$filter['year']) {
+        return false;
+    }
+    if (!empty($filter['period_start']) && !empty($filter['period_end']) && !psr_periods_overlap($row, $filter)) {
+        return false;
+    }
+    if (($filter['active'] ?? 'all') === 'active' && array_key_exists('active', $row) && (int)$row['active'] === 0) {
+        return false;
+    }
+    return true;
+}
+
+function psr_gap_sum(array $rows, callable $netOf): array
+{
+    $sum = 0.0;
+    $known = 0;
+    $unknown = 0;
+    foreach ($rows as $row) {
+        $net = $netOf($row);
+        if ($net === null) {
+            $unknown++;
+            continue;
+        }
+        $sum = round($sum + (float)$net, 2);
+        $known++;
+    }
+    return [
+        'amount' => $known > 0 ? $sum : null,
+        'known' => $known,
+        'unknown' => $unknown,
+    ];
+}
+
+function psr_clock_sheet_gap(array $systemLines, array $sheetRows, array $filter): array
+{
+    $system = [];
+    foreach ($systemLines as $line) {
+        if (psr_gap_in_scope($line, $filter)) {
+            $system[] = $line;
+        }
+    }
+    $sheet = [];
+    foreach ($sheetRows as $row) {
+        if (strcasecmp(trim((string)($row['source_sheet'] ?? '')), 'By Abdul') !== 0) {
+            continue;
+        }
+        $kind = (string)($row['row_kind'] ?? 'employee_record');
+        if ($kind !== '' && $kind !== 'employee_record') {
+            continue;
+        }
+        if (!psr_gap_in_scope($row, $filter)) {
+            continue;
+        }
+        $sheet[] = $row;
+    }
+    $clock = psr_gap_sum($system, static function (array $line) {
+        if (empty($line['net_known']) || $line['net'] === null || $line['net'] === '') {
+            return null;
+        }
+        return (float)$line['net'];
+    });
+    $sheetSum = psr_gap_sum($sheet, static function (array $row) {
+        if (!array_key_exists('net', $row) || $row['net'] === null || $row['net'] === '') {
+            return null;
+        }
+        return (float)$row['net'];
+    });
+    $difference = null;
+    if ((int)$clock['unknown'] === 0 && (int)$sheetSum['unknown'] === 0) {
+        $difference = round((float)($clock['amount'] ?? 0) - (float)($sheetSum['amount'] ?? 0), 2);
+    }
+    return ['clock' => $clock, 'sheet' => $sheetSum, 'difference' => $difference];
+}
+
+function psr_gap_money(array $part): string
+{
+    if ($part['amount'] === null) {
+        return (int)$part['unknown'] > 0 ? 'unknown (' . (int)$part['unknown'] . ' unknown)' : '0.00';
+    }
+    $text = number_format((float)$part['amount'], 2);
+    if ((int)$part['unknown'] > 0) {
+        $text .= ' (' . (int)$part['unknown'] . ' unknown)';
+    }
+    return $text;
+}
+
+function psr_gap_sentence(array $gap): string
+{
+    $diff = $gap['difference'] === null ? 'incomplete' : number_format((float)$gap['difference'], 2);
+    return 'Clock-in payroll total ' . psr_gap_money($gap['clock'])
+        . ' − Sheet total ' . psr_gap_money($gap['sheet'])
+        . ' = Difference ' . $diff;
+}
