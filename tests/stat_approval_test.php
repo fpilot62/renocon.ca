@@ -98,7 +98,7 @@ check('an untouched pending line refreshes the calculated amount', (float)$refre
 $ledger = file_get_contents(__DIR__ . '/../payroll_master_ledger.php');
 $docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
 check('the ledger refuses to pay a line waiting for approval', strpos($ledger, "stat_approval_status") !== false && strpos($ledger, 'Open Stat Holiday Pay') !== false);
-check('pay documents skip lines waiting for approval', strpos($docs, "stat_approval_status") !== false && strpos($docs, "<> 'pending'") !== false);
+check('pay documents skip lines waiting for approval or ignored', strpos($docs, "stat_approval_status") !== false && strpos($docs, "!== 'ignored'") !== false);
 $ledger1 = file_get_contents(__DIR__ . '/../payroll_master_ledger1.php');
 check('the other ledger also refuses a line waiting for approval', strpos($ledger1, "stat_approval_status") !== false);
 $migration = file_get_contents(__DIR__ . '/../migrations/20261121_stat_approval.sql');

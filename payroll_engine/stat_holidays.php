@@ -441,7 +441,193 @@ if (!function_exists('sh_worked_pay_label')) {
         $total = round($holidayPay + $premium, 2);
         return 'Holiday pay $' . number_format($holidayPay, 2)
             . ' + Worked ' . number_format($hours, 2) . 'h × 1.5 = $' . number_format($premium, 2)
-            . ', total $' . number_format($total, 2);
+            . ', total $' . number_format($total, 2)
+            . '; the worked shift shows ' . number_format($hours, 2) . 'h at 1.5× plus the leftover hours at the regular rate';
+    }
+}
+
+if (!function_exists('sh_shift_pay_split')) {
+    /**
+     * One worked shift: holiday-date hours at 1.5× plus the leftover hours at
+     * straight time. The line amount is those two amounts added.
+     *
+     * @return array{total_hours:float,holiday_hours:float,regular_hours:float,rate:float,holiday_pay:float,regular_pay:float,amount:float,text:string}
+     */
+    function sh_shift_pay_split(float $totalHours, float $holidayHours, float $rate): array {
+        $totalHours = round(max(0.0, $totalHours), 2);
+        $holidayHours = round(max(0.0, min($holidayHours, $totalHours)), 2);
+        $regularHours = round($totalHours - $holidayHours, 2);
+        $rate = round(max(0.0, $rate), 2);
+        $holidayPay = round($holidayHours * $rate * 1.5, 2);
+        $regularPay = round($regularHours * $rate, 2);
+        $amount = round($holidayPay + $regularPay, 2);
+        $text = 'Total ' . number_format($totalHours, 2) . 'h = Holiday '
+            . number_format($holidayHours, 2) . 'h × 1.5 @ $' . number_format($rate, 2)
+            . ' = $' . number_format($holidayPay, 2)
+            . ' + Regular ' . number_format($regularHours, 2) . 'h @ $' . number_format($rate, 2)
+            . ' = $' . number_format($regularPay, 2);
+        return [
+            'total_hours' => $totalHours,
+            'holiday_hours' => $holidayHours,
+            'regular_hours' => $regularHours,
+            'rate' => $rate,
+            'holiday_pay' => $holidayPay,
+            'regular_pay' => $regularPay,
+            'amount' => $amount,
+            'text' => $text,
+        ];
+    }
+}
+
+if (!function_exists('sh_public_holiday_label')) {
+    /** Equivalent hours are holiday pay divided by the rate. They are not hours worked. */
+    function sh_public_holiday_label(float $amount, float $rate, float $storedHours = 0.0): string {
+        $equiv = $storedHours > 0.009 ? round($storedHours, 2) : ($rate > 0.009 ? round($amount / $rate, 2) : 0.0);
+        return 'Public holiday pay (average, equiv. ' . number_format($equiv, 2) . 'h)';
+    }
+}
+
+if (!function_exists('sh_split_sentence')) {
+    function sh_split_sentence(string $comments): string {
+        if (preg_match('/Total [0-9.]+h = Holiday [0-9.]+h × 1\.5 @ \$[0-9.,]+ = \$[0-9.,]+ \+ Regular [0-9.]+h @ \$[0-9.,]+ = \$[0-9.,]+/', $comments, $m)) {
+            return $m[0];
+        }
+        return '';
+    }
+}
+
+if (!function_exists('sh_split_marker')) {
+    function sh_split_marker(string $holiday, float $hours, float $regPay, float $gross, float $holidayHours, float $rate, float $vac): string {
+        return '[[stat-split ' . substr($holiday, 0, 10)
+            . ' ' . number_format($hours, 2, '.', '')
+            . ' ' . number_format($regPay, 2, '.', '')
+            . ' ' . number_format($gross, 2, '.', '')
+            . ' ' . number_format($holidayHours, 2, '.', '')
+            . ' ' . number_format($rate, 2, '.', '')
+            . ' ' . number_format($vac, 2, '.', '') . ']]';
+    }
+}
+
+if (!function_exists('sh_stat_line_is_live')) {
+    /** Approved and not ignored. Pending and ignored stay out of pay and do not reduce regular hours. */
+    function sh_stat_line_is_live(?string $approval, ?string $status = ''): bool {
+        $approval = strtolower(trim((string)$approval));
+        $status = strtolower(trim((string)$status));
+        if ($approval === 'pending' || $approval === 'ignored' || $status === 'ignored') {
+            return false;
+        }
+        return $approval === 'approved' || $approval === '';
+    }
+}
+
+if (!function_exists('sh_hold_tag')) {
+    function sh_hold_tag(string $holiday, float $hours, float $rate): string {
+        return '[[stat-hold ' . substr($holiday, 0, 10) . ' ' . number_format($hours, 2, '.', '') . ' ' . number_format($rate, 2, '.', '') . ']]';
+    }
+}
+
+if (!function_exists('sh_plan_regular_hold')) {
+    /**
+     * Take holiday-date hours out of regular lines. A second call does not take them again.
+     * Paid lines are left alone.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @return list<array<string,mixed>>
+     */
+    function sh_plan_regular_hold(array $lines, float $hours, string $holiday, float $rate): array {
+        $holiday = substr($holiday, 0, 10);
+        $hours = round($hours, 2);
+        if ($hours <= 0) {
+            return $lines;
+        }
+        foreach ($lines as $line) {
+            $comments = (string)($line['comments'] ?? '');
+            if (strpos($comments, '[[stat-split ' . $holiday . ' ') !== false || strpos($comments, '[[stat-hold ' . $holiday . ' ') !== false) {
+                return $lines;
+            }
+        }
+        $prev = (new DateTimeImmutable($holiday))->modify('-1 day')->format('Y-m-d');
+        $pick = null;
+        foreach ($lines as $i => $line) {
+            if ((float)($line['paid'] ?? 0) > 0.02) {
+                continue;
+            }
+            $day = substr((string)($line['work_date'] ?? ''), 0, 10);
+            if ($day !== $holiday && $day !== $prev) {
+                continue;
+            }
+            if ((float)($line['reg_hours'] ?? 0) <= 0) {
+                continue;
+            }
+            if ($pick === null || $day === $holiday) {
+                $pick = $i;
+                if ($day === $holiday) {
+                    break;
+                }
+            }
+        }
+        if ($pick === null) {
+            return $lines;
+        }
+        $line = $lines[$pick];
+        $useRate = (float)($line['hourly_rate'] ?? 0) > 0 ? (float)$line['hourly_rate'] : $rate;
+        $split = sh_shift_pay_split((float)$line['reg_hours'], $hours, $useRate);
+        if ($split['holiday_hours'] <= 0) {
+            return $lines;
+        }
+        $origReg = round((float)($line['reg_pay'] ?? 0), 2);
+        $origGross = round((float)($line['total_gross'] ?? 0), 2);
+        $origVac = round((float)($line['vac'] ?? 0), 2);
+        $removed = round($split['holiday_hours'] * $split['rate'], 2);
+        $marker = sh_split_marker($holiday, $split['total_hours'], $origReg, $origGross, $split['holiday_hours'], $split['rate'], $origVac);
+        $line['comments'] = trim((string)($line['comments'] ?? '') . ' ' . $split['text'] . ' ' . $marker);
+        $line['reg_hours'] = $split['regular_hours'];
+        $line['reg_pay'] = round(max(0, $origReg - $removed), 2);
+        $line['total_gross'] = round(max(0, $origGross - $removed), 2);
+        if ($origGross > 0.009) {
+            $line['vac'] = round($origVac * (float)$line['total_gross'] / $origGross, 2);
+        }
+        $line['changed'] = true;
+        $lines[$pick] = $line;
+        return $lines;
+    }
+}
+
+if (!function_exists('sh_plan_regular_restore')) {
+    /**
+     * Put held regular hours back. Safe to call when nothing is held.
+     *
+     * @param list<array<string,mixed>> $lines
+     * @return list<array<string,mixed>>
+     */
+    function sh_plan_regular_restore(array $lines, string $holiday): array {
+        $holiday = substr($holiday, 0, 10);
+        foreach ($lines as &$line) {
+            $comments = (string)($line['comments'] ?? '');
+            if (preg_match('/\[\[stat-split ' . preg_quote($holiday, '/') . ' ([0-9.]+) ([0-9.]+) ([0-9.]+) [0-9.]+ [0-9.]+ ([0-9.]+)\]\]/', $comments, $m)) {
+                $line['reg_hours'] = round((float)$m[1], 2);
+                $line['reg_pay'] = round((float)$m[2], 2);
+                $line['total_gross'] = round((float)$m[3], 2);
+                $line['vac'] = round((float)$m[4], 2);
+                $comments = preg_replace('/\s*Total [0-9.]+h = Holiday .+? \[\[stat-split ' . preg_quote($holiday, '/') . ' [0-9. ]+\]\]/', '', $comments);
+                $line['comments'] = trim((string)$comments);
+                $line['changed'] = true;
+                continue;
+            }
+            if (!preg_match('/\[\[stat-hold ' . preg_quote($holiday, '/') . ' ([0-9.]+) ([0-9.]+)\]\]/', $comments, $m)) {
+                continue;
+            }
+            $take = round((float)$m[1], 2);
+            $useRate = round((float)$m[2], 2);
+            $dollars = round($take * $useRate, 2);
+            $line['reg_hours'] = round((float)($line['reg_hours'] ?? 0) + $take, 2);
+            $line['reg_pay'] = round((float)($line['reg_pay'] ?? 0) + $dollars, 2);
+            $line['total_gross'] = round((float)($line['total_gross'] ?? 0) + $dollars, 2);
+            $line['comments'] = trim((string)preg_replace('/\s*[0-9.]+h moved to Holiday worked 1\.5×\. \[\[stat-hold ' . preg_quote($holiday, '/') . ' [0-9.]+ [0-9.]+\]\]/', '', $comments));
+            $line['changed'] = true;
+        }
+        unset($line);
+        return $lines;
     }
 }
 
@@ -555,7 +741,7 @@ if (!function_exists('sh_post_worked_premium')) {
             'pdo' => $pdo, 'user_id' => $userId, 'site_id' => $siteId, 'org_id' => $orgId,
             'work_date' => $holidayDate, 'pay_date' => $holidayDate,
         ]);
-        $comment = 'Hours on the holiday date only, × 1.5 × rate. Public holiday pay is the separate Statutory Holiday line.';
+        $comment = 'Holiday-date hours only, at 1.5× the regular rate. The same hours are removed from regular pay while this line stays in pay.';
         $ins = $pdo->prepare(
             "INSERT INTO payroll_finalized
                 (user_id, org_id, site_id, work_date, pay_period_end, category, display_label, pay_type,
@@ -565,8 +751,8 @@ if (!function_exists('sh_post_worked_premium')) {
         );
         $ins->execute([
             $userId, $orgId, $siteId, substr($holidayDate, 0, 10), substr($holidayDate, 0, 10),
-            'Holiday Worked', $holidayName . ' — Hours worked @ 1.5x', 'Statutory',
-            round($hours, 2), $rate, $premium, $premium,
+            'Holiday Worked', 'Holiday worked 1.5× (' . number_format($hours, 2) . 'h @ ' . number_format($rate, 2) . ')', 'Statutory',
+            0, $rate, $premium, $premium,
             (float)($ded['cpp'] ?? 0), (float)($ded['ei'] ?? 0), (float)($ded['income_tax'] ?? 0),
             (float)($ded['cpp_er'] ?? 0), (float)($ded['ei_er'] ?? 0), (float)($ded['wcb'] ?? 0), (float)($ded['vac'] ?? 0),
             $byUser, $comment,
@@ -576,10 +762,206 @@ if (!function_exists('sh_post_worked_premium')) {
         if ($id > 0 && isset($cols['stat_approval_status'])) {
             $pdo->prepare("UPDATE payroll_finalized SET stat_approval_status='approved' WHERE id=?")->execute([$id]);
         }
-        if ($id > 0 && isset($cols['overtime_hours'])) {
-            $pdo->prepare('UPDATE payroll_finalized SET overtime_hours=? WHERE id=?')->execute([round($hours, 2), $id]);
-        }
         return $id > 0;
+    }
+}
+
+if (!function_exists('sh_load_regular_pay_lines')) {
+    /** @return list<array<string,mixed>> */
+    function sh_load_regular_pay_lines(PDO $pdo, int $userId, int $siteId): array {
+        try {
+            $st = $pdo->prepare(
+                "SELECT id, work_date, COALESCE(reg_hours,0) AS reg_hours, COALESCE(hourly_rate,0) AS hourly_rate,
+                        COALESCE(reg_pay,0) AS reg_pay, COALESCE(total_gross,0) AS total_gross,
+                        COALESCE(vac,0) AS vac, COALESCE(comments,'') AS comments,
+                        COALESCE(paid_amount,0) AS paid, COALESCE(category,'') AS category
+                   FROM payroll_finalized
+                  WHERE user_id=? AND site_id=?
+                    AND COALESCE(category,'') NOT IN ('Statutory Holiday','Holiday Worked','Deduction','Benefit')
+                    AND COALESCE(pay_type,'') <> 'Statutory'"
+            );
+            $st->execute([$userId, $siteId]);
+            return $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            return [];
+        }
+    }
+}
+
+if (!function_exists('sh_save_regular_pay_lines')) {
+    /** @param list<array<string,mixed>> $lines */
+    function sh_save_regular_pay_lines(PDO $pdo, array $lines): void {
+        $upd = $pdo->prepare('UPDATE payroll_finalized SET reg_hours=?, reg_pay=?, total_gross=?, vac=?, comments=? WHERE id=?');
+        foreach ($lines as $line) {
+            if (empty($line['changed'])) {
+                continue;
+            }
+            $upd->execute([
+                round((float)$line['reg_hours'], 2),
+                round((float)$line['reg_pay'], 2),
+                round((float)$line['total_gross'], 2),
+                round((float)($line['vac'] ?? 0), 2),
+                (string)$line['comments'],
+                (int)$line['id'],
+            ]);
+        }
+    }
+}
+
+if (!function_exists('sh_sync_regular_hold')) {
+    /** Reduce regular hours only while the stat lines are approved and not ignored. */
+    function sh_sync_regular_hold(PDO $pdo, int $userId, int $siteId, string $holiday, float $hours, float $rate, bool $active): void {
+        $lines = sh_load_regular_pay_lines($pdo, $userId, $siteId);
+        if (!$lines) {
+            return;
+        }
+        $planned = $active
+            ? sh_plan_regular_hold($lines, $hours, $holiday, $rate)
+            : sh_plan_regular_restore($lines, $holiday);
+        sh_save_regular_pay_lines($pdo, $planned);
+        if (function_exists('sh_refresh_employee_period')) {
+            sh_refresh_employee_period($pdo, $userId, $siteId, $holiday);
+        }
+    }
+}
+
+if (!function_exists('sh_stat_pair_is_live')) {
+    /** @param list<array<string,mixed>> $rows */
+    function sh_stat_pair_is_live(array $rows): bool {
+        if (!$rows) {
+            return false;
+        }
+        foreach ($rows as $row) {
+            if (!sh_stat_line_is_live((string)($row['stat_approval_status'] ?? ''), (string)($row['status'] ?? ''))) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+if (!function_exists('sh_approve_ledger_stat')) {
+    /**
+     * Same approval as the holiday page. Null when the row is not a stat line.
+     * True when it is approved (a second click does not add another line).
+     */
+    function sh_approve_ledger_stat(PDO $pdo, int $orgId, int $lineId, int $actorId): ?bool {
+        $st = $pdo->prepare(
+            "SELECT f.user_id, f.site_id, f.work_date, f.category, f.display_label, COALESCE(f.stat_approval_status,'') AS approval
+               FROM payroll_finalized f
+               INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+              WHERE f.id = ? LIMIT 1"
+        );
+        $st->execute([$orgId, $lineId]);
+        $line = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$line) {
+            throw new RuntimeException('That payroll line is not in this company.');
+        }
+        $cat = (string)$line['category'];
+        if (strcasecmp($cat, 'Statutory Holiday') !== 0 && strcasecmp($cat, 'Holiday Worked') !== 0) {
+            return null;
+        }
+        if (strtolower((string)$line['approval']) === 'approved') {
+            return true;
+        }
+        $province = 'ON';
+        try {
+            $ps = $pdo->prepare('SELECT province FROM sites WHERE SId=?');
+            $ps->execute([(int)$line['site_id']]);
+            $got = (string)$ps->fetchColumn();
+            if ($got !== '') {
+                $province = $got;
+            }
+        } catch (Throwable $e) {
+        }
+        $name = trim((string)$line['display_label']);
+        if ($name === '') {
+            $name = 'Public holiday';
+        }
+        return sh_decide_stat_line(
+            $pdo,
+            $orgId,
+            (int)$line['user_id'],
+            (int)$line['site_id'],
+            (string)$line['work_date'],
+            $name,
+            $province,
+            $actorId,
+            null,
+            null,
+            ''
+        );
+    }
+}
+
+if (!function_exists('sh_set_payroll_line_state')) {
+    /**
+     * Pending and Ignore apply to a stat pair together. Either one takes the
+     * holiday hours back out of the 1.5× line and returns them to regular pay.
+     */
+    function sh_set_payroll_line_state(PDO $pdo, int $orgId, int $lineId, string $state): void {
+        if (!in_array($state, ['pending', 'ignored', 'approved'], true)) {
+            throw new RuntimeException('Unknown line state.');
+        }
+        $st = $pdo->prepare(
+            "SELECT f.id, f.user_id, f.site_id, f.work_date, f.category, f.display_label
+               FROM payroll_finalized f
+               INNER JOIN users u ON u.id = f.user_id AND u.org_id = ?
+              WHERE f.id = ? LIMIT 1"
+        );
+        $st->execute([$orgId, $lineId]);
+        $line = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$line) {
+            throw new RuntimeException('That payroll line is not in this company.');
+        }
+        $cols = sh_table_cols($pdo, 'payroll_finalized');
+        if (!isset($cols['stat_approval_status'])) {
+            throw new RuntimeException('Payroll lines cannot be marked pending or ignored until the approval column exists.');
+        }
+        $cat = (string)$line['category'];
+        $isStat = strcasecmp($cat, 'Statutory Holiday') === 0 || strcasecmp($cat, 'Holiday Worked') === 0;
+        if ($isStat) {
+            $upd = $pdo->prepare(
+                "UPDATE payroll_finalized SET stat_approval_status=?
+                  WHERE user_id=? AND site_id=? AND work_date=?
+                    AND category IN ('Statutory Holiday','Holiday Worked')"
+            );
+            $upd->execute([$state, (int)$line['user_id'], (int)$line['site_id'], $line['work_date']]);
+            $pair = $pdo->prepare(
+                "SELECT category, COALESCE(stat_approval_status,'') AS stat_approval_status, COALESCE(status,'') AS status
+                   FROM payroll_finalized
+                  WHERE user_id=? AND site_id=? AND work_date=?
+                    AND category IN ('Statutory Holiday','Holiday Worked')"
+            );
+            $pair->execute([(int)$line['user_id'], (int)$line['site_id'], $line['work_date']]);
+            $rows = $pair->fetchAll(PDO::FETCH_ASSOC);
+            $province = 'ON';
+            try {
+                $ps = $pdo->prepare('SELECT province FROM sites WHERE SId=?');
+                $ps->execute([(int)$line['site_id']]);
+                $province = (string)$ps->fetchColumn();
+            } catch (Throwable $e) {
+            }
+            $rate = 0.0;
+            try {
+                $rs = $pdo->prepare('SELECT hourly_rate FROM users WHERE id=?');
+                $rs->execute([(int)$line['user_id']]);
+                $rate = (float)$rs->fetchColumn();
+            } catch (Throwable $e) {
+            }
+            $worked = sh_holiday_worked($pdo, (int)$line['user_id'], (int)$line['site_id'], (string)$line['work_date'], $province, $rate);
+            sh_sync_regular_hold(
+                $pdo,
+                (int)$line['user_id'],
+                (int)$line['site_id'],
+                (string)$line['work_date'],
+                (float)$worked['hours'],
+                $rate,
+                sh_stat_pair_is_live($rows) && $worked['hours'] > 0
+            );
+            return;
+        }
+        $pdo->prepare('UPDATE payroll_finalized SET stat_approval_status=? WHERE id=?')->execute([$state === 'approved' ? null : $state, $lineId]);
     }
 }
 
@@ -1590,6 +1972,7 @@ if (!function_exists('sh_decide_stat_line')) {
                 }
                 $worked = sh_holiday_worked($pdo, $userId, $siteId, $holidayDate, $province, $rate);
                 sh_post_worked_premium($pdo, $orgId, $userId, $siteId, $holidayDate, $holidayName, $worked['hours'], $rate, $worked['premium'], $actorId);
+                sh_sync_regular_hold($pdo, $userId, $siteId, $holidayDate, $worked['hours'], $rate, $worked['hours'] > 0);
             } catch (Throwable $e) {
                 // The statutory line is already approved. Leave it. The premium can be posted later.
             }
@@ -1654,8 +2037,8 @@ if (!function_exists('sh_post_stat_line')) {
         );
         $ins->execute([
             $userId, $orgId, $siteId, $holidayDate, $periodEnd, 'Statutory Holiday',
-            $holidayName . ' — Statutory Holiday Pay', 'Statutory',
-            $hours, $rate, $calc['amount'], $calc['amount'],
+            sh_public_holiday_label((float)$calc['amount'], $rate, $hours), 'Statutory',
+            0, $rate, $calc['amount'], $calc['amount'],
             (float)($ded['cpp'] ?? 0), (float)($ded['ei'] ?? 0), (float)($ded['income_tax'] ?? 0),
             (float)($ded['cpp_er'] ?? 0), (float)($ded['ei_er'] ?? 0), (float)($ded['wcb'] ?? 0), (float)($ded['vac'] ?? 0),
             $byUser, $comment,

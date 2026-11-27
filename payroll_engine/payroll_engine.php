@@ -554,7 +554,7 @@ function pe_not_pending_sql(PDO $pdo, string $alias = ''): string {
     }
     $alias = preg_replace('/[^A-Za-z0-9_]/', '', $alias) ?? '';
     $col = $alias !== '' ? $alias . '.stat_approval_status' : 'stat_approval_status';
-    return " AND COALESCE($col,'') <> 'pending'";
+    return " AND COALESCE($col,'') NOT IN ('pending','ignored')";
 }
 
 /**

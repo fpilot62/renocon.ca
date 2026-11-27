@@ -7,6 +7,9 @@ require_once __DIR__ . '/engine/orgscope_guard.php'; osg_page(['level' => 10]); 
 if (is_file(__DIR__ . '/payroll_engine/payroll_engine.php')) {
     require_once __DIR__ . '/payroll_engine/payroll_engine.php';
 }
+if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+    require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+}
 
 $from   = $_GET['from_date'] ?? '';
 $to     = $_GET['to_date'] ?? '';
@@ -25,12 +28,12 @@ function convertNumberToWords($number) {
 }
 
 try {
-    $sql = "SELECT u.Name as emp_name, u.id as user_id, c.display_label, c.hrs, c.gross, c.cpp_val, c.ei_val
+    $sql = "SELECT u.Name as emp_name, u.id as user_id, c.display_label, c.hrs, c.gross, c.cpp_val, c.ei_val, c.category, c.comments, c.rate
             FROM (
-                SELECT user_id, display_label, reg_hours as hrs, reg_pay as gross, cpp as cpp_val, ei as ei_val 
+                SELECT user_id, display_label, category, comments, hourly_rate as rate, reg_hours as hrs, reg_pay as gross, cpp as cpp_val, ei as ei_val 
                 FROM payroll_finalized WHERE work_date BETWEEN ? AND ?" . (function_exists('pe_not_pending_sql') ? pe_not_pending_sql($pdo, '') : '') . "
                 UNION ALL
-                SELECT user_id, 'Balance Adjustment' as display_label, reg_hours as hrs, reg_pay as gross, cpp_paid as cpp_val, ei_paid as ei_val 
+                SELECT user_id, 'Balance Adjustment' as display_label, '' as category, '' as comments, 0 as rate, reg_hours as hrs, reg_pay as gross, cpp_paid as cpp_val, ei_paid as ei_val 
                 FROM payroll_balance WHERE work_date BETWEEN ? AND ?
             ) as c
             JOIN users u ON c.user_id = u.id ORDER BY u.Name ASC";
@@ -94,9 +97,18 @@ try {
             <tbody>
                 <?php foreach ($emp['lines'] as $l): 
                     $line_net = (float)$l['gross'] - ((float)$l['cpp_val'] + (float)$l['ei_val']); ?>
+                <?php
+                    $advice = (string)($l['display_label'] ?? 'Adjustment');
+                    $splitAdvice = function_exists('sh_split_sentence') ? sh_split_sentence((string)($l['comments'] ?? '')) : '';
+                    if ($splitAdvice !== '') {
+                        $advice = $splitAdvice;
+                    } elseif (strcasecmp((string)($l['category'] ?? ''), 'Statutory Holiday') === 0 && function_exists('sh_public_holiday_label')) {
+                        $advice = sh_public_holiday_label((float)$l['gross'], (float)($l['rate'] ?? 0), (float)$l['hrs']);
+                    }
+                ?>
                 <tr>
-                    <td><?= htmlspecialchars((string)($l['display_label'] ?? 'Adjustment')) ?></td>
-                    <td><?= number_format((float)$l['hrs'], 2) ?></td>
+                    <td><?= htmlspecialchars($advice) ?></td>
+                    <td><?= $splitAdvice !== '' || strcasecmp((string)($l['category'] ?? ''), 'Statutory Holiday') === 0 ? '' : number_format((float)$l['hrs'], 2) ?></td>
                     <td>$<?= number_format((float)$l['gross'], 2) ?></td>
                     <td>-$<?= number_format((float)$l['cpp_val'] + (float)$l['ei_val'], 2) ?></td>
                     <td style="text-align:right;">$<?= number_format($line_net, 2) ?></td>
