@@ -160,20 +160,13 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
     $amount = (float)$calc['amount'];
     $ineligibleReason = (!$calc['eligible'] || $amount <= 0) ? ((string)($calc['reason'] ?? '') !== '' ? (string)$calc['reason'] : 'Not eligible') : '';
 
-    $holiday_hours = 0.0;
-    try {
-    $hrsQ = $pdo->prepare("SELECT COALESCE(SUM(
-            GREATEST(0, TIMESTAMPDIFF(SECOND, a.clock_in, COALESCE(NULLIF(a.clock_out,'0000-00-00 00:00:00'), a.clock_in)))
-            - COALESCE((SELECT SUM(ABS(TIMESTAMPDIFF(SECOND, b.break_start, b.break_end))) FROM breaks b WHERE b.shift_id = a.id), 0)
-        ), 0) / 3600
-        FROM attendance a
-        INNER JOIN users u ON u.id=a.user_id AND u.org_id=?
-        WHERE a.user_id=? AND a.site_id=? AND DATE(a.clock_in)=?");
-    $hrsQ->execute([$orgId, $userId, $siteId, $holidayDate]);
-    $holiday_hours = round((float)$hrsQ->fetchColumn(), 2);
-    } catch (Throwable $e) {
-        $holiday_hours = 0.0;
-    }
+    $rate = function_exists('pe_profile_hourly_rate')
+        ? pe_profile_hourly_rate($pdo, $userId, $holidayDate)
+        : (float)$person['hourly_rate'];
+    if ($rate <= 0) { $rate = (float)$person['hourly_rate']; }
+    $workedParts = sh_holiday_worked($pdo, $userId, $siteId, $holidayDate, $province, $rate);
+    $holiday_hours = (float)$workedParts['hours'];
+    $legacy_hours = (float)$workedParts['legacy_hours'];
     $worked = $holiday_hours > 0;
 
     $dupQ = $pdo->prepare("SELECT id FROM statutory_pay_items WHERE org_id=? AND user_id=? AND site_id=? AND holiday_date=? LIMIT 1");
@@ -190,11 +183,6 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
     } elseif ($postedId) {
         $postedStatus = 'posted';
     }
-    $rate = function_exists('pe_profile_hourly_rate')
-        ? pe_profile_hourly_rate($pdo, $userId, $holidayDate)
-        : (float)$person['hourly_rate'];
-    if ($rate <= 0) { $rate = (float)$person['hourly_rate']; }
-
     $workPosted = false;
     $attId = 0;
     $origGross = 0.0;
@@ -216,7 +204,7 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
             }
         }
     }
-    $worked_pay = ($workPosted || $origPaid) ? 0.0 : round($holiday_hours * $rate * 1.5, 2);
+    $worked_pay = ($workPosted || $origPaid) ? 0.0 : (float)$workedParts['premium'];
     if ($holiday_hours > 0 && $origPaid) {
         $change = 'Regular already PAID $'.number_format($origGross, 2).' — will not zero. Review manually.';
     } elseif ($holiday_hours > 0) {
@@ -276,13 +264,22 @@ function stat_preview_row(PDO $pdo, int $orgId, int $userId, int $siteId, string
         $amount = (float)$stored['total_gross'];
         $postedId = (int)$stored['id'];
     }
+    $locked = in_array($kind, ['approved', 'paid'], true);
+    $drift = sh_worked_change_flag($legacy_hours, sh_premium_pay($legacy_hours, $rate), $holiday_hours, sh_premium_pay($holiday_hours, $rate), $locked);
+    if ($drift !== '') {
+        $flag = trim($flag . ($flag !== '' ? ' ' : '') . $drift);
+    }
+    $pay_label = $drift !== ''
+        ? $drift
+        : sh_worked_pay_label((float)$amount, $holiday_hours, (float)$worked_pay);
     $hidden = in_array($kind, ['excluded', 'ineligible'], true);
     return $person + [
         'province' => $province,
         'lookback_from'=>$from, 'lookback_to'=>$to, 'regular_wages'=>$regular,
         'vacation_pay'=>$vacation, 'base'=>$base, 'amount'=>$amount,
         'equiv_hours'=>$hoursShown,
-        'holiday_hours'=>$holiday_hours, 'worked_pay'=>$worked_pay,
+        'holiday_hours'=>$holiday_hours, 'legacy_hours'=>$legacy_hours, 'worked_pay'=>$worked_pay,
+        'pay_label'=>$pay_label,
         'work_mult'=>1.5, 'orig_gross'=>$origGross, 'orig_paid'=>$origPaid ? 1 : 0,
         'work_posted'=>$workPosted ? 1 : 0, 'att_id'=>$attId,
         'worked_holiday'=>$worked, 'posted_id'=>$postedId, 'posted_status'=>$postedStatus,
@@ -632,7 +629,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
 <div class="wrap">
 <?php if (file_exists(__DIR__.'/payroll_help.php')) { require_once __DIR__.'/payroll_help.php'; echo payroll_help_panel('generate_stat_shifts.php'); } ?>
 <h2>Statutory Holiday Pay</h2>
-<p class="small-note">One list for the pay period. Approving a calculated line creates it as approved and does not pay it. Flagged lines need their own approval. Excluding someone records the reason and they are not offered again. People who worked the holiday also have a blue 1.5× premium, separate from the stat pay.</p>
+<p class="small-note">One list for the pay period. Approving a calculated line creates it as approved and does not pay it. The approved total is public holiday pay plus 1.5× for the hours that fall on the holiday date in the site's local time. A shift that crosses midnight counts only those minutes. Flagged lines need their own approval. An already approved line is left as posted and only flagged when the hours would change. Excluding someone records the reason and they are not offered again.</p>
 <?php if($message):?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif;?>
 
 <form class="card card-body mb-3 period-card" method="get" id="statPeriodForm">
@@ -773,7 +770,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
       <input type="hidden" name="holiday_name" value="<?= htmlspecialchars($r['holiday_name']) ?>">
       <input class="form-control form-control-sm" style="width:90px;" name="amount" value="<?= htmlspecialchars(number_format((float)$r['amount'], 2, '.', '')) ?>">
       <input class="form-control form-control-sm" style="width:70px;" name="hours" value="<?= htmlspecialchars(number_format((float)$r['equiv_hours'], 2, '.', '')) ?>">
-      <span class="stat-pay-show"><?php if (!empty($r['worked_holiday'])): ?><span class="badge-worked">Worked 1.5× $<?= number_format((float)$r['worked_pay'], 2) ?></span><?php else: ?>—<?php endif; ?></span>
+      <span class="stat-pay-show"><?= htmlspecialchars((string)($r['pay_label'] ?? '')) ?></span>
       <select class="form-control form-control-sm" name="reason" style="width:220px;">
         <option value="">Amount unchanged</option>
         <?php foreach ($editReasons as $reason): ?><option><?= htmlspecialchars($reason) ?></option><?php endforeach; ?>
@@ -791,7 +788,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
   <?php else: ?>
   <td>$<?= number_format((float)$r['amount'], 2) ?></td>
   <td><?= number_format((float)$r['equiv_hours'], 2) ?></td>
-  <td><?php if (!empty($r['worked_holiday'])): ?><span class="badge-worked">Worked 1.5× $<?= number_format((float)$r['worked_pay'], 2) ?></span><?php else: ?>—<?php endif; ?></td>
+  <td><?= htmlspecialchars((string)($r['pay_label'] ?? '')) ?></td>
   <td></td>
   <td><?php if ($kind === 'approved'): ?>Approved, not paid<?php elseif ($kind === 'paid'): ?>Paid<?php elseif ($kind === 'excluded'): ?>Excluded<?php else: ?>Not eligible<?php endif; ?></td>
   <?php endif; ?>
