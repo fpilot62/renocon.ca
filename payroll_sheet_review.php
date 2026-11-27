@@ -25,6 +25,7 @@ require_once __DIR__ . '/engine/payroll_sheet_grid_lib.php';
 require_once __DIR__ . '/engine/sheet_hide_lib.php';
 require_once __DIR__ . '/engine/sheet_summary_lib.php';
 require_once __DIR__ . '/engine/payroll_sheet_edit_lib.php';
+require_once __DIR__ . '/engine/outstanding_summary_lib.php';
 ps_require_payroll_admin();
 if (is_file(__DIR__ . '/engine/menu_generator.php')) {
     require_once __DIR__ . '/engine/menu_generator.php';
@@ -151,6 +152,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_sheet_source']))
         $back['org_id'] = $orgId;
         $back['src'] = (string)($_POST['src'] ?? $rowId);
         header('Location: payroll_sheet_review.php?' . http_build_query($back));
+        exit;
+    } catch (Throwable $e) {
+        $warnings[] = $e->getMessage();
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['add_outstanding_period']) || isset($_POST['remove_outstanding_period']) || isset($_POST['save_outstanding_link']) || isset($_POST['save_outstanding_period_amount']) || isset($_POST['save_outstanding_payment']) || isset($_POST['delete_outstanding_payment']))) {
+    try {
+        $back = psr_keep_query();
+        if (isset($_POST['add_outstanding_period'])) {
+            $halves = pos_month_halves((int)($_POST['period_year'] ?? 0), (int)($_POST['period_month'] ?? 0));
+            $half = (int)($_POST['period_half'] ?? 1) === 2 ? 1 : 0;
+            pos_add_period($pdo, $orgId, $halves[$half][0], $halves[$half][1], $actorId);
+            $_SESSION['psr_flash'] = 'Period added. Nobody was marked paid.';
+        } elseif (isset($_POST['remove_outstanding_period'])) {
+            pos_remove_period($pdo, $orgId, (int)($_POST['period_id'] ?? 0), $actorId);
+            $_SESSION['psr_flash'] = 'Period removed. Reconciliation payments were not changed, and nobody was marked paid.';
+        } elseif (isset($_POST['save_outstanding_link'])) {
+            pos_link_employee($pdo, $orgId, (int)($_POST['summary_id'] ?? 0), $actorId, (int)($_POST['user_id'] ?? 0), (int)($_POST['row_version'] ?? 0), sheet_show_hidden_requested());
+            $_SESSION['psr_flash'] = 'Employee link saved. Nobody was marked paid.';
+        } elseif (isset($_POST['save_outstanding_period_amount'])) {
+            $summaryId = (int)($_POST['summary_id'] ?? 0);
+            $periodId = (int)($_POST['period_id'] ?? 0);
+            $summary = pos_summary_for_org($pdo, $orgId, $summaryId);
+            $period = $pdo->prepare('SELECT period_start, period_end FROM payroll_outstanding_periods WHERE id = ? AND org_id = ?');
+            $period->execute([$periodId, $orgId]);
+            $periodRow = $period->fetch(PDO::FETCH_ASSOC);
+            if (!$periodRow) {
+                throw new RuntimeException('That period is not in this company. Nothing was saved.');
+            }
+            $userId = (int)($summary['user_id'] ?? 0);
+            $lines = $userId > 0 ? (pos_fetch_lines($pdo, $orgId, [$userId])[$userId] ?? []) : [];
+            pos_save_period_amount($pdo, $orgId, $summaryId, $periodId, $actorId, $_POST['amount'] ?? '', (int)($_POST['row_version'] ?? 0), pos_period_default($lines, (string)$periodRow['period_start'], (string)$periodRow['period_end']));
+            $_SESSION['psr_flash'] = 'Period amount saved as a manual figure. Payroll was not changed and nobody was marked paid.';
+        } elseif (isset($_POST['delete_outstanding_payment'])) {
+            pos_delete_payment($pdo, $orgId, (int)($_POST['payment_id'] ?? 0), $actorId, (int)($_POST['row_version'] ?? 0));
+            $_SESSION['psr_flash'] = 'Reconciliation payment removed. No payroll payment was created and nobody was marked paid.';
+            $back = psr_keep_query(['pay_open' => (int)($_POST['summary_id'] ?? 0)]);
+        } else {
+            $paymentId = (int)($_POST['payment_id'] ?? 0);
+            if ($paymentId > 0) {
+                pos_edit_payment($pdo, $orgId, $paymentId, $actorId, (int)($_POST['row_version'] ?? 0), $_POST);
+            } else {
+                pos_add_payment($pdo, $orgId, (int)($_POST['summary_id'] ?? 0), $actorId, $_POST);
+            }
+            $_SESSION['psr_flash'] = 'Reconciliation payment saved. It is not a payroll payment and nobody was marked paid.';
+            $back = psr_keep_query(['pay_open' => (int)($_POST['summary_id'] ?? 0)]);
+        }
+        header('Location: ' . $back . '#outstanding-pay');
         exit;
     } catch (Throwable $e) {
         $warnings[] = $e->getMessage();
@@ -754,6 +803,21 @@ foreach ($report['companies'] as $companyPanel) {
     $companyPanelCount += count($companyPanel['employees'] ?? []);
 }
 $deferredItems = psr_deferred_items();
+$outstandingUsers = [];
+try {
+    $outstanding = pos_review_table($pdo, $orgId, $showHiddenAdmins, new DateTimeImmutable('now'), $actorId);
+    $outstandingUsers = pse_org_users($pdo, $orgId);
+    if (!$showHiddenAdmins) {
+        foreach ($outstandingUsers as $hideId => $hideName) {
+            if (sheet_person_is_hidden((int)$hideId, (string)$hideName)) {
+                unset($outstandingUsers[$hideId]);
+            }
+        }
+    }
+} catch (Throwable $e) {
+    $warnings[] = 'Outstanding pay summary could not be loaded. ' . $e->getMessage();
+    $outstanding = ['count' => 0, 'periods' => [], 'groups' => [], 'grand' => pos_empty_total([])];
+}
 $byUser = [];
 foreach ($report['companies'][0]['employees'] as $emp) {
     $byUser[(int)$emp['user_id']] = $emp;
@@ -1321,6 +1385,152 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         </div>
         <?php endif; ?>
     </form>
+    <details class="sheet psr-panel" id="outstanding-pay" data-panel="outstanding-pay" data-default-open="1" open>
+        <summary>Outstanding pay (Employee Pay status sheet) (<?= (int)$outstanding['count'] ?>)</summary>
+        <p class="mt-2 mb-2">Total amount is the opening figure from the sheet. Each period starts from payroll gross minus employee CPP minus employee EI, and a typed amount replaces that for this table only. <strong>Manual reconciliation.</strong> Paid and Paid date do not create a payroll payment, do not mark anyone paid, and do not approve anything.</p>
+        <form method="POST" action="<?= psr_h(psr_keep_query()) ?>#outstanding-pay" class="form-row align-items-end mb-3">
+            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+            <div class="col-md-3"><label class="mb-0">Month</label>
+                <select name="period_month" class="form-control form-control-sm">
+                    <?php for ($m = 1; $m <= 12; $m++): ?>
+                        <option value="<?= $m ?>" <?= (int)date('n') === $m ? 'selected' : '' ?>><?= psr_h(pos_month_name($m)) ?></option>
+                    <?php endfor; ?>
+                </select></div>
+            <div class="col-md-2"><label class="mb-0">Year</label><input name="period_year" class="form-control form-control-sm" value="<?= psr_h(date('Y')) ?>"></div>
+            <div class="col-md-3"><label class="mb-0">Half</label>
+                <select name="period_half" class="form-control form-control-sm"><option value="1">1–15</option><option value="2">16–end</option></select></div>
+            <div class="col-md-2"><button class="btn btn-sm btn-outline-dark" name="add_outstanding_period" value="1">Add period</button></div>
+        </form>
+        <?php if (!$outstanding['groups']): ?><p class="text-muted">No outstanding summary is loaded for this company.</p><?php endif; ?>
+        <div class="table-responsive">
+        <table class="table table-sm table-bordered mb-0">
+            <thead><tr>
+                <th>Store</th>
+                <th>Employee</th>
+                <th class="num">Total amount</th>
+                <?php foreach ($outstanding['periods'] as $period): ?>
+                    <th class="num"><?= psr_h($period['label']) ?>
+                        <form method="POST" action="<?= psr_h(psr_keep_query()) ?>#outstanding-pay" class="mt-1">
+                            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                            <input type="hidden" name="period_id" value="<?= (int)$period['id'] ?>">
+                            <button class="btn btn-sm btn-link p-0" name="remove_outstanding_period" value="1">Remove</button>
+                        </form></th>
+                <?php endforeach; ?>
+                <th class="num">Balance</th>
+                <th class="num">Paid</th>
+                <th>Paid date</th>
+                <th class="num">Final balance</th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ($outstanding['groups'] as $group): ?>
+                <?php foreach ($group['rows'] as $orow): ?>
+                <tr>
+                    <td><?= psr_h($orow['store']) ?></td>
+                    <td><?= psr_h($orow['name']) ?>
+                        <div class="text-muted"><?= $orow['user_id'] > 0 ? '#' . (int)$orow['user_id'] : 'not linked' ?></div>
+                        <?php if ($orow['notes'] !== ''): ?><div class="text-muted"><?= psr_h($orow['notes']) ?></div><?php endif; ?>
+                        <form method="POST" action="<?= psr_h(psr_keep_query()) ?>#outstanding-pay" class="form-row mt-1">
+                            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                            <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                            <input type="hidden" name="row_version" value="<?= (int)$orow['row_version'] ?>">
+                            <div class="col-8"><select name="user_id" class="form-control form-control-sm"><option value="0">Not linked</option>
+                                <?php foreach ($outstandingUsers as $uid => $uname): ?>
+                                    <option value="<?= (int)$uid ?>" <?= (int)$orow['user_id'] === (int)$uid ? 'selected' : '' ?>><?= psr_h($uname) ?> #<?= (int)$uid ?></option>
+                                <?php endforeach; ?>
+                            </select></div>
+                            <div class="col-4"><button class="btn btn-sm btn-outline-secondary" name="save_outstanding_link" value="1">Link</button></div>
+                        </form></td>
+                    <td class="num"><?= psr_h(number_format((float)$orow['total'], 2)) ?></td>
+                    <?php foreach ($outstanding['periods'] as $period): $cell = $orow['periods'][$period['id']]; ?>
+                    <td class="num">
+                        <form method="POST" action="<?= psr_h(psr_keep_query()) ?>#outstanding-pay">
+                            <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                            <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                            <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                            <input type="hidden" name="period_id" value="<?= (int)$period['id'] ?>">
+                            <input type="hidden" name="row_version" value="<?= (int)$cell['row_version'] ?>">
+                            <input name="amount" class="form-control form-control-sm text-right" value="<?= $cell['state'] === 'amount' ? psr_h(number_format((float)$cell['amount'], 2, '.', '')) : '' ?>" placeholder="<?= $cell['state'] === 'unknown' ? 'unknown' : '' ?>">
+                            <button class="btn btn-sm btn-link p-0" name="save_outstanding_period_amount" value="1">Save</button>
+                            <?php if ($cell['source'] === 'manual'): ?><div class="text-muted">manual</div><?php endif; ?>
+                        </form>
+                        <?php if ($cell['state'] === 'unknown' && $cell['source'] !== 'manual'): ?><div class="text-muted">unknown</div><?php endif; ?>
+                    </td>
+                    <?php endforeach; ?>
+                    <td class="num"><?= $orow['balance']['state'] === 'amount' ? psr_h(number_format((float)$orow['balance']['amount'], 2)) : 'unknown' ?></td>
+                    <td class="num"><?= psr_h(number_format((float)$orow['paid'], 2)) ?></td>
+                    <td>
+                        <details <?= (int)($_GET['pay_open'] ?? 0) === (int)$orow['id'] ? 'open' : '' ?>>
+                            <summary><?= $orow['paid_on'] !== '' ? psr_h($orow['paid_on']) : 'No payments' ?> (<?= (int)$orow['payment_count'] ?>)</summary>
+                            <?php foreach ($orow['payments'] as $payment): ?>
+                            <form method="POST" action="<?= psr_h(psr_keep_query(['pay_open' => (int)$orow['id']])) ?>#outstanding-pay" class="border rounded p-2 my-1">
+                                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                                <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                                <input type="hidden" name="payment_id" value="<?= (int)$payment['id'] ?>">
+                                <input type="hidden" name="row_version" value="<?= (int)$payment['row_version'] ?>">
+                                <div class="form-row">
+                                    <div class="col-6"><input type="date" name="paid_date" class="form-control form-control-sm" value="<?= psr_h((string)$payment['paid_date']) ?>"></div>
+                                    <div class="col-6"><input name="amount" class="form-control form-control-sm" value="<?= psr_h(number_format((float)$payment['amount'], 2, '.', '')) ?>"></div>
+                                    <div class="col-6 mt-1"><input name="method" class="form-control form-control-sm" value="<?= psr_h((string)($payment['method'] ?? '')) ?>" placeholder="Method"></div>
+                                    <div class="col-6 mt-1"><input name="reference_no" class="form-control form-control-sm" value="<?= psr_h((string)($payment['reference_no'] ?? '')) ?>" placeholder="Reference"></div>
+                                    <div class="col-12 mt-1"><input name="note" class="form-control form-control-sm" value="<?= psr_h((string)($payment['note'] ?? '')) ?>" placeholder="Note"></div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-secondary mt-1" name="save_outstanding_payment" value="1">Save payment</button>
+                                <button class="btn btn-sm btn-outline-danger mt-1" name="delete_outstanding_payment" value="1">Remove</button>
+                            </form>
+                            <?php endforeach; ?>
+                            <form method="POST" action="<?= psr_h(psr_keep_query(['pay_open' => (int)$orow['id']])) ?>#outstanding-pay" class="mt-1">
+                                <input type="hidden" name="csrf_token" value="<?= psr_h($csrf) ?>">
+                                <input type="hidden" name="org_id" value="<?= (int)$orgId ?>">
+                                <input type="hidden" name="summary_id" value="<?= (int)$orow['id'] ?>">
+                                <input type="hidden" name="payment_id" value="0">
+                                <div class="form-row">
+                                    <div class="col-6"><input type="date" name="paid_date" class="form-control form-control-sm"></div>
+                                    <div class="col-6"><input name="amount" class="form-control form-control-sm" placeholder="Amount"></div>
+                                    <div class="col-6 mt-1"><input name="method" class="form-control form-control-sm" placeholder="Method"></div>
+                                    <div class="col-6 mt-1"><input name="reference_no" class="form-control form-control-sm" placeholder="Reference"></div>
+                                    <div class="col-12 mt-1"><input name="note" class="form-control form-control-sm" placeholder="Note"></div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-dark mt-1" name="save_outstanding_payment" value="1">Add payment</button>
+                            </form>
+                        </details>
+                    </td>
+                    <td class="num"><?= $orow['final']['state'] === 'amount' ? psr_h(number_format((float)$orow['final']['amount'], 2)) : 'unknown' ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr class="group-summary">
+                    <td><?= psr_h($group['store']) ?></td>
+                    <td>Store total</td>
+                    <td class="num"><?= psr_h(number_format((float)$group['totals']['total'], 2)) ?></td>
+                    <?php foreach ($outstanding['periods'] as $period): ?>
+                        <td class="num"><?= psr_h(pos_figure_text($group['totals']['periods'][$period['id']])) ?></td>
+                    <?php endforeach; ?>
+                    <td class="num"><?= psr_h(pos_figure_text($group['totals']['balance'])) ?></td>
+                    <td class="num"><?= psr_h(number_format((float)$group['totals']['paid'], 2)) ?></td>
+                    <td></td>
+                    <td class="num"><?= psr_h(pos_figure_text($group['totals']['final'])) ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+            <?php if ($outstanding['groups']): ?>
+            <tfoot><tr>
+                <td colspan="2">Grand total</td>
+                <td class="num"><?= psr_h(number_format((float)$outstanding['grand']['total'], 2)) ?></td>
+                <?php foreach ($outstanding['periods'] as $period): ?>
+                    <td class="num"><?= psr_h(pos_figure_text($outstanding['grand']['periods'][$period['id']])) ?></td>
+                <?php endforeach; ?>
+                <td class="num"><?= psr_h(pos_figure_text($outstanding['grand']['balance'])) ?></td>
+                <td class="num"><?= psr_h(number_format((float)$outstanding['grand']['paid'], 2)) ?></td>
+                <td></td>
+                <td class="num"><?= psr_h(pos_figure_text($outstanding['grand']['final'])) ?></td>
+            </tr></tfoot>
+            <?php endif; ?>
+        </table>
+        </div>
+    </details>
     <details class="sheet psr-panel" data-panel="unallocated-evidence">
         <summary>Unallocated cash evidence (<?= count($eventRows) ?>)</summary>
         <p class="mb-1 mt-2">These are not applied to a person or period and are not certified payable.</p>
@@ -1839,10 +2049,10 @@ foreach ($report['companies'][0]['employees'] as $emp) {
         try { saved = localStorage.getItem(key); } catch (e) {}
         if (el.getAttribute('data-force-open') === '1') {
             el.open = true;
-        } else if (saved === '1') {
+        } else if (saved === '1' || saved === '0') {
+            el.open = saved === '1';
+        } else if (el.getAttribute('data-default-open') === '1') {
             el.open = true;
-        } else if (saved === '0') {
-            el.open = false;
         }
         el.addEventListener('toggle', function () {
             try { localStorage.setItem(key, el.open ? '1' : '0'); } catch (e) {}
