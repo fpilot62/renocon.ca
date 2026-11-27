@@ -9,10 +9,11 @@
  * Never writes payroll_finalized or payroll_payments. Never approves a row
  * and never marks anyone paid.
  *
- * A period cell defaults to payroll_finalized.total_gross minus
+ * A period row defaults to payroll_finalized.total_gross minus
  * payroll_finalized.cpp minus payroll_finalized.ei for finalized lines whose
- * period start falls in that half-month. Income tax, cpp2, and vacation are
- * not used. Vacation pay is not a column.
+ * start date falls in that half-month. Income tax, cpp2, and vacation are
+ * not used. Vacation pay is not a column. Periods are rows on the employee,
+ * not columns shared by the company.
  */
 
 require_once __DIR__ . '/payroll_sheet_review_lib.php';
@@ -44,27 +45,21 @@ function pos_ensure(PDO $pdo): void
             )'
         );
         $pdo->exec(
-            'CREATE TABLE IF NOT EXISTS payroll_outstanding_periods (
-                id INTEGER PRIMARY KEY,
-                org_id INT NOT NULL,
-                period_start TEXT NOT NULL,
-                period_end TEXT NOT NULL,
-                added_by INT NOT NULL DEFAULT 0,
-                added_at TEXT NOT NULL,
-                UNIQUE (org_id, period_start, period_end)
-            )'
-        );
-        $pdo->exec(
-            'CREATE TABLE IF NOT EXISTS payroll_outstanding_period_amounts (
+            'CREATE TABLE IF NOT EXISTS payroll_outstanding_period_rows (
                 id INTEGER PRIMARY KEY,
                 summary_id INT NOT NULL,
-                period_id INT NOT NULL,
+                period_no INT NOT NULL,
+                period_month TEXT NOT NULL,
                 amount REAL NULL,
                 source TEXT NOT NULL DEFAULT "manual",
                 edited_by INT NOT NULL DEFAULT 0,
-                edited_at TEXT NOT NULL,
+                edited_at TEXT NULL,
+                created_by INT NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                deleted INT NOT NULL DEFAULT 0,
+                deleted_at TEXT NULL,
                 row_version INT NOT NULL DEFAULT 1,
-                UNIQUE (summary_id, period_id)
+                UNIQUE (summary_id, period_no, period_month)
             )'
         );
         $pdo->exec(
@@ -104,7 +99,7 @@ function pos_ensure(PDO $pdo): void
         $ready = true;
         return;
     }
-    $file = dirname(__DIR__) . '/migrations/20261127_payroll_outstanding_summary.sql';
+    $file = dirname(__DIR__) . '/migrations/20261127_payroll_outstanding_period_rows.sql';
     $sql = is_file($file) ? file_get_contents($file) : false;
     if ($sql === false) {
         throw new RuntimeException('The outstanding summary migration file is missing.');
@@ -157,65 +152,131 @@ function pos_month_halves(int $year, int $month): array
     ];
 }
 
-function pos_add_period(PDO $pdo, int $orgId, string $start, string $end, int $actor): int
+function pos_first_of_month(int $year, int $month): string
+{
+    if ($month < 1 || $month > 12 || $year < 2000 || $year > 2100) {
+        throw new RuntimeException('That month is not valid.');
+    }
+    return sprintf('%04d-%02d-01', $year, $month);
+}
+
+function pos_month_year_label(string $first): string
+{
+    $a = DateTime::createFromFormat('Y-m-d', substr($first, 0, 10));
+    if (!$a) {
+        return $first;
+    }
+    return pos_month_name((int)$a->format('n')) . ' ' . $a->format('Y');
+}
+
+function pos_period_for_org(PDO $pdo, int $orgId, int $rowId): array
+{
+    $st = $pdo->prepare(
+        'SELECT r.*, s.org_id
+         FROM payroll_outstanding_period_rows r
+         INNER JOIN payroll_outstanding_summary s ON s.id = r.summary_id
+         WHERE r.id = ? AND s.org_id = ? AND r.deleted = 0'
+    );
+    $st->execute([$rowId, $orgId]);
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$row) {
+        throw new RuntimeException('That period row is not in this company. Nothing was saved.');
+    }
+    return $row;
+}
+
+function pos_period_amount_choice(PDO $pdo, int $orgId, array $summary, int $periodNo, string $month, $raw): array
+{
+    $parsed = psr_parse_amount($raw);
+    if (!$parsed['ok']) {
+        throw new RuntimeException('That period amount is not a number. Nothing was saved.');
+    }
+    if ($parsed['value'] !== null) {
+        return ['amount' => (float)$parsed['value'], 'source' => 'manual'];
+    }
+    $userId = (int)($summary['user_id'] ?? 0);
+    if ($userId > 0) {
+        $bounds = pos_half_bounds($month, $periodNo);
+        $lines = pos_fetch_lines($pdo, $orgId, [$userId])[$userId] ?? [];
+        $default = pos_period_default($lines, $bounds[0], $bounds[1]);
+        if ($default['state'] === 'amount') {
+            return ['amount' => (float)$default['amount'], 'source' => 'payroll'];
+        }
+    }
+    return ['amount' => null, 'source' => 'manual'];
+}
+
+function pos_half_bounds(string $periodMonth, int $periodNo): array
+{
+    $a = DateTime::createFromFormat('Y-m-d', substr($periodMonth, 0, 10));
+    if (!$a || ($periodNo !== 1 && $periodNo !== 2)) {
+        throw new RuntimeException('That period is not valid.');
+    }
+    return pos_month_halves((int)$a->format('Y'), (int)$a->format('n'))[$periodNo - 1];
+}
+
+function pos_add_period_row(PDO $pdo, int $orgId, int $summaryId, int $actor, int $periodNo, int $year, int $month, $rawAmount): int
 {
     pos_ensure($pdo);
-    $start = psr_valid_date($start) ?? '';
-    $end = psr_valid_date($end) ?? '';
-    if ($start === '' || $end === '' || $start > $end) {
-        throw new RuntimeException('That period is not a valid date range.');
+    if ($periodNo !== 1 && $periodNo !== 2) {
+        throw new RuntimeException('Period is 1 for the 1st through the 15th, or 2 for the 16th through the end.');
     }
-    $have = $pdo->prepare('SELECT id FROM payroll_outstanding_periods WHERE org_id = ? AND period_start = ? AND period_end = ?');
-    $have->execute([$orgId, $start, $end]);
-    $id = (int)$have->fetchColumn();
-    if ($id > 0) {
-        return $id;
+    $summary = pos_summary_for_org($pdo, $orgId, $summaryId);
+    $first = pos_first_of_month($year, $month);
+    $choice = pos_period_amount_choice($pdo, $orgId, $summary, $periodNo, $first, $rawAmount);
+    $now = date('Y-m-d H:i:s');
+    $have = $pdo->prepare('SELECT * FROM payroll_outstanding_period_rows WHERE summary_id = ? AND period_no = ? AND period_month = ?');
+    $have->execute([$summaryId, $periodNo, $first]);
+    $existing = $have->fetch(PDO::FETCH_ASSOC);
+    if ($existing && (int)$existing['deleted'] === 0) {
+        throw new RuntimeException('That period is already on this employee.');
     }
-    $pdo->prepare('INSERT INTO payroll_outstanding_periods (org_id, period_start, period_end, added_by, added_at) VALUES (?,?,?,?,?)')
-        ->execute([$orgId, $start, $end, $actor, date('Y-m-d H:i:s')]);
+    if ($existing) {
+        $upd = $pdo->prepare(
+            'UPDATE payroll_outstanding_period_rows
+                SET amount = ?, source = ?, edited_by = ?, edited_at = ?, deleted = 0, deleted_at = NULL, row_version = row_version + 1
+              WHERE id = ? AND summary_id = ?'
+        );
+        $upd->execute([$choice['amount'], $choice['source'], $actor, $now, (int)$existing['id'], $summaryId]);
+        pos_audit($pdo, $orgId, $summaryId, 'period_row', (int)$existing['id'], bin2hex(random_bytes(8)), 'add_period_row', 'amount', null, $choice['amount'] === null ? null : (string)$choice['amount'], $actor);
+        return (int)$existing['id'];
+    }
+    $pdo->prepare(
+        'INSERT INTO payroll_outstanding_period_rows
+            (summary_id, period_no, period_month, amount, source, edited_by, edited_at, created_by, created_at, deleted, row_version)
+         VALUES (?,?,?,?,?,?,?,?,?,0,1)'
+    )->execute([
+        $summaryId, $periodNo, $first, $choice['amount'], $choice['source'], $actor, $now, $actor, $now,
+    ]);
     $id = (int)$pdo->lastInsertId();
-    pos_audit($pdo, $orgId, 0, 'period', $id, bin2hex(random_bytes(8)), 'add_period', 'period', null, $start . ' to ' . $end, $actor);
+    pos_audit($pdo, $orgId, $summaryId, 'period_row', $id, bin2hex(random_bytes(8)), 'add_period_row', 'amount', null, $choice['amount'] === null ? null : (string)$choice['amount'], $actor);
     return $id;
 }
 
-function pos_seed_default_periods(PDO $pdo, int $orgId, int $actor, DateTimeInterface $today): void
+function pos_edit_period_row(PDO $pdo, int $orgId, int $rowId, int $actor, $rawAmount, int $rowVersion): void
 {
     pos_ensure($pdo);
-    $count = $pdo->prepare('SELECT COUNT(*) FROM payroll_outstanding_periods WHERE org_id = ?');
-    $count->execute([$orgId]);
-    if ((int)$count->fetchColumn() > 0) {
-        return;
-    }
-    foreach (pos_month_halves((int)$today->format('Y'), (int)$today->format('n')) as $half) {
-        pos_add_period($pdo, $orgId, $half[0], $half[1], $actor);
-    }
-}
-
-function pos_remove_period(PDO $pdo, int $orgId, int $periodId, int $actor): void
-{
-    pos_ensure($pdo);
-    $st = $pdo->prepare('SELECT * FROM payroll_outstanding_periods WHERE id = ? AND org_id = ?');
-    $st->execute([$periodId, $orgId]);
-    $period = $st->fetch(PDO::FETCH_ASSOC);
-    if (!$period) {
-        throw new RuntimeException('That period is not in this company. Nothing was removed.');
+    $parsed = psr_parse_amount($rawAmount);
+    if (!$parsed['ok'] || $parsed['value'] === null) {
+        throw new RuntimeException('That period amount is not a number. Nothing was saved.');
     }
     $pdo->beginTransaction();
     try {
-        $amounts = $pdo->prepare(
-            'SELECT a.id, a.summary_id, a.amount, s.org_id
-             FROM payroll_outstanding_period_amounts a
-             INNER JOIN payroll_outstanding_summary s ON s.id = a.summary_id
-             WHERE a.period_id = ? AND s.org_id = ?'
-        );
-        $amounts->execute([$periodId, $orgId]);
-        $batch = bin2hex(random_bytes(8));
-        foreach ($amounts->fetchAll(PDO::FETCH_ASSOC) as $amount) {
-            pos_audit($pdo, $orgId, (int)$amount['summary_id'], 'period_amount', (int)$amount['id'], $batch, 'remove_period', 'amount', $amount['amount'] !== null ? (string)$amount['amount'] : null, null, $actor);
+        $row = pos_period_for_org($pdo, $orgId, $rowId);
+        if ((int)$row['row_version'] !== $rowVersion) {
+            throw new RuntimeException('Someone saved this period row after you opened it. Reload and try again. Nothing was saved.');
         }
-        $pdo->prepare('DELETE FROM payroll_outstanding_period_amounts WHERE period_id = ?')->execute([$periodId]);
-        $pdo->prepare('DELETE FROM payroll_outstanding_periods WHERE id = ? AND org_id = ?')->execute([$periodId, $orgId]);
-        pos_audit($pdo, $orgId, 0, 'period', $periodId, $batch, 'remove_period', 'period', $period['period_start'] . ' to ' . $period['period_end'], null, $actor);
+        $upd = $pdo->prepare(
+            'UPDATE payroll_outstanding_period_rows
+                SET amount = ?, source = ?, edited_by = ?, edited_at = ?, row_version = row_version + 1
+              WHERE id = ? AND summary_id = ? AND row_version = ? AND deleted = 0'
+        );
+        $now = date('Y-m-d H:i:s');
+        $upd->execute([(float)$parsed['value'], 'manual', $actor, $now, $rowId, (int)$row['summary_id'], $rowVersion]);
+        if ($upd->rowCount() < 1) {
+            throw new RuntimeException('Someone saved this period row after you opened it. Reload and try again. Nothing was saved.');
+        }
+        pos_audit($pdo, $orgId, (int)$row['summary_id'], 'period_row', $rowId, bin2hex(random_bytes(8)), 'edit_period_row', 'amount', $row['amount'] !== null ? (string)$row['amount'] : null, (string)$parsed['value'], $actor);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) {
@@ -223,6 +284,79 @@ function pos_remove_period(PDO $pdo, int $orgId, int $periodId, int $actor): voi
         }
         throw $e;
     }
+}
+
+function pos_delete_period_row(PDO $pdo, int $orgId, int $rowId, int $actor, int $rowVersion): void
+{
+    pos_ensure($pdo);
+    $pdo->beginTransaction();
+    try {
+        $row = pos_period_for_org($pdo, $orgId, $rowId);
+        if ((int)$row['row_version'] !== $rowVersion) {
+            throw new RuntimeException('Someone saved this period row after you opened it. Reload and try again. Nothing was saved.');
+        }
+        $now = date('Y-m-d H:i:s');
+        $upd = $pdo->prepare(
+            'UPDATE payroll_outstanding_period_rows
+                SET deleted = 1, deleted_at = ?, edited_by = ?, edited_at = ?, row_version = row_version + 1
+              WHERE id = ? AND summary_id = ? AND row_version = ? AND deleted = 0'
+        );
+        $upd->execute([$now, $actor, $now, $rowId, (int)$row['summary_id'], $rowVersion]);
+        if ($upd->rowCount() < 1) {
+            throw new RuntimeException('Someone saved this period row after you opened it. Reload and try again. Nothing was saved.');
+        }
+        pos_audit($pdo, $orgId, (int)$row['summary_id'], 'period_row', $rowId, bin2hex(random_bytes(8)), 'delete_period_row', 'deleted', '0', '1', $actor);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+}
+
+function pos_fill_from_payroll(PDO $pdo, int $orgId, int $summaryId, int $actor): int
+{
+    pos_ensure($pdo);
+    $summary = pos_summary_for_org($pdo, $orgId, $summaryId);
+    $userId = (int)($summary['user_id'] ?? 0);
+    if ($userId <= 0) {
+        throw new RuntimeException('Link an employee before filling periods from payroll. Nothing was added.');
+    }
+    $lines = pos_fetch_lines($pdo, $orgId, [$userId])[$userId] ?? [];
+    $buckets = [];
+    foreach ($lines as $line) {
+        $start = (string)$line['start'];
+        $when = DateTime::createFromFormat('Y-m-d', $start);
+        if (!$when) {
+            continue;
+        }
+        $no = (int)$when->format('j') <= 15 ? 1 : 2;
+        $month = $when->format('Y-m-01');
+        $buckets[$month . '|' . $no][] = $line;
+    }
+    $added = 0;
+    $now = date('Y-m-d H:i:s');
+    $have = $pdo->prepare('SELECT id FROM payroll_outstanding_period_rows WHERE summary_id = ? AND period_no = ? AND period_month = ?');
+    foreach ($buckets as $key => $group) {
+        [$month, $no] = explode('|', $key);
+        $net = pos_cpp_ei_net($group);
+        if ($net['state'] !== 'amount') {
+            continue;
+        }
+        $have->execute([$summaryId, (int)$no, $month]);
+        if ($have->fetchColumn()) {
+            continue;
+        }
+        $pdo->prepare(
+            'INSERT INTO payroll_outstanding_period_rows
+                (summary_id, period_no, period_month, amount, source, edited_by, edited_at, created_by, created_at, deleted, row_version)
+             VALUES (?,?,?,?,?,?,?,?,?,0,1)'
+        )->execute([$summaryId, (int)$no, $month, $net['amount'], 'payroll', $actor, $now, $actor, $now]);
+        pos_audit($pdo, $orgId, $summaryId, 'period_row', (int)$pdo->lastInsertId(), bin2hex(random_bytes(8)), 'fill_payroll', 'amount', null, (string)$net['amount'], $actor);
+        $added++;
+    }
+    return $added;
 }
 
 /** @return list<array{store:string,sheet_employee:string,total_amount:float,notes:string,user_id:int,match_confidence:string}> */
@@ -553,72 +687,6 @@ function pos_period_default(array $lines, string $start, string $end): array
     return pos_cpp_ei_net($hits);
 }
 
-function pos_save_period_amount(PDO $pdo, int $orgId, int $summaryId, int $periodId, int $actor, $rawAmount, int $rowVersion, array $payrollDefault): void
-{
-    pos_ensure($pdo);
-    pos_summary_for_org($pdo, $orgId, $summaryId);
-    $period = $pdo->prepare('SELECT id FROM payroll_outstanding_periods WHERE id = ? AND org_id = ?');
-    $period->execute([$periodId, $orgId]);
-    if (!(int)$period->fetchColumn()) {
-        throw new RuntimeException('That period is not in this company. Nothing was saved.');
-    }
-    $parsed = psr_parse_amount($rawAmount);
-    if (!$parsed['ok']) {
-        throw new RuntimeException('That period amount is not a number. Nothing was saved.');
-    }
-    $typed = $parsed['value'];
-    $payrollAmount = ($payrollDefault['state'] ?? '') === 'amount' ? (float)$payrollDefault['amount'] : null;
-    $revert = $typed === null || ($payrollAmount !== null && abs($typed - $payrollAmount) < 0.001);
-    $pdo->beginTransaction();
-    try {
-        $have = $pdo->prepare('SELECT * FROM payroll_outstanding_period_amounts WHERE summary_id = ? AND period_id = ?');
-        $have->execute([$summaryId, $periodId]);
-        $row = $have->fetch(PDO::FETCH_ASSOC);
-        if ($row && (int)$row['row_version'] !== $rowVersion) {
-            throw new RuntimeException('Someone saved this period amount after you opened it. Reload and try again. Nothing was saved.');
-        }
-        if (!$row && $rowVersion !== 0) {
-            throw new RuntimeException('Someone saved this period amount after you opened it. Reload and try again. Nothing was saved.');
-        }
-        $batch = bin2hex(random_bytes(8));
-        $now = date('Y-m-d H:i:s');
-        if ($revert) {
-            if ($row) {
-                $pdo->prepare('DELETE FROM payroll_outstanding_period_amounts WHERE id = ? AND summary_id = ? AND row_version = ?')
-                    ->execute([(int)$row['id'], $summaryId, $rowVersion]);
-                pos_audit($pdo, $orgId, $summaryId, 'period_amount', (int)$row['id'], $batch, 'revert_period', 'amount', $row['amount'] !== null ? (string)$row['amount'] : null, null, $actor);
-            }
-            $pdo->commit();
-            return;
-        }
-        if ($row) {
-            $upd = $pdo->prepare(
-                'UPDATE payroll_outstanding_period_amounts
-                    SET amount = ?, source = ?, edited_by = ?, edited_at = ?, row_version = row_version + 1
-                  WHERE id = ? AND summary_id = ? AND row_version = ?'
-            );
-            $upd->execute([$typed, 'manual', $actor, $now, (int)$row['id'], $summaryId, $rowVersion]);
-            if ($upd->rowCount() < 1) {
-                throw new RuntimeException('Someone saved this period amount after you opened it. Reload and try again. Nothing was saved.');
-            }
-            pos_audit($pdo, $orgId, $summaryId, 'period_amount', (int)$row['id'], $batch, 'edit_period', 'amount', $row['amount'] !== null ? (string)$row['amount'] : null, (string)$typed, $actor);
-        } else {
-            $pdo->prepare(
-                'INSERT INTO payroll_outstanding_period_amounts
-                    (summary_id, period_id, amount, source, edited_by, edited_at, row_version)
-                 VALUES (?,?,?,?,?,?,1)'
-            )->execute([$summaryId, $periodId, $typed, 'manual', $actor, $now]);
-            pos_audit($pdo, $orgId, $summaryId, 'period_amount', (int)$pdo->lastInsertId(), $batch, 'edit_period', 'amount', null, (string)$typed, $actor);
-        }
-        $pdo->commit();
-    } catch (Throwable $e) {
-        if ($pdo->inTransaction()) {
-            $pdo->rollBack();
-        }
-        throw $e;
-    }
-}
-
 function pos_payment_fields(array $post): array
 {
     $date = psr_valid_date($post['paid_date'] ?? '');
@@ -775,28 +843,67 @@ function pos_sum_payments(array $payments): array
     return ['amount' => $sum, 'paid_on' => $latest, 'count' => $n];
 }
 
-function pos_empty_total(array $periodIds): array
+function pos_empty_total(): array
 {
-    $periods = [];
-    foreach ($periodIds as $id) {
-        $periods[$id] = ['amount' => 0.0, 'unknown' => 0, 'known' => 0];
-    }
+    $zero = ['amount' => 0.0, 'unknown' => 0, 'known' => 0, 'state' => 'amount'];
     return [
         'total' => 0.0,
-        'periods' => $periods,
-        'balance' => ['amount' => 0.0, 'unknown' => 0, 'known' => 0],
+        'periods' => $zero,
+        'balance' => $zero,
         'paid' => 0.0,
-        'final' => ['amount' => 0.0, 'unknown' => 0, 'known' => 0],
+        'outstanding' => $zero,
     ];
+}
+
+function pos_sum_period_rows(array $rows): array
+{
+    $sum = 0.0;
+    $unknown = 0;
+    $known = 0;
+    foreach ($rows as $row) {
+        if ((int)($row['deleted'] ?? 0) === 1) {
+            continue;
+        }
+        if ($row['amount'] === null || $row['amount'] === '') {
+            $unknown++;
+            continue;
+        }
+        $sum = round($sum + (float)$row['amount'], 2);
+        $known++;
+    }
+    if ($unknown > 0 && $known === 0) {
+        return ['state' => 'unknown', 'amount' => null, 'unknown' => $unknown, 'known' => 0];
+    }
+    return ['state' => 'amount', 'amount' => $sum, 'unknown' => $unknown, 'known' => $known];
+}
+
+function pos_plus_total(float $opening, array $periods): array
+{
+    if ((int)$periods['unknown'] > 0 || ($periods['state'] ?? '') === 'unknown') {
+        return ['state' => 'unknown', 'amount' => null, 'unknown' => (int)$periods['unknown'], 'known' => 0];
+    }
+    return ['state' => 'amount', 'amount' => round($opening + (float)$periods['amount'], 2), 'unknown' => 0, 'known' => 1];
+}
+
+function pos_minus_paid(array $balance, float $paid): array
+{
+    if (($balance['state'] ?? '') !== 'amount' || $balance['amount'] === null) {
+        return ['state' => 'unknown', 'amount' => null, 'unknown' => 1, 'known' => 0];
+    }
+    return ['state' => 'amount', 'amount' => round((float)$balance['amount'] - $paid, 2), 'unknown' => 0, 'known' => 1];
 }
 
 function pos_add_amount(array $tot, array $cell): array
 {
+    $extra = (int)($cell['unknown'] ?? 0);
     if (($cell['state'] ?? '') === 'amount' && $cell['amount'] !== null) {
         $tot['amount'] = round((float)$tot['amount'] + (float)$cell['amount'], 2);
         $tot['known']++;
-    } elseif (($cell['state'] ?? '') === 'unknown') {
-        $tot['unknown']++;
+        $tot['unknown'] += $extra;
+        return $tot;
+    }
+    if (($cell['state'] ?? '') === 'unknown') {
+        $tot['unknown'] += max(1, $extra);
     }
     return $tot;
 }
@@ -821,21 +928,9 @@ function pos_figure_text(array $figure): string
     return $text;
 }
 
-function pos_review_table(PDO $pdo, int $orgId, bool $showHidden, DateTimeInterface $today, int $actor = 0): array
+function pos_review_table(PDO $pdo, int $orgId, bool $showHidden): array
 {
     pos_ensure($pdo);
-    pos_seed_default_periods($pdo, $orgId, $actor, $today);
-    $periodRows = $pdo->prepare('SELECT * FROM payroll_outstanding_periods WHERE org_id = ? ORDER BY period_start, period_end, id');
-    $periodRows->execute([$orgId]);
-    $periods = [];
-    foreach ($periodRows->fetchAll(PDO::FETCH_ASSOC) as $period) {
-        $periods[] = [
-            'id' => (int)$period['id'],
-            'start' => (string)$period['period_start'],
-            'end' => (string)$period['period_end'],
-            'label' => pos_period_label((string)$period['period_start'], (string)$period['period_end']),
-        ];
-    }
     $loaded = $pdo->prepare('SELECT * FROM payroll_outstanding_summary WHERE org_id = ? ORDER BY store_label, sheet_employee, id');
     $loaded->execute([$orgId]);
     $visible = [];
@@ -848,14 +943,14 @@ function pos_review_table(PDO $pdo, int $orgId, bool $showHidden, DateTimeInterf
     $ids = array_map(static function ($row) {
         return (int)$row['id'];
     }, $visible);
-    $manual = [];
+    $periodRows = [];
     $payments = [];
     if ($ids) {
         $holders = implode(',', array_fill(0, count($ids), '?'));
-        $amt = $pdo->prepare("SELECT * FROM payroll_outstanding_period_amounts WHERE summary_id IN ($holders)");
+        $amt = $pdo->prepare("SELECT * FROM payroll_outstanding_period_rows WHERE summary_id IN ($holders) AND deleted = 0 ORDER BY period_month, period_no, id");
         $amt->execute($ids);
         foreach ($amt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $manual[(int)$row['summary_id']][(int)$row['period_id']] = $row;
+            $periodRows[(int)$row['summary_id']][] = $row;
         }
         $pay = $pdo->prepare("SELECT * FROM payroll_outstanding_payments WHERE summary_id IN ($holders) AND deleted = 0 ORDER BY paid_date, id");
         $pay->execute($ids);
@@ -863,103 +958,67 @@ function pos_review_table(PDO $pdo, int $orgId, bool $showHidden, DateTimeInterf
             $payments[(int)$row['summary_id']][] = $row;
         }
     }
-    $userIds = [];
-    foreach ($visible as $row) {
-        if ((int)($row['user_id'] ?? 0) > 0) {
-            $userIds[] = (int)$row['user_id'];
-        }
-    }
-    $lines = $userIds ? pos_fetch_lines($pdo, $orgId, $userIds) : [];
-    $periodIds = array_map(static function ($period) {
-        return $period['id'];
-    }, $periods);
-    $grand = pos_empty_total($periodIds);
+    $grand = pos_empty_total();
     $groups = [];
     foreach ($visible as $row) {
         $summaryId = (int)$row['id'];
-        $userId = (int)($row['user_id'] ?? 0);
-        $cells = [];
-        $balanceUnknown = false;
-        $balance = round((float)$row['total_amount'], 2);
-        foreach ($periods as $period) {
-            $stored = $manual[$summaryId][$period['id']] ?? null;
-            if ($stored && (string)$stored['source'] === 'manual' && $stored['amount'] !== null) {
-                $cell = [
-                    'state' => 'amount',
-                    'amount' => round((float)$stored['amount'], 2),
-                    'source' => 'manual',
-                    'row_version' => (int)$stored['row_version'],
-                    'amount_id' => (int)$stored['id'],
-                ];
-            } else {
-                $default = $userId > 0
-                    ? pos_period_default($lines[$userId] ?? [], $period['start'], $period['end'])
-                    : ['state' => 'blank', 'amount' => null];
-                $cell = [
-                    'state' => $default['state'],
-                    'amount' => $default['amount'],
-                    'source' => $default['state'] === 'amount' ? 'payroll' : '',
-                    'row_version' => $stored ? (int)$stored['row_version'] : 0,
-                    'amount_id' => $stored ? (int)$stored['id'] : 0,
-                ];
-            }
-            $cells[$period['id']] = $cell;
-            if ($cell['state'] === 'unknown') {
-                $balanceUnknown = true;
-            } elseif ($cell['state'] === 'amount') {
-                $balance = round($balance + (float)$cell['amount'], 2);
-            }
+        $stored = [];
+        foreach ($periodRows[$summaryId] ?? [] as $period) {
+            $stored[] = [
+                'id' => (int)$period['id'],
+                'period_no' => (int)$period['period_no'],
+                'period_month' => substr((string)$period['period_month'], 0, 10),
+                'month_label' => pos_month_year_label((string)$period['period_month']),
+                'amount' => $period['amount'] === null ? null : round((float)$period['amount'], 2),
+                'source' => (string)$period['source'],
+                'row_version' => (int)$period['row_version'],
+                'deleted' => 0,
+            ];
         }
+        $periods = pos_sum_period_rows($stored);
+        $opening = round((float)$row['total_amount'], 2);
+        $balance = pos_plus_total($opening, $periods);
         $paid = pos_sum_payments($payments[$summaryId] ?? []);
-        $balanceFigure = $balanceUnknown
-            ? ['state' => 'unknown', 'amount' => null]
-            : ['state' => 'amount', 'amount' => $balance];
-        $final = $balanceUnknown
-            ? ['state' => 'unknown', 'amount' => null]
-            : ['state' => 'amount', 'amount' => round($balance - (float)$paid['amount'], 2)];
+        $outstanding = pos_minus_paid($balance, (float)$paid['amount']);
         $built = [
             'id' => $summaryId,
             'store' => (string)$row['store_label'],
             'name' => (string)$row['sheet_employee'],
-            'user_id' => $userId,
+            'user_id' => (int)($row['user_id'] ?? 0),
             'row_version' => (int)$row['row_version'],
             'notes' => (string)($row['notes'] ?? ''),
-            'total' => round((float)$row['total_amount'], 2),
-            'periods' => $cells,
-            'balance' => $balanceFigure,
+            'total' => $opening,
+            'periods_total' => $periods,
+            'period_rows' => $stored,
+            'balance' => $balance,
             'paid' => (float)$paid['amount'],
             'paid_on' => (string)$paid['paid_on'],
             'payment_count' => (int)$paid['count'],
             'payments' => $payments[$summaryId] ?? [],
-            'final' => $final,
+            'outstanding' => $outstanding,
         ];
         $groups[$built['store']][] = $built;
     }
     ksort($groups);
     $outGroups = [];
     foreach ($groups as $store => $rows) {
-        $sub = pos_empty_total($periodIds);
+        $sub = pos_empty_total();
         foreach ($rows as $built) {
             $sub['total'] = round($sub['total'] + (float)$built['total'], 2);
             $sub['paid'] = round($sub['paid'] + (float)$built['paid'], 2);
-            foreach ($periodIds as $periodId) {
-                $sub['periods'][$periodId] = pos_add_amount($sub['periods'][$periodId], $built['periods'][$periodId]);
-            }
+            $sub['periods'] = pos_add_amount($sub['periods'], $built['periods_total']);
             $sub['balance'] = pos_add_amount($sub['balance'], $built['balance']);
-            $sub['final'] = pos_add_amount($sub['final'], $built['final']);
+            $sub['outstanding'] = pos_add_amount($sub['outstanding'], $built['outstanding']);
             $grand['total'] = round($grand['total'] + (float)$built['total'], 2);
             $grand['paid'] = round($grand['paid'] + (float)$built['paid'], 2);
-            foreach ($periodIds as $periodId) {
-                $grand['periods'][$periodId] = pos_add_amount($grand['periods'][$periodId], $built['periods'][$periodId]);
-            }
+            $grand['periods'] = pos_add_amount($grand['periods'], $built['periods_total']);
             $grand['balance'] = pos_add_amount($grand['balance'], $built['balance']);
-            $grand['final'] = pos_add_amount($grand['final'], $built['final']);
+            $grand['outstanding'] = pos_add_amount($grand['outstanding'], $built['outstanding']);
         }
         $outGroups[] = ['store' => $store, 'rows' => $rows, 'totals' => $sub];
     }
     return [
         'count' => count($visible),
-        'periods' => $periods,
         'groups' => $outGroups,
         'grand' => $grand,
     ];

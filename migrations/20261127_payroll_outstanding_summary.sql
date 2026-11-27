@@ -1,3 +1,5 @@
+-- Superseded by migrations/20261127_payroll_outstanding_period_rows.sql.
+-- The deploy script runs that file. This one is not applied.
 -- Outstanding pay (Employee Pay status sheet).
 -- New tables only. Does not change payroll_finalized, payroll_payments,
 -- users, attendance, or any payroll_sheet_* table. No payroll rows are inserted.

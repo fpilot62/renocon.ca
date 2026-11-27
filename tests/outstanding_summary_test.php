@@ -66,9 +66,7 @@ check('a missing CPP or EI is unknown', pos_cpp_ei_net([['gross' => 100.0, 'cpp'
 check('no payroll lines stay blank', pos_cpp_ei_net([])['state'] === 'blank');
 check('a line is placed by its start date', pos_line_in_half('2026-11-14', '2026-11-01', '2026-11-15') && !pos_line_in_half('2026-11-14', '2026-11-16', '2026-11-30'));
 
-$today = new DateTimeImmutable('2026-11-27');
-$table = pos_review_table($pdo, 2, false, $today, 7);
-check('the current month opens as two halves', count($table['periods']) === 2 && $table['periods'][0]['label'] === 'Nov 1–15' && $table['periods'][1]['label'] === 'Nov 16–30');
+$table = pos_review_table($pdo, 2, false);
 $patRow = null;
 foreach ($table['groups'] as $group) {
     foreach ($group['rows'] as $row) {
@@ -77,15 +75,11 @@ foreach ($table['groups'] as $group) {
         }
     }
 }
-$first = $table['periods'][0]['id'];
-$second = $table['periods'][1]['id'];
-check('November 1 to 15 uses the lines that start in that half', $patRow && $patRow['periods'][$first]['source'] === 'payroll' && abs($patRow['periods'][$first]['amount'] - 224) < 0.001);
-check('November 16 to 30 is unknown when CPP is missing', $patRow && $patRow['periods'][$second]['state'] === 'unknown');
-check('an unknown period makes the balance unknown', $patRow && $patRow['balance']['state'] === 'unknown' && $patRow['final']['state'] === 'unknown');
-
-pos_save_period_amount($pdo, 2, (int)$pat['id'], $second, 7, '15.25', 0, ['state' => 'unknown', 'amount' => null]);
-pos_add_payment($pdo, 2, (int)$pat['id'], 7, ['paid_date' => '2026-08-10', 'amount' => '25.00', 'method' => '', 'reference_no' => '', 'note' => '']);
-$table = pos_review_table($pdo, 2, false, $today, 7);
+check('the summary starts with no period rows', $patRow && $patRow['period_rows'] === [] && abs($patRow['balance']['amount'] - 80) < 0.001 && abs($patRow['outstanding']['amount'] - 70) < 0.001);
+check('fill from payroll adds only the known half-month', pos_fill_from_payroll($pdo, 2, (int)$pat['id'], 7) === 1);
+pos_add_period_row($pdo, 2, (int)$pat['id'], 7, 2, 2026, 11, '15.25');
+pos_add_payment($pdo, 2, (int)$pat['id'], 7, ['paid_date' => '2026-08-10', 'amount' => '25.00', 'method' => '', 'reference_no' => '', 'note' => 'second']);
+$table = pos_review_table($pdo, 2, false);
 $patRow = null;
 foreach ($table['groups'] as $group) {
     foreach ($group['rows'] as $row) {
@@ -94,10 +88,21 @@ foreach ($table['groups'] as $group) {
         }
     }
 }
-check('a typed period amount overrides the payroll default', $patRow && $patRow['periods'][$second]['source'] === 'manual' && abs($patRow['periods'][$second]['amount'] - 15.25) < 0.001);
-check('balance adds the sheet total and the period columns', $patRow && abs($patRow['balance']['amount'] - (80 + 224 + 15.25)) < 0.001);
+$nov1 = null;
+$nov2 = null;
+foreach ($patRow['period_rows'] as $periodRow) {
+    if ($periodRow['month_label'] === 'Nov 2026' && (int)$periodRow['period_no'] === 1) {
+        $nov1 = $periodRow;
+    }
+    if ($periodRow['month_label'] === 'Nov 2026' && (int)$periodRow['period_no'] === 2) {
+        $nov2 = $periodRow;
+    }
+}
+check('November period 1 is the payroll net for lines that start then', $nov1 && $nov1['source'] === 'payroll' && abs($nov1['amount'] - 224) < 0.001);
+check('a typed period 2 amount is manual', $nov2 && $nov2['source'] === 'manual' && abs($nov2['amount'] - 15.25) < 0.001);
+check('balance adds the sheet total and the period rows', $patRow && abs($patRow['balance']['amount'] - (80 + 224 + 15.25)) < 0.001);
 check('paid is the sum of dated payments and the date is the latest', $patRow && abs($patRow['paid'] - 35) < 0.001 && $patRow['paid_on'] === '2026-08-10' && $patRow['payment_count'] === 2);
-check('final balance subtracts the payment sum', $patRow && abs($patRow['final']['amount'] - (80 + 224 + 15.25 - 35)) < 0.001);
+check('outstanding today subtracts the payment sum', $patRow && abs($patRow['outstanding']['amount'] - (80 + 224 + 15.25 - 35)) < 0.001 && abs($table['grand']['outstanding']['amount'] - (80 + 224 + 15.25 - 35 + 5)) < 0.001);
 $payId = (int)$patRow['payments'][0]['id'];
 $payVersion = (int)$patRow['payments'][0]['row_version'];
 pos_delete_payment($pdo, 2, $payId, 7, $payVersion);
@@ -111,18 +116,15 @@ try {
     $stale = $e->getMessage();
 }
 check('a stale payment version is refused', strpos($stale, 'after you opened it') !== false);
-
-pos_remove_period($pdo, 2, $second, 7);
-$after = pos_review_table($pdo, 2, false, $today, 7);
-check('removing one period does not bring it back', count($after['periods']) === 1 && $after['periods'][0]['label'] === 'Nov 1–15');
-pos_add_period($pdo, 2, '2026-03-01', '2026-03-15', 7);
-$march = pos_period_label('2026-03-01', '2026-03-15');
-check('an added period is labeled by its month and half', $march === 'Mar 1–15');
+pos_delete_period_row($pdo, 2, (int)$nov2['id'], 7, (int)$nov2['row_version']);
+check('fill does not restore a removed period row', pos_fill_from_payroll($pdo, 2, (int)$pat['id'], 7) === 0);
+pos_add_period_row($pdo, 2, (int)$pat['id'], 7, 1, 2026, 3, '3');
+check('an added period is stored as month and period number', pos_month_year_label('2026-03-01') === 'Mar 2026');
 
 $pdo->prepare('INSERT INTO payroll_outstanding_summary (org_id, store_label, sheet_employee, user_id, total_amount, loaded_at, loaded_by, row_version) VALUES (2,?,?,?,?,?,?,1)')
     ->execute(['North', 'admin test', 10006, 4, '2026-11-27 00:00:00', 7]);
-$hidden = pos_review_table($pdo, 2, false, $today, 7);
-$shown = pos_review_table($pdo, 2, true, $today, 7);
+$hidden = pos_review_table($pdo, 2, false);
+$shown = pos_review_table($pdo, 2, true);
 check('a hidden admin row stays out until the toggle is on', $hidden['count'] + 1 === $shown['count']);
 $refused = '';
 try {
@@ -133,11 +135,11 @@ try {
 check('linking a hidden admin is refused', strpos($refused, 'hidden') !== false);
 
 $lib = (string)file_get_contents(__DIR__ . '/../engine/outstanding_summary_lib.php');
-$sql = (string)file_get_contents(__DIR__ . '/../migrations/20261127_payroll_outstanding_summary.sql');
+$sql = (string)file_get_contents(__DIR__ . '/../migrations/20261127_payroll_outstanding_period_rows.sql');
 $page = (string)file_get_contents(__DIR__ . '/../payroll_sheet_review.php');
-check('the migration only creates the new tables', strpos($sql, 'CREATE TABLE IF NOT EXISTS payroll_outstanding_payments') !== false && strpos($sql, 'CREATE TABLE IF NOT EXISTS payroll_outstanding_periods') !== false && !preg_match('/INSERT\\s+INTO\\s+payroll_finalized/i', $sql) && !preg_match('/INSERT\\s+INTO\\s+payroll_payments/i', $sql));
+check('the migration stores period rows per employee', strpos($sql, 'CREATE TABLE IF NOT EXISTS payroll_outstanding_period_rows') !== false && strpos($sql, 'summary_half') !== false && strpos($sql, 'DROP TABLE IF EXISTS payroll_outstanding_periods') !== false && !preg_match('/INSERT\\s+INTO\\s+payroll_finalized/i', $sql) && !preg_match('/INSERT\\s+INTO\\s+payroll_payments/i', $sql));
 check('the library does not write payroll payments or finalized rows', !preg_match('/INSERT\\s+INTO\\s+payroll_payments/i', $lib) && !preg_match('/UPDATE\\s+payroll_finalized/i', $lib) && strpos($lib, 'total_gross') !== false && strpos($lib, 'f.cpp') !== false && strpos($lib, 'f.ei') !== false);
-check('the page shows the outstanding table and manual payments', strpos($page, 'Outstanding pay (Employee Pay status sheet)') !== false && strpos($page, 'data-default-open="1"') !== false && strpos($page, 'Add period') !== false && strpos($page, 'Add payment') !== false && strpos($page, 'Manual reconciliation') !== false && strpos($page, 'Final balance') !== false);
+check('the page shows totals and the employee detail lists', strpos($page, 'Outstanding today') !== false && strpos($page, 'Periods total') !== false && strpos($page, 'Fill from payroll') !== false && strpos($page, 'Add period row') !== false && strpos($page, 'Add payment') !== false && strpos($page, 'Manual reconciliation') !== false && strpos($page, 'data-default-open="1"') !== false);
 check('vacation pay is not a column on this table', strpos($page, 'Vacation Pay') === false);
 
 if ($fail > 0) {
