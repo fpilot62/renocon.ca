@@ -33,6 +33,42 @@ if (is_file(__DIR__ . '/engine/privacy_lib.php')) {
 if (!$is_cli && session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'db.php';
 require_once __DIR__ . '/payroll_engine/payroll_engine.php';
+if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+    require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+}
+
+function paydocs_pdf_text(string $text): string {
+    $out = iconv('UTF-8', 'ISO-8859-1//TRANSLIT', $text);
+    return $out === false ? str_replace('×', 'x', $text) : $out;
+}
+
+function paydocs_long_earn($pdf, float $left, string $label, float $amount, float $ytd): void {
+    $pdf->SetFont('Arial', '', 7);
+    $pdf->SetFillColor(255, 243, 176);
+    $y = $pdf->GetY();
+    $pdf->SetXY($left, $y);
+    $pdf->MultiCell(70, 3.6, paydocs_pdf_text($label), 1, 'L', true);
+    $h = max(5.5, $pdf->GetY() - $y);
+    $pdf->SetXY($left + 70, $y);
+    $pdf->Cell(22, $h, '', 1, 0, 'C', true);
+    $pdf->Cell(22, $h, '', 1, 0, 'C', true);
+    $pdf->Cell(35, $h, number_format($amount, 2), 1, 0, 'R', true);
+    $pdf->Cell(36, $h, $ytd > 0.009 ? number_format($ytd, 2) : '', 1, 1, 'R', true);
+    $pdf->SetFont('Arial', '', 8);
+}
+
+function paydocs_long_row($pdf, string $label, float $amount): void {
+    $pdf->SetFont('Arial', '', 8);
+    $pdf->SetFillColor(255, 243, 176);
+    $y = $pdf->GetY();
+    $pdf->SetXY(15, $y);
+    $pdf->MultiCell(95, 4, paydocs_pdf_text($label), 'B', 'L', true);
+    $h = max(6, $pdf->GetY() - $y);
+    $pdf->SetXY(110, $y);
+    $pdf->Cell(30, $h, '', 'B', 0, 'R', true);
+    $pdf->Cell(60, $h, money($amount), 'B', 1, 'R', true);
+    $pdf->SetFont('Arial', '', 9);
+}
 if (!$is_cli && function_exists('privacy_require_business')) {
     $paydocsOrg = 0;
     if (is_file(__DIR__ . '/payroll_scope.php')) {
@@ -145,7 +181,7 @@ if ($is_cli) {
         $sqlCli = "SELECT f.id FROM payroll_finalized f
                    LEFT JOIN users u ON u.id = f.user_id
                    WHERE f.site_id = ? AND f.work_date BETWEEN ? AND ?"
-                   . ($paydocsApproval ? " AND COALESCE(f.stat_approval_status,'') <> 'pending'" : '');
+                   . ($paydocsApproval ? " AND COALESCE(f.stat_approval_status,'') NOT IN ('pending','ignored')" : '');
         $paramsCli = [$cli_site, $cli_from, $cli_to];
         if ($cli_name !== '') {
             $sqlCli .= " AND u.Name LIKE ?";
@@ -205,7 +241,7 @@ $sql = "SELECT
             f.reg_hours, f.overtime_hours, f.travel_hours, f.hourly_rate,
             f.total_gross, f.cpp AS ee_cpp, f.ei AS ee_ei, f.income_tax AS ee_tax,
             f.cpp_er AS er_cpp, f.ei_er AS er_ei, f.wcb AS er_wcb, f.vac AS er_vac,
-            f.paid_amount, f.payment_status, f.status AS line_status, f.category, f.display_label
+            f.paid_amount, f.payment_status, f.status AS line_status, f.category, f.display_label, f.comments
             $extraFin,
             u.Name AS emp_name, u.Email AS emp_email,
             u.bank_transit, u.bank_institution, u.bank_account,
@@ -222,7 +258,8 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($line_ids);
 $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $rows = array_values(array_filter($rows, static function ($r) {
-    return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
+    $state = strtolower(trim((string)($r['stat_approval_status'] ?? '')));
+    return $state !== 'pending' && $state !== 'ignored';
 }));
 if (empty($rows)) { die("Selected rows not found."); }
 
@@ -287,7 +324,7 @@ foreach ($rows as $r) {
             'show_zero_stat' => (int)($r['paystub_show_zero_stat'] ?? 0) === 1,
             'period_end' => $r['pay_period_end'],
             'reg_h'=>0,'ot_h'=>0,'trav_h'=>0,
-            'reg_pay'=>0,'bonus'=>0,'car_allow'=>0,'ph_pay'=>0,'ph_h'=>0,'stat_worked'=>0,
+            'reg_pay'=>0,'bonus'=>0,'car_allow'=>0,'ph_pay'=>0,'ph_h'=>0,'ph_label'=>'','stat_worked'=>0,'worked_lines'=>[],'split_lines'=>[],
             'benefit_lines'=>[],'deduct_lines'=>[],
             'gross'=>0,'ee_cpp'=>0,'ee_cpp2'=>0,'ee_ei'=>0,'ee_tax'=>0,
             'er_cpp'=>0,'er_cpp2'=>0,'er_ei'=>0,'er_wcb'=>0,'er_vac'=>0,
@@ -299,7 +336,13 @@ foreach ($rows as $r) {
     $g =& $groups[$key];
     $cat = (string)($r['category'] ?? '');
     $lab = (string)($r['display_label'] ?? '');
-    $g['reg_h']  += (float)$r['reg_hours'];
+    $splitText = function_exists('sh_split_sentence') ? sh_split_sentence((string)($r['comments'] ?? '')) : '';
+    if ($splitText !== '') {
+        $g['split_lines'][] = ['label' => $splitText, 'amount' => (float)$r['total_gross']];
+    } else {
+        $g['reg_h']  += (float)$r['reg_hours'];
+        $g['reg_pay'] += (float)($r['reg_pay'] ?? 0);
+    }
     $g['ot_h']   += (float)$r['overtime_hours'];
     $g['trav_h'] += (float)$r['travel_hours'];
     $g['gross']  += (float)$r['total_gross'];
@@ -314,14 +357,26 @@ foreach ($rows as $r) {
     $g['er_vac'] += (float)$r['er_vac'];
     $g['vac_earn'] += (float)$r['er_vac'];
     $g['paid']   += (float)$r['paid_amount'];
-    $g['reg_pay'] += (float)($r['reg_pay'] ?? 0);
     if (strcasecmp($cat, 'Deduction') === 0) {
         $g['deduct_lines'][$lab !== '' ? $lab : 'Adjustment'] = ($g['deduct_lines'][$lab !== '' ? $lab : 'Adjustment'] ?? 0) + abs((float)$r['total_gross']);
     } elseif (strcasecmp($cat, 'Benefit') === 0) {
         $g['benefit_lines'][$lab !== '' ? $lab : 'Benefit'] = ($g['benefit_lines'][$lab !== '' ? $lab : 'Benefit'] ?? 0) + (float)$r['total_gross'];
     } else {
-    if (paydocs_is_public_holiday($cat, $lab)) $g['ph_pay'] += (float)$r['total_gross'];
-    if (paydocs_is_stat_worked($cat, $lab)) $g['stat_worked'] += (float)$r['total_gross'];
+    if (paydocs_is_public_holiday($cat, $lab)) {
+        $g['ph_pay'] += (float)$r['total_gross'];
+        $g['ph_rate'] = (float)$r['hourly_rate'];
+        $g['ph_label'] = function_exists('sh_public_holiday_label')
+            ? sh_public_holiday_label((float)$r['total_gross'], (float)$r['hourly_rate'], (float)$r['reg_hours'])
+            : 'Public holiday pay';
+    }
+    if (paydocs_is_stat_worked($cat, $lab)) {
+        $g['stat_worked'] += (float)$r['total_gross'];
+        $g['worked_lines'][] = [
+            'label' => $lab !== '' ? $lab : 'Holiday worked 1.5×',
+            'amount' => (float)$r['total_gross'],
+            'rate' => (float)$r['hourly_rate'] > 0 ? number_format((float)$r['hourly_rate'], 2) : '',
+        ];
+    }
     paydocs_peel_special(
         $g, $cat, $lab,
         (float)$r['total_gross'],
@@ -789,8 +844,18 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     if ($vac_paid_mode || $vac_curr > 0.009 || $vac_ytd > 0.009) {
         $earn('VacPay-Paid Out', '', '', $vac_curr, $vac_ytd, true);
     }
-    $statHours = (float)($g['ph_h'] ?? 0);
-    $earn('Stat Holiday Pay', $statHours > 0.009 ? paydocs_hhmm($statHours) : '', '', (float)$g['ph_pay'], (float)$ytd['ph'], false, true);
+    $phLabel = (string)($g['ph_label'] ?? '');
+    if ($phLabel === '') {
+        $phLabel = 'Public holiday pay';
+    }
+    if (strlen($phLabel) > 42) {
+        paydocs_long_earn($pdf, $L, $phLabel, (float)$g['ph_pay'], (float)$ytd['ph']);
+    } else {
+        $earn($phLabel, '', '', (float)$g['ph_pay'], (float)$ytd['ph'], false, true);
+    }
+    foreach (($g['split_lines'] ?? []) as $splitLine) {
+        paydocs_long_earn($pdf, $L, (string)$splitLine['label'], (float)$splitLine['amount'], 0.0);
+    }
     if ((float)$g['bonus'] > 0.009 || (float)$ytd['bonus'] > 0.009) {
         $earn('Bonus', '', '', (float)$g['bonus'], (float)$ytd['bonus']);
     }
@@ -805,7 +870,13 @@ function paydocs_draw_bramalea(FPDF $pdf, array $g, array $ytd, bool $vac_paid_m
     foreach ($deductNames as $deductName) {
         $earn((string)$deductName, '', '', -1 * (float)($g['deduct_lines'][$deductName] ?? 0), -1 * (float)($ytd['deduct_lines'][$deductName] ?? 0));
     }
-    $earn('Stat Day Worked', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], false, true);
+    if (!empty($g['worked_lines'])) {
+        foreach ($g['worked_lines'] as $workedLine) {
+            $earn((string)$workedLine['label'], '', (string)$workedLine['rate'], (float)$workedLine['amount'], (float)$ytd['stat'], false, true);
+        }
+    } else {
+        $earn('Holiday worked 1.5×', '', '', (float)$g['stat_worked'], (float)$ytd['stat'], false, true);
+    }
 
     $y = $pdf->GetY() + 4;
     $pdf->SetXY($L, $y);
@@ -925,8 +996,17 @@ function paydocs_draw_legacy(FPDF $pdf, array $g, bool $vac_paid_mode, float $re
     if (!empty($vac_paid_mode) && $g['vac_earn'] > 0.009) {
         $row_line('Vacation', null, $g['vac_earn']);
     }
-    if ((float)($g['ph_pay'] ?? 0) > 0.009) $row_line('Stat Holiday Pay', ((float)($g['ph_h'] ?? 0) > 0.009 ? (float)$g['ph_h'] : null), $g['ph_pay'], true);
-    if ((float)($g['stat_worked'] ?? 0) > 0.009) $row_line('Stat Day Worked', null, $g['stat_worked'], true);
+    if ((float)($g['ph_pay'] ?? 0) > 0.009) $row_line((string)($g['ph_label'] ?? 'Public holiday pay'), null, $g['ph_pay'], true);
+    foreach (($g['split_lines'] ?? []) as $splitLine) {
+        paydocs_long_row($pdf, (string)$splitLine['label'], (float)$splitLine['amount']);
+    }
+    if (!empty($g['worked_lines'])) {
+        foreach ($g['worked_lines'] as $workedLine) {
+            $row_line((string)$workedLine['label'], null, (float)$workedLine['amount'], true);
+        }
+    } elseif ((float)($g['stat_worked'] ?? 0) > 0.009) {
+        $row_line('Holiday worked 1.5×', null, $g['stat_worked'], true);
+    }
     if ((float)($g['bonus'] ?? 0) > 0.009) $row_line('Bonus', null, $g['bonus']);
     if ((float)($g['car_allow'] ?? 0) > 0.009) $row_line('Car allowance', null, $g['car_allow']);
     foreach (($g['benefit_lines'] ?? []) as $benefitName => $benefitAmt) {

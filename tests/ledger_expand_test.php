@@ -67,7 +67,7 @@ check('ledger1 filters by province inside the org', strpos($alt, 'name="province
 $preview = file_get_contents(__DIR__ . '/../generate_stat_shifts.php');
 check('preview hides a zero stat total', strpos($preview, 'stat-pay-show') !== false && strpos($preview, 'statReveal') !== false);
 $docs = file_get_contents(__DIR__ . '/../generate_pay_documents.php');
-check('pay stub does not force a zero stat line', strpos($docs, "\$earn('Stat Holiday Pay',") !== false && strpos($docs, "(float)\$g['ph_pay'], (float)\$ytd['ph'], false, true);") !== false);
+check('pay stub does not force a zero stat line', strpos($docs, "(float)\$g['ph_pay'], (float)\$ytd['ph'], false, true);") !== false && strpos($docs, 'abs((float)$curr) < 0.005 && abs((float)$ytdA) < 0.005') !== false);
 
 if ($fail > 0) { echo $fail . " failed\n"; exit(1); }
 echo "all passed\n";

@@ -405,8 +405,8 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
          cpp,ei,wcb,vac,status,finalized_by,pay_type,comments,income_tax,cpp_er,ei_er)
         VALUES (NULL,'Statutory Holiday',?,?,?,?,?,?,?,?,0,0,0,?,?,0,0,?,?,?,?,?,'pending',?,'Statutory',?,?,?,?)");
     $ins->execute([
-        $holidayName.' — Statutory Holiday Pay', $userId, 'CA', $orgId, $siteId, $holidayDate, $holidayDate,
-        $row['equiv_hours'], $row['hourly_rate'], $row['amount'], $row['amount'],
+        sh_public_holiday_label((float)$row['amount'], (float)$row['hourly_rate'], (float)($row['equiv_hours'] ?? 0)), $userId, 'CA', $orgId, $siteId, $holidayDate, $holidayDate,
+        0, $row['hourly_rate'], $row['amount'], $row['amount'],
         $ded['cpp'], $ded['ei'], $ded['wcb'], $ded['vac'], $byUser, $comments,
         $ded['income_tax'], $ded['cpp_er'], $ded['ei_er'],
     ]);
@@ -440,30 +440,7 @@ function stat_post_row(PDO $pdo, int $orgId, int $userId, int $siteId, string $h
     $holHrs = (float)($row['holiday_hours'] ?? 0);
     $workedPay = (float)($row['worked_pay'] ?? 0);
     if ($holHrs > 0 && empty($row['orig_paid']) && empty($row['work_posted'])) {
-        stat_zero_regular_shifts($pdo, $userId, $siteId, $holidayDate);
-        if ($workedPay <= 0) {
-            $workedPay = round($holHrs * (float)$row['hourly_rate'] * 1.5, 2);
-        }
-    }
-    if ($holHrs > 0 && $workedPay > 0 && empty($row['work_posted']) && empty($row['orig_paid'])) {
-        $wded = pe_line_for($pdo, $userId, $siteId, $holidayDate, $workedPay);
-        $mult = 1.5;
-        $wlabel = $holidayName.' — Hours worked @ 1.5x';
-        $wcomments = 'Regular shift on this holiday was zeroed. This line is hours × 1.5 × rate, plus the average-daily-wage line.';
-        $wins = $pdo->prepare("INSERT INTO payroll_finalized
-            (attendance_id,category,display_label,user_id,country_code,org_id,site_id,work_date,pay_period_end,
-             reg_hours,balance_hours,overtime_hours,travel_hours,hourly_rate,reg_pay,bonus_pay,bal_pay,total_gross,
-             cpp,ei,wcb,vac,status,finalized_by,pay_type,comments,income_tax,cpp_er,ei_er)
-            VALUES (?, 'Holiday Worked', ?,?,?,?,?,?,?,?,0,?,?,?,?,0,0,?,?,?,?,?,'pending',?,'Statutory',?,?,?,?)");
-        $otHrs = $mult >= 1.5 ? $holHrs : 0.0;
-        $regHrs = $mult >= 1.5 ? 0.0 : $holHrs;
-        $wins->execute([
-            !empty($row['att_id']) ? (int)$row['att_id'] : null,
-            $wlabel, $userId, 'CA', $orgId, $siteId, $holidayDate, $holidayDate,
-            $regHrs, $otHrs, 0, $row['hourly_rate'], $workedPay, $workedPay,
-            $wded['cpp'], $wded['ei'], $wded['wcb'], $wded['vac'], $byUser, $wcomments,
-            $wded['income_tax'], $wded['cpp_er'], $wded['ei_er'],
-        ]);
+        sh_sync_regular_hold($pdo, $userId, $siteId, $holidayDate, $holHrs, (float)$row['hourly_rate'], $holHrs > 0);
     }
     if (function_exists('pe_refresh_period_stat')) {
         try { pe_refresh_period_stat($pdo, $userId, $siteId, $holidayDate); } catch (Throwable $e) { /* period total is retried on the next save */ }
@@ -629,7 +606,7 @@ body.stat-flat .stat-emp-row{display:table-row !important}
 <div class="wrap">
 <?php if (file_exists(__DIR__.'/payroll_help.php')) { require_once __DIR__.'/payroll_help.php'; echo payroll_help_panel('generate_stat_shifts.php'); } ?>
 <h2>Statutory Holiday Pay</h2>
-<p class="small-note">One list for the pay period. Approving a calculated line creates it as approved and does not pay it. The approved total is public holiday pay plus 1.5× for the hours that fall on the holiday date in the site's local time. A shift that crosses midnight counts only those minutes. Flagged lines need their own approval. An already approved line is left as posted and only flagged when the hours would change. Excluding someone records the reason and they are not offered again.</p>
+<p class="small-note">One list for the pay period. Approving posts public holiday pay, and the worked shift shows holiday hours at 1.5× plus the leftover hours at the regular rate. Pending or Ignore puts that shift back to plain regular pay. An already approved line is left as posted and only flagged when the hours would change.</p>
 <?php if($message):?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif;?>
 
 <form class="card card-body mb-3 period-card" method="get" id="statPeriodForm">

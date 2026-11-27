@@ -50,6 +50,9 @@ if ($sess_user_level >= 30) {
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 require_once 'db.php';
+if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+    require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+}
 $ledgerAuditLib = __DIR__ . '/engine/attendance_audit_lib.php';
 if (is_file($ledgerAuditLib)) {
     require_once $ledgerAuditLib;
@@ -179,7 +182,8 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
-    if (strcasecmp((string)($line['stat_approval_status'] ?? ''), 'pending') === 0) { return 0.0; }
+    $lineState = strtolower(trim((string)($line['stat_approval_status'] ?? '')));
+    if ($lineState === 'pending' || $lineState === 'ignored') { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -257,6 +261,26 @@ $redir = "payroll_master_ledger.php?from_date=$from_date&to_date=$to_date"
        . "&province=" . urlencode($province_filter)
        . "&period_mode=" . urlencode($period_mode);
 
+// ---------------------------------------------------------------- LINE STATE (Pending / Ignore / In pay)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_line_state'])) {
+    $state = (string)$_POST['set_line_state'];
+    $lineId = (int)($_POST['line_id'] ?? 0);
+    if (!in_array($state, ['pending', 'ignored', 'approved'], true) || $lineId <= 0) {
+        header("Location: $redir&msg=line_state"); exit;
+    }
+    if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+        require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+    }
+    try {
+        if (function_exists('sh_set_payroll_line_state')) {
+            sh_set_payroll_line_state($pdo, $user_org_id, $lineId, $state);
+        }
+    } catch (Throwable $e) {
+        die('Could not change that line: ' . htmlspecialchars($e->getMessage()));
+    }
+    header("Location: $redir&msg=line_state"); exit;
+}
+
 // ---------------------------------------------------------------- ROLLBACK
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send_back_to_audit'])) {
     $target = (int)$_POST['rollback_attendance_id'];
@@ -327,7 +351,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout
         try {
             $pdo->beginTransaction();
             $w = ["f.user_id = ?", "f.work_date BETWEEN ? AND ?"];
-            if (ledger1_has_stat_approval($pdo)) { $w[] = "COALESCE(f.stat_approval_status,'') <> 'pending'"; }
+            if (ledger1_has_stat_approval($pdo)) { $w[] = "COALESCE(f.stat_approval_status,'') NOT IN ('pending','ignored')"; }
             $p = [$uid, $pstart, $pend];
             if ($site_filter !== 'all' && $site_filter !== '') { $w[] = "f.site_id = ?"; $p[] = (int)$site_filter; }
             $ls = $pdo->prepare("SELECT f.id FROM payroll_finalized f WHERE " . implode(" AND ", $w) . " ORDER BY f.work_date ASC");
@@ -373,7 +397,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $q->execute($ids);
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
     $lines = array_values(array_filter($lines, static function ($r) {
-        return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
+        $lineState = strtolower(trim((string)($r['stat_approval_status'] ?? '')));
+        return $lineState !== 'pending' && $lineState !== 'ignored';
     }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];
@@ -474,8 +499,10 @@ foreach ($raw as $r) {
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
-    $needsApproval = strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') === 0;
-    $r['_needs_approval'] = $needsApproval;
+    $lineState = strtolower(trim((string)($r['stat_approval_status'] ?? '')));
+    $needsApproval = $lineState === 'pending' || $lineState === 'ignored';
+    $r['_needs_approval'] = $lineState === 'pending';
+    $r['_ignored'] = $lineState === 'ignored';
     $r['_ee']        = ee_deduct($r);
     $r['_er']        = (float)$r['er_cpp'] + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
     $r['_net']       = $net;
@@ -773,7 +800,17 @@ unset($st);
                                         <input type="checkbox" class="shift-check" data-site="<?=$sid?>" data-emp="<?=$eid?>" data-user="<?=(int)$r['user_id']?>" value="<?=(int)$r['line_id']?>" style="margin-right:8px; cursor:pointer;">
                                         <span class="small text-muted"><?=htmlspecialchars(date('D, M j', strtotime($r['work_date'])))?></span>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
-                                        <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
+                                        <?php
+                                        $isHolidayRow = strcasecmp((string)($r['category'] ?? ''), 'Statutory Holiday') === 0;
+                                        $splitText = function_exists('sh_split_sentence') ? sh_split_sentence((string)($r['comments'] ?? '')) : '';
+                                        $rowLabel = $isHolidayRow && function_exists('sh_public_holiday_label')
+                                            ? sh_public_holiday_label((float)$r['total_gross'], (float)($r['hourly_rate'] ?? 0), (float)$r['reg_hours'])
+                                            : (string)($r['display_label'] ?? 'Regular');
+                                        ?>
+                                        <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($rowLabel)?></div>
+                                        <?php if ($splitText !== ''): ?>
+                                            <div class="small font-weight-bold" style="color:#1e3a8a; padding-left:24px;"><?=htmlspecialchars($splitText)?></div>
+                                        <?php endif; ?>
                                     </td>
                                     <td class="text-left small text-secondary">
                                         Reg: <?=number_format($r['reg_hours'],2)?>h
@@ -808,6 +845,14 @@ unset($st);
                                         <?php endif; ?>
                                     </td>
                                     <td>
+                                        <form method="POST" action="" class="mb-1">
+                                            <input type="hidden" name="line_id" value="<?=(int)$r['line_id']?>">
+                                            <button type="submit" name="set_line_state" value="pending" class="btn btn-sm btn-outline-warning py-0" style="font-size:10px;">Pending</button>
+                                            <button type="submit" name="set_line_state" value="ignored" class="btn btn-sm btn-outline-secondary py-0" style="font-size:10px;">Ignore</button>
+                                            <?php if (!empty($r['_needs_approval']) || !empty($r['_ignored'])): ?>
+                                                <button type="submit" name="set_line_state" value="approved" class="btn btn-sm btn-outline-success py-0" style="font-size:10px;">In pay</button>
+                                            <?php endif; ?>
+                                        </form>
                                         <?php if ((int)($r['attendance_id'] ?? 0) > 0): ?>
                                             <form method="POST" action="" class="mb-0" onsubmit="return confirm('Send this record back to Step 1 Staff Audit?');">
                                                 <input type="hidden" name="rollback_attendance_id" value="<?=$r['attendance_id']?>">

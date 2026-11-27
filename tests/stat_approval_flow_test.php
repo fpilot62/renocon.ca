@@ -33,12 +33,12 @@ foreach ([
 check('payment desk keeps the live org-scope guard', strpos((string)file_get_contents($root . '/payroll_payment_desk.php'), 'orgscope_guard.php') !== false);
 check('print payrun keeps the live org-scope guard', strpos((string)file_get_contents($root . '/print_payrun.php'), 'orgscope_guard.php') !== false);
 $docs = (string)file_get_contents($root . '/generate_pay_documents.php');
-check('both stub layouts say Stat Holiday Pay', substr_count($docs, 'Stat Holiday Pay') >= 2);
-check('Stat Day Worked stays its own line', substr_count($docs, 'Stat Day Worked') >= 2);
+check('both stub layouts say Public holiday pay', substr_count($docs, 'Public holiday pay') >= 2);
+check('Holiday worked 1.5× stays its own line', substr_count($docs, 'Holiday worked 1.5×') >= 2);
 check('year-to-date queries skip pending stat', substr_count($docs, 'pe_not_pending_sql') >= 2);
 $ledger = (string)file_get_contents($root . '/payroll_master_ledger.php');
 check('ledger shows pending stat as awaiting approval', strpos($ledger, 'awaiting approval') !== false);
-check('ledger totals leave pending stat out of gross', strpos($ledger, '$needsApproval ? 0.0 : (float)$r[\'total_gross\']') !== false);
+check('ledger totals leave pending and ignored stat out of gross', strpos($ledger, '$outOfPay ? 0.0 : (float)$r[\'total_gross\']') !== false && strpos($ledger, "value=\"ignored\"") !== false);
 $page = (string)file_get_contents($root . '/generate_stat_shifts.php');
 check('the holiday page has a Create pending rows button', strpos($page, 'create_pending_rows') !== false && strpos($page, 'Create pending rows') !== false);
 check('the holiday page includes BC sites', strpos($page, "'BC','ON','SK'") !== false);
@@ -134,7 +134,7 @@ $bare->exec('CREATE TABLE payroll_finalized (id INT, total_gross REAL)');
 check('missing approval column adds no SQL filter', pe_not_pending_sql($bare, 'f') === '');
 $withCol = new PDO('sqlite::memory:');
 $withCol->exec('CREATE TABLE payroll_finalized (id INT, total_gross REAL, stat_approval_status TEXT)');
-check('approval column is filtered when it exists', pe_not_pending_sql($withCol, 'f') === " AND COALESCE(f.stat_approval_status,'') <> 'pending'");
+check('approval column is filtered when it exists', pe_not_pending_sql($withCol, 'f') === " AND COALESCE(f.stat_approval_status,'') NOT IN ('pending','ignored')");
 
 flow_wage($pdo, 1, 10, '2026-07-02', 1000);
 $before = pe_refresh_period_stat($pdo, 1, 10, '2026-07-02');

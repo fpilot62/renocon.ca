@@ -82,9 +82,7 @@ $ledgerHasStatApproval = function_exists('pe_t4127_col') && pe_t4127_col($pdo, '
 $ledgerApprovalSelect = $ledgerHasStatApproval
     ? "COALESCE(f.stat_approval_status,'') AS stat_approval_status"
     : "'' AS stat_approval_status";
-$ledgerApprovalExclude = $ledgerHasStatApproval
-    ? "COALESCE(f.stat_approval_status,'') <> 'pending'"
-    : '1=1';
+$ledgerApprovalExclude = '1=1';
 
 if (file_exists('engine/menu_generator.php')) { require_once 'engine/menu_generator.php'; }
 
@@ -203,7 +201,8 @@ function apply_payment(PDO $pdo, int $line_id, float $amount, string $method, in
     $q->execute([$org_id, $line_id]);
     $line = $q->fetch(PDO::FETCH_ASSOC);
     if (!$line) { return 0.0; }
-    if (strcasecmp((string)($line['stat_approval_status'] ?? ''), 'pending') === 0) { return 0.0; }
+    $lineState = strtolower(trim((string)($line['stat_approval_status'] ?? '')));
+    if ($lineState === 'pending' || $lineState === 'ignored') { return 0.0; }
 
     $net       = net_payable_line($line);
     $paid_now  = (float)$line['db_paid_amount'];
@@ -390,6 +389,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_selected_payo
     header("Location: $redir&msg=selected_paid&n=$paid_count"); exit;
 }
 
+// ---------------------------------------------------------------- LINE STATE (Approve / Pending / Ignore / In pay)
+if (is_file(__DIR__ . '/payroll_engine/stat_holidays.php')) {
+    require_once __DIR__ . '/payroll_engine/stat_holidays.php';
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_stat_line'])) {
+    $lineId = (int)($_POST['line_id'] ?? 0);
+    if ($sess_user_level >= 30 || $lineId <= 0) {
+        header("Location: $redir&msg=stat_approve"); exit;
+    }
+    try {
+        $approved = function_exists('sh_approve_ledger_stat')
+            ? sh_approve_ledger_stat($pdo, $user_org_id, $lineId, (int)($_SESSION['user_id'] ?? 0))
+            : false;
+    } catch (Throwable $e) {
+        die('Could not approve that stat line: ' . htmlspecialchars($e->getMessage()));
+    }
+    header("Location: $redir&msg=" . ($approved ? 'stat_approved' : 'stat_approve')); exit;
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['set_line_state'])) {
+    $state = (string)$_POST['set_line_state'];
+    $lineId = (int)($_POST['line_id'] ?? 0);
+    if (!in_array($state, ['pending', 'ignored', 'approved'], true) || $lineId <= 0) {
+        header("Location: $redir&msg=line_state"); exit;
+    }
+    try {
+        if ($state === 'approved' && function_exists('sh_approve_ledger_stat')) {
+            $approved = sh_approve_ledger_stat($pdo, $user_org_id, $lineId, (int)($_SESSION['user_id'] ?? 0));
+            if ($approved === false) {
+                header("Location: $redir&msg=stat_approve"); exit;
+            }
+            if ($approved === true) {
+                header("Location: $redir&msg=stat_approved"); exit;
+            }
+        }
+        if (function_exists('sh_set_payroll_line_state')) {
+            sh_set_payroll_line_state($pdo, $user_org_id, $lineId, $state);
+        }
+    } catch (Throwable $e) {
+        die('Could not change that line: ' . htmlspecialchars($e->getMessage()));
+    }
+    header("Location: $redir&msg=line_state"); exit;
+}
+
 // ---------------------------------------------------------------- PAY FULL PERIOD (per employee + selected bucket)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['execute_period_payout'])) {
     $uid    = (int)($_POST['period_user_id'] ?? 0);
@@ -450,7 +492,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['export_qb_matrix'])) 
     $lines = $q->fetchAll(PDO::FETCH_ASSOC);
     if (count($lines) !== count($ids)) { http_response_code(403); exit('One or more export rows are outside your organization.'); }
     $lines = array_values(array_filter($lines, static function ($r) {
-        return strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') !== 0;
+        $lineState = strtolower(trim((string)($r['stat_approval_status'] ?? '')));
+        return $lineState !== 'pending' && $lineState !== 'ignored';
     }));
 
     $opts       = json_decode($profile['je_options'] ?? '[]', true) ?: [];
@@ -565,9 +608,13 @@ foreach ($raw as $r) {
     if ($balance_scope === 'outstanding' && $remaining <= 0.01) continue;
     if ($balance_scope === 'zero'        && $remaining > 0.01)  continue;
 
-    $needsApproval = strcasecmp((string)($r['stat_approval_status'] ?? ''), 'pending') === 0;
-    $payRemaining = $needsApproval ? 0.0 : $remaining;
+    $lineState = strtolower(trim((string)($r['stat_approval_status'] ?? '')));
+    $needsApproval = $lineState === 'pending';
+    $lineIgnored = $lineState === 'ignored';
+    $outOfPay = $needsApproval || $lineIgnored;
+    $payRemaining = $outOfPay ? 0.0 : $remaining;
     $r['_needs_approval'] = $needsApproval;
+    $r['_ignored'] = $lineIgnored;
     $r['_ee']        = ee_deduct($r);
     $r['_er']        = (float)$r['er_cpp'] + (float)($r['er_cpp2'] ?? 0) + (float)$r['er_ei'] + (float)$r['er_wcb'] + (float)$r['er_vac'];
     $r['_net']       = $net;
@@ -598,24 +645,24 @@ foreach ($raw as $r) {
                                              'has_stat'=>false, 't_stat_alloc'=>0, 'lines'=>[]];
     }
 
-    $lineGross = $needsApproval ? 0.0 : (float)$r['total_gross'];
-    $lineNet = $needsApproval ? 0.0 : $net;
-    $linePaid = $needsApproval ? 0.0 : $paid;
-    $lineAwait = $needsApproval ? (float)$r['total_gross'] : 0.0;
-    $lineEe = $needsApproval ? 0.0 : $r['_ee'];
-    $lineTax = $needsApproval ? 0.0 : (float)$r['ee_tax'];
-    $lineCpp = $needsApproval ? 0.0 : (float)$r['ee_cpp'];
-    $lineEi = $needsApproval ? 0.0 : (float)$r['ee_ei'];
-    $lineEr = $needsApproval ? 0.0 : $r['_er'];
-    $lineErCpp = $needsApproval ? 0.0 : (float)$r['er_cpp'];
-    $lineErEi = $needsApproval ? 0.0 : (float)$r['er_ei'];
-    $lineWcb = $needsApproval ? 0.0 : (float)$r['er_wcb'];
-    $lineVac = $needsApproval ? 0.0 : (float)$r['er_vac'];
-    if ($needsApproval) {
+    $lineGross = $outOfPay ? 0.0 : (float)$r['total_gross'];
+    $lineNet = $outOfPay ? 0.0 : $net;
+    $linePaid = $outOfPay ? 0.0 : $paid;
+    $lineAwait = $outOfPay ? (float)$r['total_gross'] : 0.0;
+    $lineEe = $outOfPay ? 0.0 : $r['_ee'];
+    $lineTax = $outOfPay ? 0.0 : (float)$r['ee_tax'];
+    $lineCpp = $outOfPay ? 0.0 : (float)$r['ee_cpp'];
+    $lineEi = $outOfPay ? 0.0 : (float)$r['ee_ei'];
+    $lineEr = $outOfPay ? 0.0 : $r['_er'];
+    $lineErCpp = $outOfPay ? 0.0 : (float)$r['er_cpp'];
+    $lineErEi = $outOfPay ? 0.0 : (float)$r['er_ei'];
+    $lineWcb = $outOfPay ? 0.0 : (float)$r['er_wcb'];
+    $lineVac = $outOfPay ? 0.0 : (float)$r['er_vac'];
+    if ($outOfPay) {
         $reg_h = 0.0;
         $stat_h = 0.0;
     }
-    if ($is_alloc && !$needsApproval) {
+    if ($is_alloc && !$outOfPay) {
         $sites_tree[$sname]['emps'][$uid]['has_stat'] = true;
         $sites_tree[$sname]['emps'][$uid]['t_stat_alloc'] += (float)$r['total_gross'];
     }
@@ -626,10 +673,10 @@ foreach ($raw as $r) {
         $ref[0]['t_paid']     += $linePaid;
         $ref[0]['t_rem']      += $payRemaining;
         $ref[0]['t_reg_h']    += $reg_h;
-        $ref[0]['t_ot_h']     += $needsApproval ? 0.0 : $ot_h;
-        $ref[0]['t_travel_h'] += $needsApproval ? 0.0 : $trav_h;
+        $ref[0]['t_ot_h']     += $outOfPay ? 0.0 : $ot_h;
+        $ref[0]['t_travel_h'] += $outOfPay ? 0.0 : $trav_h;
         $ref[0]['t_stat_h']   += $stat_h;
-        $ref[0]['t_stat_cost']+= ($is_stat && !$needsApproval) ? (float)$r['total_gross'] : 0;
+        $ref[0]['t_stat_cost']+= ($is_stat && !$outOfPay) ? (float)$r['total_gross'] : 0;
         $ref[0]['t_await']    += $lineAwait;
         $ref[0]['t_ee']       += $lineEe;
         $ref[0]['t_ee_tax']   += $lineTax;
@@ -644,10 +691,10 @@ foreach ($raw as $r) {
     $period_tot['gross']    += $lineGross;
     $period_tot['net']      += $lineNet;
     $period_tot['reg_h']    += $reg_h;
-    $period_tot['ot_h']     += $needsApproval ? 0.0 : $ot_h;
-    $period_tot['travel_h'] += $needsApproval ? 0.0 : $trav_h;
+    $period_tot['ot_h']     += $outOfPay ? 0.0 : $ot_h;
+    $period_tot['travel_h'] += $outOfPay ? 0.0 : $trav_h;
     $period_tot['stat_h']   += $stat_h;
-    $period_tot['stat_cost']+= ($is_stat && !$needsApproval) ? (float)$r['total_gross'] : 0;
+    $period_tot['stat_cost']+= ($is_stat && !$outOfPay) ? (float)$r['total_gross'] : 0;
     $period_tot['await']    += $lineAwait;
     $period_tot['paid']  += $linePaid;
     $period_tot['rem']   += $payRemaining;
@@ -1120,13 +1167,23 @@ function ledgerOnOrgChange(sel){
                                         <?php if (!empty($r['_needs_approval'])): ?><span class="badge badge-warning">Needs approval</span><?php endif; ?>
                                         <?php if (preg_match('/FLAG:\s*([^.]+)/', (string)($r['comments'] ?? ''), $flagMatch)): ?><div class="small font-weight-bold" style="color:#92400e;"><?=htmlspecialchars(trim($flagMatch[1]))?></div><?php endif; ?>
                                         <?php if ($is_travel_row): ?><span class="travel-badge"><i class="fa fa-car"></i> Travel</span><?php endif; ?>
-                                        <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($r['display_label'] ?? 'Regular')?></div>
+                                        <?php
+                                        $splitText = function_exists('sh_split_sentence') ? sh_split_sentence((string)($r['comments'] ?? '')) : '';
+                                        $holidayLabel = $is_holiday_row && function_exists('sh_public_holiday_label')
+                                            ? sh_public_holiday_label((float)$r['total_gross'], (float)$r['hourly_rate'], (float)$r['reg_hours'])
+                                            : (string)($r['display_label'] ?? 'Regular');
+                                        ?>
+                                        <div class="text-muted small font-weight-normal" style="padding-left:24px;"><?=htmlspecialchars($holidayLabel)?></div>
                                     </td>
                                     <td class="text-left small text-secondary">
-                                        <?php if (!$is_stat_row || ledger_stat_visible((float)$r['reg_hours'])): ?><?= $is_stat_row ? 'Statutory equivalent' : 'Regular' ?>: <?=number_format($r['reg_hours'],2)?>h<?php endif; ?>
+                                        <?php if ($splitText !== ''): ?>
+                                            <span class="font-weight-bold" style="color:#1e3a8a;"><?=htmlspecialchars($splitText)?></span>
+                                        <?php elseif (!$is_holiday_row && (!$is_stat_row || ledger_stat_visible((float)$r['reg_hours']))): ?>
+                                            Regular: <?=number_format($r['reg_hours'],2)?>h
+                                        <?php endif; ?>
                                         <?php if ((float)$r['overtime_hours']>0): ?><br><span class="text-danger">OT: <?=number_format($r['overtime_hours'],2)?>h</span><?php endif; ?>
                                         <?php if ((float)$r['travel_hours']>0): ?><br><span class="text-info">Travel: <?=number_format($r['travel_hours'],2)?>h</span><?php endif; ?>
-                                        <br><small class="text-muted">Total: <?=number_format($total_units,2)?>h</small>
+                                        <?php if ($splitText === '' && !$is_holiday_row): ?><br><small class="text-muted">Total: <?=number_format($total_units,2)?>h</small><?php endif; ?>
                                     </td>
                                     <td style="font-size:12px;" class="text-dark">$<?=number_format($r['total_gross'],2)?></td>
                                     <td class="text-left">
@@ -1150,8 +1207,10 @@ function ledgerOnOrgChange(sel){
                                     <td class="text-info" style="font-size:12px;">$<?=number_format($r['_paid'],2)?></td>
                                     <td style="font-size:12px; color:<?=$rem>0.01?'#dc2626':'#16a34a'?>;">$<?=number_format($rem,2)?></td>
                                     <td>
-                                        <?php if (!empty($r['_needs_approval'])): ?>
-                                            <span class="badge badge-warning">Needs approval</span>
+                                        <?php if (!empty($r['_ignored'])): ?>
+                                            <span class="badge badge-secondary">Ignored</span>
+                                        <?php elseif (!empty($r['_needs_approval'])): ?>
+                                            <span class="badge badge-warning">Pending</span>
                                         <?php elseif ($rem > 0.01): ?>
                                             <form method="POST" action="" class="mb-0">
                                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
@@ -1166,6 +1225,18 @@ function ledgerOnOrgChange(sel){
                                         <?php endif; ?>
                                     </td>
                                     <td>
+                                        <form method="POST" action="" class="mb-1">
+                                            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
+                                            <input type="hidden" name="line_id" value="<?=(int)$r['line_id']?>">
+                                            <?php if ($is_holiday_row && $sess_user_level < 30 && (!empty($r['_needs_approval']) || !empty($r['_ignored']))): ?>
+                                                <button type="submit" name="approve_stat_line" value="1" class="btn btn-sm btn-success py-0" style="font-size:10px;">Approve</button>
+                                            <?php endif; ?>
+                                            <button type="submit" name="set_line_state" value="pending" class="btn btn-sm btn-outline-warning py-0" style="font-size:10px;">Pending</button>
+                                            <button type="submit" name="set_line_state" value="ignored" class="btn btn-sm btn-outline-secondary py-0" style="font-size:10px;">Ignore</button>
+                                            <?php if (!$is_holiday_row && (!empty($r['_needs_approval']) || !empty($r['_ignored']))): ?>
+                                                <button type="submit" name="set_line_state" value="approved" class="btn btn-sm btn-outline-success py-0" style="font-size:10px;">In pay</button>
+                                            <?php endif; ?>
+                                        </form>
                                         <?php if ((int)($r['attendance_id'] ?? 0) > 0): ?>
                                             <form method="POST" action="" class="mb-0" onsubmit="return confirm('Send this record back to Step 1 Staff Audit?');">
                                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars(ps_csrf_token())?>">
@@ -1173,7 +1244,7 @@ function ledgerOnOrgChange(sel){
                                                 <button type="submit" name="send_back_to_audit" class="btn btn-sm btn-outline-danger" style="font-size:10px; font-weight:bold;"><i class="fas fa-undo-alt"></i> Send Back</button>
                                             </form>
                                             <?php if ($rem <= 0.01): ?><input type="hidden" class="qb-buffer-source-node" value="<?=$r['line_id']?>"><?php endif; ?>
-                                        <?php else: ?>
+                                        <?php elseif (!$is_holiday_row): ?>
                                             <span class="text-muted font-italic small">Batch Block</span>
                                         <?php endif; ?>
                                     </td>
